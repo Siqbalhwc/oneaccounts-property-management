@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-paper text-ink font-body antialiased;
+  }
+
+  h1, h2, h3, h4 {
+    @apply font-display text-ink;
+  }
+
+  /* Ledger-style thin rule, used as a section divider throughout the app --
+     a nod to the red margin rule down the side of a physical ledger page. */
+  .ledger-rule {
+    border-top: 2px solid theme("colors.rule");
+    position: relative;
+  }
+  .ledger-rule::before {
+    content: "";
+    position: absolute;
+    top: -2px;
+    left: 0;
+    width: 32px;
+    height: 2px;
+    background: theme("colors.brass.DEFAULT");
+  }
+
+  /* Tabular figures for anything numeric: amounts, CNIC, invoice numbers */
+  .figures {
+    font-family: var(--font-plex-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
+  }
+
+  :focus-visible {
+    outline: 2px solid theme("colors.brass.dark");
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-paper-card border border-border rounded-card shadow-card;
+  }
+
+  /* Signature element: an ink-stamp status badge. Rotated slightly, borderd
+     like a rubber stamp, colored per status. This is the one place the UI
+     allows itself a little personality -- everywhere else stays quiet. */
+  .stamp {
+    @apply inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-mono uppercase tracking-wider font-semibold rounded-[2px];
+    border: 1.5px solid currentColor;
+    transform: rotate(-2deg);
+    background: color-mix(in srgb, currentColor 8%, transparent);
+  }
+  .stamp-paid { @apply text-stamp-green; }
+  .stamp-overdue { @apply text-stamp-red; }
+  .stamp-pending { @apply text-stamp-amber; }
+  .stamp-active { @apply text-stamp-green; }
+  .stamp-terminated { @apply text-stamp-slate; }
+  .stamp-held { @apply text-stamp-amber; }
+  .stamp-refunded { @apply text-stamp-green; }
+}

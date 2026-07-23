@@ -1,0 +1,21 @@
+# Environment files (secrets - never commit these)
+.env
+.env.local
+**/.env
+**/.env.local
+
+# Python
+venv/
+__pycache__/
+*.pyc
+backend/venv/
+
+# Node / Next.js
+node_modules/
+.next/
+frontend/node_modules/
+frontend/.next/
+
+# OS files
+.DS_Store
+Thumbs.db
