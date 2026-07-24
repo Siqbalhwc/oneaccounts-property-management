@@ -8,6 +8,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Field, Input, Select } from "@/components/ui/Field";
 
 const NEW_FLOOR_VALUE = "__new__";
+const NEW_TYPE_VALUE = "__new_type__";
 
 export default function BuildingsPage() {
   const [buildings, setBuildings] = useState<Building[] | null>(null);
@@ -33,7 +34,8 @@ export default function BuildingsPage() {
     new_floor_number: "",
     new_floor_name: "",
     room_number: "",
-    room_type: "",
+    room_type_select: "",
+    room_type_custom: "",
     base_rent: "",
   });
 
@@ -71,6 +73,13 @@ export default function BuildingsPage() {
     }
   }
 
+  // Room types already used anywhere in the company -- offered as a dropdown
+  // so "2-bed apartment", "2 Bed Apartment", "2bed apt" don't all end up as
+  // different values scattered across rooms.
+  const existingRoomTypes = Array.from(
+    new Set((rooms ?? []).map((r) => r.room_type).filter((t): t is string => !!t))
+  ).sort();
+
   function openRoomModal() {
     setRoomError(null);
     const existingFloor = floorsForSelected[0];
@@ -79,7 +88,8 @@ export default function BuildingsPage() {
       new_floor_number: String((floorsForSelected.length || 0) + 1),
       new_floor_name: "",
       room_number: "",
-      room_type: "",
+      room_type_select: existingRoomTypes[0] || NEW_TYPE_VALUE,
+      room_type_custom: "",
       base_rent: "",
     });
     setRoomModalOpen(true);
@@ -102,11 +112,16 @@ export default function BuildingsPage() {
         floorId = newFloor.id;
       }
 
+      const roomType =
+        roomForm.room_type_select === NEW_TYPE_VALUE
+          ? roomForm.room_type_custom.trim()
+          : roomForm.room_type_select;
+
       await api.post("/rooms", {
         building_id: selected,
         floor_id: floorId,
         room_number: roomForm.room_number,
-        room_type: roomForm.room_type || undefined,
+        room_type: roomType || undefined,
         base_rent: roomForm.base_rent ? parseFloat(roomForm.base_rent) : undefined,
       });
 
@@ -124,7 +139,7 @@ export default function BuildingsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-display font-semibold">Buildings & rooms</h1>
           <p className="text-sm text-ink/55 mt-1">
@@ -135,8 +150,8 @@ export default function BuildingsPage() {
       </div>
 
       {buildings && buildings.length > 0 && (
-        <div className="flex items-center justify-between border-b border-border">
-          <div className="flex gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border">
+          <div className="flex gap-2 flex-wrap">
             {buildings.map((b) => (
               <button
                 key={b.id}
@@ -179,7 +194,7 @@ export default function BuildingsPage() {
               <p className="text-xs text-ink/50">{room.room_type ?? "Unit"}</p>
               {room.base_rent && (
                 <p className="text-sm figures mt-2 text-ink/70">
-                  Rs {room.base_rent.toLocaleString("en-PK")}/mo
+                  Rs {Number(room.base_rent).toLocaleString("en-PK")}/mo
                 </p>
               )}
             </div>
@@ -275,13 +290,39 @@ export default function BuildingsPage() {
               onChange={(e) => setRoomForm({ ...roomForm, room_number: e.target.value })}
             />
           </Field>
-          <Field label="Room type (optional)">
-            <Input
-              placeholder="e.g. 2-bed apartment, studio, shop"
-              value={roomForm.room_type}
-              onChange={(e) => setRoomForm({ ...roomForm, room_type: e.target.value })}
-            />
+
+          <Field
+            label="Room type"
+            hint={
+              existingRoomTypes.length > 0
+                ? "Pick an existing type to keep naming consistent, or add a new one."
+                : undefined
+            }
+          >
+            <Select
+              value={roomForm.room_type_select}
+              onChange={(e) => setRoomForm({ ...roomForm, room_type_select: e.target.value })}
+            >
+              {existingRoomTypes.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+              <option value={NEW_TYPE_VALUE}>+ Add a new type…</option>
+            </Select>
           </Field>
+
+          {roomForm.room_type_select === NEW_TYPE_VALUE && (
+            <Field label="New room type name">
+              <Input
+                required
+                placeholder="e.g. 2-bed apartment, studio, shop"
+                value={roomForm.room_type_custom}
+                onChange={(e) => setRoomForm({ ...roomForm, room_type_custom: e.target.value })}
+              />
+            </Field>
+          )}
+
           <Field label="Base rent (optional)" hint="A reference amount — the real rent is set per-lease.">
             <Input
               type="number"

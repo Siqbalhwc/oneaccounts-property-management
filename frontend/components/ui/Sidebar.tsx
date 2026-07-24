@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { Company } from "@/lib/api";
 
 const NAV_SECTIONS = [
   {
@@ -31,14 +32,26 @@ const NAV_SECTIONS = [
   },
 ];
 
-export function Sidebar() {
+export function Sidebar({ company }: { company: Company | null }) {
   const pathname = usePathname();
 
   return (
     <aside className="w-60 shrink-0 bg-ledger text-paper min-h-screen flex flex-col">
-      <div className="px-5 py-6 border-b border-paper/10">
-        <p className="font-display text-lg font-semibold tracking-tight">Ledger</p>
-        <p className="text-xs text-paper/50 mt-0.5">Property Management</p>
+      <div className="px-5 py-6 border-b border-paper/10 flex items-center gap-3">
+        {company?.logo_url ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={company.logo_url}
+            alt={company.name}
+            className="w-9 h-9 rounded-card object-contain bg-paper/10 shrink-0"
+          />
+        ) : null}
+        <div className="min-w-0">
+          <p className="font-display text-base font-semibold tracking-tight truncate">
+            {company?.name || "Ledger"}
+          </p>
+          <p className="text-xs text-paper/50 mt-0.5">Property Management</p>
+        </div>
       </div>
 
       <nav className="flex-1 px-3 py-5 space-y-6">
@@ -71,7 +84,7 @@ export function Sidebar() {
       </nav>
 
       <div className="px-5 py-4 border-t border-paper/10">
-        <p className="text-[11px] text-paper/40">Sunrise Estates Pvt. Ltd.</p>
+        <p className="text-[11px] text-paper/40 truncate">{company?.name || ""}</p>
       </div>
     </aside>
   );
