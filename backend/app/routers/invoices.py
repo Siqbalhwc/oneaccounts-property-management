@@ -206,42 +206,85 @@ def invoice_pdf(invoice_id: str, supabase: Client = Depends(get_supabase)):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
-    y = height - 25 * mm
 
-    # Letterhead: logo (if present) + company name/address/phone
+    # Brand colors (same palette as the app)
+    LEDGER = (0.184, 0.310, 0.239)   # #2F4F3D
+    BRASS = (0.784, 0.608, 0.361)    # #C89B5C
+    INK = (0.122, 0.176, 0.141)      # #1F2D24
+    PAPER = (0.953, 0.949, 0.902)    # #F3F1E6
+    STATUS_COLORS = {
+        "paid": (0.184, 0.310, 0.239),
+        "sent": (0.722, 0.525, 0.180),
+        "draft": (0.722, 0.525, 0.180),
+        "partial": (0.722, 0.525, 0.180),
+        "overdue": (0.651, 0.239, 0.251),
+        "cancelled": (0.337, 0.373, 0.353),
+    }
+
+    # --- Header band ---
+    band_height = 38 * mm
+    c.setFillColorRGB(*LEDGER)
+    c.rect(0, height - band_height, width, band_height, fill=1, stroke=0)
+
+    text_x = 20 * mm
     if company.get("logo_url"):
         try:
             with urllib.request.urlopen(company["logo_url"], timeout=5) as resp:
                 logo_bytes = io.BytesIO(resp.read())
+            logo_size = 22 * mm
             c.drawImage(
                 ImageReader(logo_bytes),
                 20 * mm,
-                y - 10 * mm,
-                width=25 * mm,
-                height=25 * mm,
+                height - band_height / 2 - logo_size / 2,
+                width=logo_size,
+                height=logo_size,
                 preserveAspectRatio=True,
                 mask="auto",
             )
+            text_x = 20 * mm + logo_size + 8 * mm
         except Exception:
             pass  # logo fetch failed -- fall back to text-only letterhead
 
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(50 * mm, y, company.get("name") or "")
+    c.setFillColorRGB(1, 1, 1)
+    c.setFont("Helvetica-Bold", 17)
+    c.drawString(text_x, height - 16 * mm, company.get("name") or "")
     c.setFont("Helvetica", 9)
+    c.setFillColorRGB(0.9, 0.92, 0.9)
+    line_y = height - 23 * mm
     if company.get("address"):
-        y -= 6 * mm
-        c.drawString(50 * mm, y, company["address"])
+        c.drawString(text_x, line_y, company["address"])
+        line_y -= 5 * mm
     if company.get("phone"):
-        y -= 5 * mm
-        c.drawString(50 * mm, y, company["phone"])
+        c.drawString(text_x, line_y, company["phone"])
 
-    y -= 15 * mm
-    c.setFont("Helvetica-Bold", 14)
+    # --- Invoice title + status badge ---
+    y = height - band_height - 14 * mm
+    c.setFillColorRGB(*INK)
+    c.setFont("Helvetica-Bold", 15)
     c.drawString(20 * mm, y, "INVOICE")
-    c.setFont("Helvetica", 10)
-    c.drawRightString(width - 20 * mm, y, f"Status: {invoice['status'].upper()}")
+
+    status = invoice["status"]
+    status_color = STATUS_COLORS.get(status, (0.34, 0.37, 0.35))
+    badge_text = status.upper()
+    c.setFont("Helvetica-Bold", 9)
+    badge_width = c.stringWidth(badge_text, "Helvetica-Bold", 9) + 10 * mm
+    badge_x = width - 20 * mm - badge_width
+    c.setFillColorRGB(*status_color)
+    c.roundRect(badge_x, y - 3 * mm, badge_width, 8 * mm, 1.5 * mm, fill=1, stroke=0)
+    c.setFillColorRGB(1, 1, 1)
+    c.drawCentredString(badge_x + badge_width / 2, y - 0.5 * mm, badge_text)
+
+    # --- Brass accent rule (echoes the app's "ledger-rule" divider) ---
+    y -= 10 * mm
+    c.setStrokeColorRGB(*BRASS)
+    c.setLineWidth(2)
+    c.line(20 * mm, y, 20 * mm + 12 * mm, y)
+    c.setStrokeColorRGB(0.86, 0.84, 0.77)
+    c.setLineWidth(0.75)
+    c.line(20 * mm + 12 * mm, y, width - 20 * mm, y)
 
     y -= 8 * mm
+    c.setFillColorRGB(*INK)
     c.setFont("Helvetica", 10)
     c.drawString(20 * mm, y, f"Invoice month: {invoice['invoice_month']}")
     c.drawRightString(width - 20 * mm, y, f"Due date: {invoice['due_date']}")
@@ -253,15 +296,19 @@ def invoice_pdf(invoice_id: str, supabase: Client = Depends(get_supabase)):
     c.setFont("Helvetica", 10)
     c.drawString(20 * mm, y, tenant.get("full_name") or "")
     y -= 5 * mm
+    c.setFillColorRGB(0.3, 0.34, 0.32)
     c.drawString(20 * mm, y, f"CNIC: {tenant.get('cnic') or ''}")
     y -= 5 * mm
     c.drawString(20 * mm, y, f"{building.get('name') or ''} — Room {room.get('room_number') or ''}")
+    c.setFillColorRGB(*INK)
 
     y -= 14 * mm
     c.setFont("Helvetica-Bold", 10)
     c.drawString(20 * mm, y, "Description")
     c.drawRightString(width - 20 * mm, y, "Amount")
     y -= 3 * mm
+    c.setStrokeColorRGB(*INK)
+    c.setLineWidth(0.75)
     c.line(20 * mm, y, width - 20 * mm, y)
 
     c.setFont("Helvetica", 10)
@@ -273,14 +320,21 @@ def invoice_pdf(invoice_id: str, supabase: Client = Depends(get_supabase)):
         c.drawString(20 * mm, y, item["label"])
         c.drawRightString(width - 20 * mm, y, f"Rs {amount:,.0f}")
 
-    y -= 4 * mm
+    y -= 5 * mm
+    c.setStrokeColorRGB(*INK)
     c.line(20 * mm, y, width - 20 * mm, y)
-    y -= 8 * mm
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(20 * mm, y, "Total")
-    c.drawRightString(width - 20 * mm, y, f"Rs {float(invoice['total_amount']):,.0f}")
+
+    # --- Total, in a shaded band for emphasis ---
+    y -= 12 * mm
+    c.setFillColorRGB(*PAPER)
+    c.rect(20 * mm, y - 3 * mm, width - 40 * mm, 11 * mm, fill=1, stroke=0)
+    c.setFillColorRGB(*LEDGER)
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(24 * mm, y, "Total")
+    c.drawRightString(width - 24 * mm, y, f"Rs {float(invoice['total_amount']):,.0f}")
 
     y -= 20 * mm
+    c.setFillColorRGB(0.4, 0.43, 0.41)
     c.setFont("Helvetica-Oblique", 8)
     c.drawString(20 * mm, y, "Thank you for your prompt payment.")
 
