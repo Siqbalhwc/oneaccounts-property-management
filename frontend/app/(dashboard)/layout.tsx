@@ -2,17 +2,26 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { Menu } from "lucide-react";
 import { supabase } from "@/lib/supabaseClient";
 import { Sidebar } from "@/components/ui/Sidebar";
 import { Company } from "@/lib/api";
 
 type ProfileInfo = { full_name: string; role: string; company_id: string };
 
+function greeting() {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good morning";
+  if (hour < 17) return "Good afternoon";
+  return "Good evening";
+}
+
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [profile, setProfile] = useState<ProfileInfo | null>(null);
   const [company, setCompany] = useState<Company | null>(null);
   const [checking, setChecking] = useState(true);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   useEffect(() => {
     async function checkSessionAndLoadProfile() {
@@ -32,9 +41,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
       if (profileRow) {
         setProfile(profileRow as ProfileInfo);
-        // Fetched directly via Supabase (not the backend API) so the sidebar
-        // renders immediately without waiting on a round trip to Vercel's
-        // serverless backend -- this is part of what was making the app feel slow.
         const { data: companyRow } = await supabase
           .from("companies")
           .select("id, name, address, phone, logo_url")
@@ -47,7 +53,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
     checkSessionAndLoadProfile();
 
-    // Also react to sign-out happening in another tab
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!session) router.replace("/login");
     });
@@ -75,15 +80,27 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         .slice(0, 2)
         .toUpperCase()
     : "?";
+  const firstName = profile?.full_name?.split(" ")[0] ?? "";
 
   return (
     <div className="flex min-h-screen">
-      <Sidebar company={company} />
+      <Sidebar company={company} mobileOpen={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="h-16 border-b border-border bg-paper-card flex items-center justify-between px-6 shrink-0">
-          <div />
-          <div className="flex items-center gap-3">
-            <div className="text-right">
+        <header className="no-print h-16 border-b border-border bg-paper-card flex items-center justify-between px-4 sm:px-6 shrink-0">
+          <div className="flex items-center gap-3 min-w-0">
+            <button
+              onClick={() => setMobileNavOpen(true)}
+              className="lg:hidden text-ink/60 hover:text-ink shrink-0"
+              aria-label="Open menu"
+            >
+              <Menu size={22} />
+            </button>
+            <p className="text-sm text-ink/60 truncate hidden sm:block">
+              {greeting()}{firstName ? `, ${firstName}` : ""}.
+            </p>
+          </div>
+          <div className="flex items-center gap-3 shrink-0">
+            <div className="text-right hidden sm:block">
               <p className="text-sm font-medium leading-tight">
                 {profile?.full_name ?? "Unknown user"}
               </p>
@@ -91,18 +108,20 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 {profile?.role ?? "—"}
               </p>
             </div>
-            <div className="w-8 h-8 rounded-full bg-brass/20 border border-brass/40 flex items-center justify-center text-xs font-display font-semibold text-brass-dark">
+            <div className="w-8 h-8 rounded-full bg-brass/20 border border-brass/40 flex items-center justify-center text-xs font-display font-semibold text-brass-dark shrink-0">
               {initials}
             </div>
             <button
               onClick={handleSignOut}
-              className="text-xs text-ink/50 hover:text-stamp-red transition-colors ml-2"
+              className="text-xs text-ink/50 hover:text-stamp-red transition-colors ml-1 whitespace-nowrap"
             >
               Sign out
             </button>
           </div>
         </header>
-        <main className="flex-1 px-6 py-6 max-w-6xl w-full mx-auto">{children}</main>
+        <main className="content flex-1 px-4 sm:px-6 py-6 max-w-6xl w-full mx-auto">
+          {children}
+        </main>
       </div>
     </div>
   );

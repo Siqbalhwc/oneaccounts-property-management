@@ -61,4 +61,37 @@
   .stamp-terminated { @apply text-stamp-slate; }
   .stamp-held { @apply text-stamp-amber; }
   .stamp-refunded { @apply text-stamp-green; }
+
+  /* Hides a scrollbar visually while keeping the element scrollable --
+     used on horizontally-scrolling tab bars so a sliver of scrollbar
+     doesn't show up on screens where the tabs are slightly wider than
+     the viewport. */
+  .scrollbar-hide {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Printing: hide navigation chrome and let the current report/page fill
+   the page. Anything meant to disappear when printed gets .no-print. */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body, .content {
+    background: white !important;
+  }
+  .content {
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  .card {
+    border: 1px solid #ccc !important;
+    box-shadow: none !important;
+    break-inside: avoid;
+  }
 }
