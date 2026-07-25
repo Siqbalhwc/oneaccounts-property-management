@@ -16,7 +16,7 @@ class GenerateRequest(BaseModel):
     due_in_days: int = 7
 
 
-@router.get("/")
+@router.get("")
 def list_invoices(supabase: Client = Depends(get_supabase)):
     return supabase.table("invoices").select("*").order("invoice_month", desc=True).execute().data
 

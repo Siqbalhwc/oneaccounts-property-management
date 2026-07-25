@@ -20,7 +20,7 @@ class PayRequest(BaseModel):
     paid_date: Optional[date] = None
 
 
-@router.get("/")
+@router.get("")
 def list_ledger(supabase: Client = Depends(get_supabase)):
     return supabase.table("owner_ledger").select("*").order("ledger_month", desc=True).execute().data
 

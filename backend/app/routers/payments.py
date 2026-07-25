@@ -8,12 +8,12 @@ from app.core.deps import get_current_company_id, get_supabase
 router = APIRouter(prefix="/payments", tags=["Payments"])
 
 
-@router.get("/")
+@router.get("")
 def list_payments(supabase: Client = Depends(get_supabase)):
     return supabase.table("payments").select("*").order("payment_date", desc=True).execute().data
 
 
-@router.post("/", status_code=201)
+@router.post("", status_code=201)
 def record_payment(
     payload: Dict[str, Any],
     supabase: Client = Depends(get_supabase),

@@ -53,7 +53,7 @@ def friendly_db_error(e: APIError) -> tuple[int, str]:
 def build_crud_router(table: str, tags: list[str]) -> APIRouter:
     router = APIRouter(prefix=f"/{table}", tags=tags)
 
-    @router.get("/")
+    @router.get("")
     def list_all(supabase: Client = Depends(get_supabase)):
         res = supabase.table(table).select("*").order("created_at", desc=True).execute()
         return res.data
@@ -65,7 +65,7 @@ def build_crud_router(table: str, tags: list[str]) -> APIRouter:
             raise HTTPException(status_code=404, detail="Not found")
         return res.data
 
-    @router.post("/", status_code=201)
+    @router.post("", status_code=201)
     def create(
         payload: Dict[str, Any],
         supabase: Client = Depends(get_supabase),

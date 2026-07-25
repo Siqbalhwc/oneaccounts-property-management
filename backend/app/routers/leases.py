@@ -41,7 +41,7 @@ class TerminateRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
-@router.get("/")
+@router.get("")
 def list_leases(supabase: Client = Depends(get_supabase)):
     res = supabase.table("leases").select("*").order("created_at", desc=True).execute()
     return res.data
@@ -55,7 +55,7 @@ def get_lease(lease_id: str, supabase: Client = Depends(get_supabase)):
     return res.data
 
 
-@router.post("/", status_code=201)
+@router.post("", status_code=201)
 def create_lease(
     payload: LeaseCreate,
     supabase: Client = Depends(get_supabase),

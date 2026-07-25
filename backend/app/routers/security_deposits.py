@@ -20,7 +20,7 @@ class RefundRequest(BaseModel):
     refund_date: date | None = None
 
 
-@router.get("/")
+@router.get("")
 def list_deposits(supabase: Client = Depends(get_supabase)):
     return supabase.table("security_deposits").select("*").execute().data
 
