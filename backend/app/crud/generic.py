@@ -35,7 +35,7 @@ def friendly_db_error(e: APIError) -> tuple[int, str]:
             pairs = [
                 f"{f} '{v}'"
                 for f, v in zip(fields, values)
-                if f != "company_id"  # internal detail, not meaningful to the user
+                if not f.endswith("_id")  # foreign keys (UUIDs) aren't meaningful to show the user
             ]
             if pairs:
                 return 409, f"Already exists with {', '.join(pairs)}."

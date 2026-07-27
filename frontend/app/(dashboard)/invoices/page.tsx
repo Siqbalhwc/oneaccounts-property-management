@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, Invoice, Lease, fetchPdfBlob } from "@/lib/api";
+import { api, Invoice, Lease, Building, fetchPdfBlob } from "@/lib/api";
 import { Card, DataTable } from "@/components/ui/Card";
 import { StampBadge } from "@/components/ui/StampBadge";
 import { Button } from "@/components/ui/Button";
@@ -14,8 +14,18 @@ function formatPkr(n: number) {
 
 export default function InvoicesPage() {
   const [invoices, setInvoices] = useState<Invoice[] | null>(null);
-  const [generating, setGenerating] = useState(false);
+  const [buildings, setBuildings] = useState<Building[] | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+
+  const [generateModalOpen, setGenerateModalOpen] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  const [generateResult, setGenerateResult] = useState<{ created: string[]; skipped_existing_or_no_charges: string[] } | null>(null);
+  const [generateForm, setGenerateForm] = useState({
+    month: new Date().toISOString().slice(0, 7) + "-15",
+    building_id: "",
+    due_in_days: "7",
+  });
 
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [paymentSaving, setPaymentSaving] = useState(false);
@@ -32,17 +42,43 @@ export default function InvoicesPage() {
     api.get<Invoice[]>("/invoices").then(setInvoices);
   }
 
-  useEffect(load, []);
+  useEffect(() => {
+    load();
+    api.get<Building[]>("/buildings").then(setBuildings);
+  }, []);
 
-  async function handleGenerate() {
+  async function handleGenerate(e: React.FormEvent) {
+    e.preventDefault();
     setGenerating(true);
+    setGenerateError(null);
+    setGenerateResult(null);
     try {
-      const today = new Date().toISOString().slice(0, 10);
-      await api.post("/invoices/generate", { month: today, due_in_days: 7 });
+      const result = await api.post<{ created: string[]; skipped_existing_or_no_charges: string[] }>(
+        "/invoices/generate",
+        {
+          month: generateForm.month,
+          building_id: generateForm.building_id || undefined,
+          due_in_days: parseInt(generateForm.due_in_days, 10) || 7,
+        }
+      );
+      setGenerateResult(result);
       load();
+    } catch (err: any) {
+      setGenerateError(err.message);
     } finally {
       setGenerating(false);
     }
+  }
+
+  function openGenerateModal() {
+    setGenerateError(null);
+    setGenerateResult(null);
+    setGenerateForm({
+      month: new Date().toISOString().slice(0, 7) + "-15",
+      building_id: "",
+      due_in_days: "7",
+    });
+    setGenerateModalOpen(true);
   }
 
   async function handleViewPdf(invoiceId: string) {
@@ -102,9 +138,7 @@ export default function InvoicesPage() {
             Generated monthly from each lease&apos;s active rent structure.
           </p>
         </div>
-        <Button onClick={handleGenerate} disabled={generating}>
-          {generating ? "Generating…" : "Generate this month's invoices"}
-        </Button>
+        <Button onClick={openGenerateModal}>Generate invoices</Button>
       </div>
 
       <Card>
@@ -144,6 +178,60 @@ export default function InvoicesPage() {
           ]}
         />
       </Card>
+
+      <Modal open={generateModalOpen} onClose={() => setGenerateModalOpen(false)} title="Generate invoices">
+        <form onSubmit={handleGenerate} className="space-y-4">
+          <Field label="Month" hint="Pick any month — including a past one, e.g. to bill a tenant added partway through last month.">
+            <Input
+              type="month"
+              required
+              value={generateForm.month.slice(0, 7)}
+              onChange={(e) => setGenerateForm({ ...generateForm, month: e.target.value + "-15" })}
+            />
+          </Field>
+          <Field label="Building (optional)" hint="Leave blank to generate for every building.">
+            <Select
+              value={generateForm.building_id}
+              onChange={(e) => setGenerateForm({ ...generateForm, building_id: e.target.value })}
+            >
+              <option value="">All buildings</option>
+              {buildings?.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Due in (days)">
+            <Input
+              type="number"
+              value={generateForm.due_in_days}
+              onChange={(e) => setGenerateForm({ ...generateForm, due_in_days: e.target.value })}
+            />
+          </Field>
+          {generateError && <p className="text-sm text-stamp-red">{generateError}</p>}
+          {generateResult && (
+            <div className="text-sm bg-ledger/5 border border-ledger/20 rounded-card px-3 py-2 space-y-1">
+              <p className="text-stamp-green font-medium">
+                {generateResult.created.length} invoice(s) created.
+              </p>
+              {generateResult.skipped_existing_or_no_charges.length > 0 && (
+                <p className="text-ink/50 text-xs">
+                  {generateResult.skipped_existing_or_no_charges.length} skipped (already existed for that month, or no active charges).
+                </p>
+              )}
+            </div>
+          )}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" variant="ghost" onClick={() => setGenerateModalOpen(false)}>
+              Close
+            </Button>
+            <Button type="submit" disabled={generating}>
+              {generating ? "Generating…" : "Generate"}
+            </Button>
+          </div>
+        </form>
+      </Modal>
 
       <Modal
         open={paymentModalOpen}

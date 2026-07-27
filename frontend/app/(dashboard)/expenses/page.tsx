@@ -28,6 +28,7 @@ export default function ExpensesPage() {
   const [buildings, setBuildings] = useState<Building[] | null>(null);
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({
@@ -52,7 +53,8 @@ export default function ExpensesPage() {
     api.get<Building[]>("/buildings").then(setBuildings);
   }, []);
 
-  function openModal() {
+  function openAddModal() {
+    setEditingId(null);
     setError(null);
     setForm({
       category_id: categories?.[0]?.id ?? "",
@@ -65,19 +67,38 @@ export default function ExpensesPage() {
     setModalOpen(true);
   }
 
-  async function handleAddExpense(e: React.FormEvent) {
+  function openEditModal(expense: Expense) {
+    setEditingId(expense.id);
+    setError(null);
+    setForm({
+      category_id: expense.category_id,
+      building_id: expense.building_id ?? "",
+      vendor_name: expense.vendor_name ?? "",
+      amount: String(expense.amount),
+      expense_date: expense.expense_date,
+      description: expense.description ?? "",
+    });
+    setModalOpen(true);
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSaving(true);
     setError(null);
+    const payload = {
+      category_id: form.category_id,
+      building_id: form.building_id || undefined,
+      vendor_name: form.vendor_name || undefined,
+      amount: parseFloat(form.amount),
+      expense_date: form.expense_date,
+      description: form.description || undefined,
+    };
     try {
-      await api.post("/expenses", {
-        category_id: form.category_id,
-        building_id: form.building_id || undefined,
-        vendor_name: form.vendor_name || undefined,
-        amount: parseFloat(form.amount),
-        expense_date: form.expense_date,
-        description: form.description || undefined,
-      });
+      if (editingId) {
+        await api.patch(`/expenses/${editingId}`, payload);
+      } else {
+        await api.post("/expenses", payload);
+      }
       setModalOpen(false);
       load();
     } catch (err: any) {
@@ -99,7 +120,7 @@ export default function ExpensesPage() {
             was collected from tenants for the same thing.
           </p>
         </div>
-        <Button onClick={openModal}>Log expense</Button>
+        <Button onClick={openAddModal}>Log expense</Button>
       </div>
 
       <Card>
@@ -117,17 +138,27 @@ export default function ExpensesPage() {
               accessor: (e) => <span className="figures">{formatPkr(e.amount)}</span>,
               align: "right",
             },
+            {
+              header: "",
+              accessor: (e) => (
+                <Button variant="ghost" onClick={() => openEditModal(e)} className="no-print">
+                  Edit
+                </Button>
+              ),
+              align: "right",
+            },
           ]}
         />
       </Card>
 
-      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Log expense">
-        <form onSubmit={handleAddExpense} className="space-y-4">
-          <p className="text-xs text-ink/50 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2">
-            Logging an expense records a bill your company has already paid —
-            the date you enter is the date it was paid. There&apos;s no separate
-            "pay" step; creating the record is what marks it as paid.
-          </p>
+      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editingId ? "Edit expense" : "Log expense"}>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {!editingId && (
+            <p className="text-xs text-ink/50 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2">
+              Logging an expense records a bill your company has already paid —
+              the date you enter is the date it was paid.
+            </p>
+          )}
           <Field label="Category">
             <Select
               value={form.category_id}
@@ -187,7 +218,7 @@ export default function ExpensesPage() {
               Cancel
             </Button>
             <Button type="submit" disabled={saving}>
-              {saving ? "Saving…" : "Log expense"}
+              {saving ? "Saving…" : editingId ? "Save changes" : "Log expense"}
             </Button>
           </div>
         </form>

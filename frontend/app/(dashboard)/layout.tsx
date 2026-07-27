@@ -124,7 +124,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </button>
           </div>
         </header>
-        <main className="content flex-1 px-4 sm:px-6 py-6 max-w-6xl w-full mx-auto">
+        <main className="content flex-1 px-4 sm:px-6 py-6 max-w-[1440px] w-full mx-auto">
           {children}
         </main>
       </div>

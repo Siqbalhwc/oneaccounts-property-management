@@ -80,14 +80,43 @@ export default function BuildingsPage() {
     new Set((rooms ?? []).map((r) => r.room_type).filter((t): t is string => !!t))
   ).sort();
 
+  // Looks at existing rooms on a floor (e.g. A-101, A-102) and suggests the
+  // next one (A-103) by incrementing the trailing number, preserving
+  // whatever prefix/zero-padding pattern is already in use.
+  function suggestNextRoomNumber(floorId: string): string {
+    const floorRooms = (rooms ?? []).filter((r) => r.floor_id === floorId);
+    let best: { prefix: string; num: number; width: number } | null = null;
+    for (const r of floorRooms) {
+      const match = r.room_number.match(/^(.*?)(\d+)$/);
+      if (match) {
+        const num = parseInt(match[2], 10);
+        if (!best || num > best.num) {
+          best = { prefix: match[1], num, width: match[2].length };
+        }
+      }
+    }
+    if (!best) return "";
+    const nextStr = String(best.num + 1).padStart(best.width, "0");
+    return `${best.prefix}${nextStr}`;
+  }
+
+  function isDuplicateRoomNumber(value: string): boolean {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) return false;
+    return (rooms ?? []).some(
+      (r) => r.building_id === selected && r.room_number.trim().toLowerCase() === normalized
+    );
+  }
+
   function openRoomModal() {
     setRoomError(null);
     const existingFloor = floorsForSelected[0];
+    const initialFloorId = existingFloor ? existingFloor.id : NEW_FLOOR_VALUE;
     setRoomForm({
-      floor_id: existingFloor ? existingFloor.id : NEW_FLOOR_VALUE,
+      floor_id: initialFloorId,
       new_floor_number: String((floorsForSelected.length || 0) + 1),
       new_floor_name: "",
-      room_number: "",
+      room_number: existingFloor ? suggestNextRoomNumber(existingFloor.id) : "",
       room_type_select: existingRoomTypes[0] || NEW_TYPE_VALUE,
       room_type_custom: "",
       base_rent: "",
@@ -95,9 +124,21 @@ export default function BuildingsPage() {
     setRoomModalOpen(true);
   }
 
+  function handleFloorChange(newFloorId: string) {
+    setRoomForm((prev) => ({
+      ...prev,
+      floor_id: newFloorId,
+      room_number: newFloorId === NEW_FLOOR_VALUE ? prev.room_number : suggestNextRoomNumber(newFloorId),
+    }));
+  }
+
   async function handleAddRoom(e: React.FormEvent) {
     e.preventDefault();
     if (!selected) return;
+    if (isDuplicateRoomNumber(roomForm.room_number)) {
+      setRoomError(`Room "${roomForm.room_number}" already exists in this building.`);
+      return;
+    }
     setRoomSaving(true);
     setRoomError(null);
     try {
@@ -249,7 +290,7 @@ export default function BuildingsPage() {
           <Field label="Floor">
             <Select
               value={roomForm.floor_id}
-              onChange={(e) => setRoomForm({ ...roomForm, floor_id: e.target.value })}
+              onChange={(e) => handleFloorChange(e.target.value)}
             >
               {floorsForSelected.map((f) => (
                 <option key={f.id} value={f.id}>
@@ -282,13 +323,26 @@ export default function BuildingsPage() {
             </div>
           )}
 
-          <Field label="Room number">
+          <Field
+            label="Room number"
+            hint={
+              isDuplicateRoomNumber(roomForm.room_number)
+                ? undefined
+                : "Suggested automatically based on this floor's existing rooms — edit freely."
+            }
+          >
             <Input
               required
               placeholder="e.g. A-101"
               value={roomForm.room_number}
               onChange={(e) => setRoomForm({ ...roomForm, room_number: e.target.value })}
+              className={isDuplicateRoomNumber(roomForm.room_number) ? "border-stamp-red" : ""}
             />
+            {isDuplicateRoomNumber(roomForm.room_number) && (
+              <p className="text-xs text-stamp-red mt-1">
+                A room with this number already exists in this building.
+              </p>
+            )}
           </Field>
 
           <Field
@@ -336,7 +390,7 @@ export default function BuildingsPage() {
             <Button type="button" variant="ghost" onClick={() => setRoomModalOpen(false)}>
               Cancel
             </Button>
-            <Button type="submit" disabled={roomSaving}>
+            <Button type="submit" disabled={roomSaving || isDuplicateRoomNumber(roomForm.room_number)}>
               {roomSaving ? "Saving…" : "Add room"}
             </Button>
           </div>

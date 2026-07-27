@@ -81,7 +81,7 @@
   .no-print {
     display: none !important;
   }
-  body, .content {
+  body, .content, .card {
     background: white !important;
   }
   .content {
@@ -93,5 +93,21 @@
     border: 1px solid #ccc !important;
     box-shadow: none !important;
     break-inside: avoid;
+  }
+  /* Stamps: drop the tinted fill and rotation, keep just a plain outlined
+     label -- colored backgrounds are what make print output look like a
+     screen capture instead of a document. */
+  .stamp {
+    background: transparent !important;
+    border-color: #444 !important;
+    color: #222 !important;
+    transform: none !important;
+  }
+  th {
+    color: #333 !important;
+  }
+  a {
+    color: #1F2D24 !important;
+    text-decoration: none !important;
   }
 }

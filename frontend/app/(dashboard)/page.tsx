@@ -449,27 +449,27 @@ export default function DashboardHome() {
         />
       </Card>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Rent collection summary */}
         <Card title={`Rent collection — ${monthLabel(selectedMonth)}`}>
-          <div className="flex items-center gap-6">
+          <div className="flex flex-col items-center gap-4">
             <ProgressRing percent={collectionRate} label="Collection rate" />
-            <div className="grid grid-cols-2 gap-x-6 gap-y-3 flex-1">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-3 w-full">
               <div>
                 <p className="text-xs text-ink/50">Total rent</p>
-                <p className="figures font-medium">{pkr(totalRent)}</p>
+                <p className="figures font-medium text-sm">{pkr(totalRent)}</p>
               </div>
               <div>
                 <p className="text-xs text-ink/50">Collected</p>
-                <p className="figures font-medium text-stamp-green">{pkr(current.collected)}</p>
+                <p className="figures font-medium text-sm text-stamp-green">{pkr(current.collected)}</p>
               </div>
               <div>
                 <p className="text-xs text-ink/50">Outstanding</p>
-                <p className="figures font-medium text-stamp-amber">{pkr(outstanding)}</p>
+                <p className="figures font-medium text-sm text-stamp-amber">{pkr(outstanding)}</p>
               </div>
               <div>
                 <p className="text-xs text-ink/50">Overdue</p>
-                <p className="figures font-medium text-stamp-red">
+                <p className="figures font-medium text-sm text-stamp-red">
                   {pkr(overdueTotal)}{" "}
                   <span className="text-ink/40 font-normal">({overdueInvoicesThisMonth.length})</span>
                 </p>
@@ -483,16 +483,16 @@ export default function DashboardHome() {
           {topBuildings.length > 0 ? (
             <div className="space-y-3">
               {topBuildings.map((b, i) => (
-                <div key={b.name} className="flex items-center gap-3">
-                  <span className="text-xs text-ink/40 w-4">{i + 1}.</span>
-                  <span className="text-sm w-28 truncate">{b.name}</span>
+                <div key={b.name} className="flex items-center gap-2">
+                  <span className="text-xs text-ink/40 w-3.5">{i + 1}.</span>
+                  <span className="text-sm w-20 truncate">{b.name}</span>
                   <div className="flex-1 h-2 bg-border rounded-full overflow-hidden">
                     <div
                       className="h-full bg-ledger rounded-full"
                       style={{ width: `${(b.amount / maxBuildingAmount) * 100}%` }}
                     />
                   </div>
-                  <span className="text-sm figures font-medium w-24 text-right">{pkr(b.amount)}</span>
+                  <span className="text-xs figures font-medium w-16 text-right">{pkr(b.amount)}</span>
                 </div>
               ))}
             </div>
@@ -502,34 +502,33 @@ export default function DashboardHome() {
             </p>
           )}
         </Card>
-      </div>
 
-      {/* Recent activity */}
-      <Card title="Recent activity">
-        {activities.length > 0 ? (
-          <div className="space-y-3">
-            {activities.map((a, i) => (
-              <div key={i} className="flex items-start gap-3 py-1.5">
-                <div className="w-8 h-8 rounded-full bg-ledger/8 text-ledger flex items-center justify-center shrink-0 mt-0.5">
-                  {a.icon}
+        {/* Recent activity */}
+        <Card title="Recent activity">
+          {activities.length > 0 ? (
+            <div className="space-y-2.5">
+              {activities.slice(0, 5).map((a, i) => (
+                <div key={i} className="flex items-start gap-2.5 py-1">
+                  <div className="w-6 h-6 rounded-full bg-ledger/8 text-ledger flex items-center justify-center shrink-0 mt-0.5 [&>svg]:w-3 [&>svg]:h-3">
+                    {a.icon}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs leading-tight">{a.title}</p>
+                    <p className="text-[10px] text-ink/40 leading-tight mt-0.5">{relativeTime(a.at)}</p>
+                  </div>
+                  {a.amount && (
+                    <p className="text-xs figures font-medium shrink-0">{a.amount}</p>
+                  )}
                 </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm">{a.title}</p>
-                  <p className="text-xs text-ink/45">{a.subtitle}</p>
-                </div>
-                <div className="text-right shrink-0">
-                  {a.amount && <p className="text-sm figures font-medium">{a.amount}</p>}
-                  <p className="text-xs text-ink/40">{relativeTime(a.at)}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="text-sm text-ink/45 py-6 text-center">
-            Nothing recorded yet — activity will show up here as you add leases, payments, and expenses.
-          </p>
-        )}
-      </Card>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-ink/45 py-6 text-center">
+              Nothing recorded yet.
+            </p>
+          )}
+        </Card>
+      </div>
     </div>
   );
 }
