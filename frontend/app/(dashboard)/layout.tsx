@@ -7,7 +7,7 @@ import { supabase } from "@/lib/supabaseClient";
 import { Sidebar } from "@/components/ui/Sidebar";
 import { Company } from "@/lib/api";
 
-type ProfileInfo = { full_name: string; role: string; company_id: string };
+type ProfileInfo = { full_name: string; role: string; company_id: string; is_platform_admin?: boolean };
 
 function greeting() {
   const hour = new Date().getHours();
@@ -35,7 +35,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
       const { data: profileRow } = await supabase
         .from("profiles")
-        .select("full_name, role, company_id")
+        .select("full_name, role, company_id, is_platform_admin")
         .eq("id", session.user.id)
         .single();
 
@@ -84,7 +84,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   return (
     <div className="flex min-h-screen">
-      <Sidebar company={company} mobileOpen={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />
+      <Sidebar
+        company={company}
+        mobileOpen={mobileNavOpen}
+        onClose={() => setMobileNavOpen(false)}
+        isPlatformAdmin={!!profile?.is_platform_admin}
+      />
       <div className="flex-1 flex flex-col min-w-0">
         <header className="no-print h-16 border-b border-border bg-paper-card flex items-center justify-between px-4 sm:px-6 shrink-0">
           <div className="flex items-center gap-3 min-w-0">

@@ -7,9 +7,12 @@ from app.routers import (
     leases,
     owner_ledger,
     payments,
+    platform_admin,
     reports,
     security_deposits,
+    signup,
     simple_resources,
+    team,
 )
 
 app = FastAPI(title="Property Management API", version="0.1.0", redirect_slashes=False)
@@ -50,6 +53,9 @@ app.include_router(payments.router, prefix=API_PREFIX)
 app.include_router(owner_ledger.router, prefix=API_PREFIX)
 app.include_router(reports.router, prefix=API_PREFIX)
 app.include_router(company_settings.router, prefix=API_PREFIX)
+app.include_router(signup.router, prefix=API_PREFIX)
+app.include_router(team.router, prefix=API_PREFIX)
+app.include_router(platform_admin.router, prefix=API_PREFIX)
 
 
 @app.get("/")

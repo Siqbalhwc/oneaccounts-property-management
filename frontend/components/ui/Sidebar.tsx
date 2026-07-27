@@ -38,10 +38,12 @@ export function Sidebar({
   company,
   mobileOpen,
   onClose,
+  isPlatformAdmin,
 }: {
   company: Company | null;
   mobileOpen: boolean;
   onClose: () => void;
+  isPlatformAdmin?: boolean;
 }) {
   const pathname = usePathname();
 
@@ -111,6 +113,25 @@ export function Sidebar({
               </div>
             </div>
           ))}
+
+          {isPlatformAdmin && (
+            <div>
+              <p className="px-2 text-[10px] uppercase tracking-widest text-brass/70 font-medium mb-2">
+                Platform
+              </p>
+              <Link
+                href="/tower"
+                onClick={onClose}
+                className={`block px-2.5 py-2 rounded-card text-sm transition-colors ${
+                  pathname.startsWith("/tower")
+                    ? "bg-paper/10 text-paper font-medium border-l-2 border-brass -ml-px pl-[9px]"
+                    : "text-paper/70 hover:text-paper hover:bg-paper/5"
+                }`}
+              >
+                Tower — all companies
+              </Link>
+            </div>
+          )}
         </nav>
 
         <div className="px-5 py-4 border-t border-paper/10">

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { Field, Input } from "@/components/ui/Field";
@@ -78,6 +79,12 @@ export default function LoginPage() {
           <Button type="submit" className="w-full" disabled={loading}>
             {loading ? "Signing in…" : "Sign in"}
           </Button>
+          <p className="text-xs text-center text-ink/45 pt-1">
+            Setting up a new company?{" "}
+            <Link href="/signup" className="text-ledger hover:underline">
+              Create an account
+            </Link>
+          </p>
         </form>
       </div>
     </div>

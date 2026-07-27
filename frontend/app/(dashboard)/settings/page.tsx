@@ -2,9 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api, uploadFile, Company, Profile } from "@/lib/api";
-import { Card } from "@/components/ui/Card";
-import { Field, Input } from "@/components/ui/Field";
+import { Card, DataTable } from "@/components/ui/Card";
+import { Field, Input, Select } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
+import { Modal } from "@/components/ui/Modal";
+
+type TeamMember = { id: string; full_name: string; role: string; phone?: string };
 
 export default function SettingsPage() {
   const [company, setCompany] = useState<Company | null>(null);
@@ -15,9 +18,25 @@ export default function SettingsPage() {
   const [message, setMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const [team, setTeam] = useState<TeamMember[] | null>(null);
+  const [inviteModalOpen, setInviteModalOpen] = useState(false);
+  const [inviteSaving, setInviteSaving] = useState(false);
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const [inviteForm, setInviteForm] = useState({
+    full_name: "",
+    email: "",
+    password: "",
+    role: "staff",
+  });
+
+  function loadTeam() {
+    api.get<TeamMember[]>("/company/team").then(setTeam);
+  }
+
   useEffect(() => {
     api.get<Company>("/company/me").then(setCompany);
     api.get<Profile>("/profile/me").then(setProfile);
+    loadTeam();
   }, []);
 
   async function saveCompany() {
@@ -61,9 +80,27 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleInvite(e: React.FormEvent) {
+    e.preventDefault();
+    setInviteSaving(true);
+    setInviteError(null);
+    try {
+      await api.post("/company/team", inviteForm);
+      setInviteModalOpen(false);
+      setInviteForm({ full_name: "", email: "", password: "", role: "staff" });
+      loadTeam();
+    } catch (err: any) {
+      setInviteError(err.message);
+    } finally {
+      setInviteSaving(false);
+    }
+  }
+
   if (!company || !profile) {
     return <p className="text-sm text-ink/50">Loading settings…</p>;
   }
+
+  const canInvite = profile.role === "owner" || profile.role === "admin";
 
   return (
     <div className="max-w-2xl space-y-6">
@@ -150,6 +187,86 @@ export default function SettingsPage() {
           </Button>
         </div>
       </Card>
+
+      <Card
+        title="Team"
+        action={
+          canInvite ? (
+            <Button variant="secondary" onClick={() => setInviteModalOpen(true)}>
+              Add teammate
+            </Button>
+          ) : undefined
+        }
+      >
+        <DataTable
+          keyField="id"
+          rows={team ?? []}
+          emptyMessage="Just you so far."
+          columns={[
+            { header: "Name", accessor: (m) => m.full_name },
+            { header: "Role", accessor: (m) => <span className="capitalize">{m.role}</span> },
+            { header: "Phone", accessor: (m) => m.phone ?? "—" },
+          ]}
+        />
+        {!canInvite && (
+          <p className="text-xs text-ink/40 mt-3">
+            Only an owner or admin can add new team members.
+          </p>
+        )}
+      </Card>
+
+      <Modal open={inviteModalOpen} onClose={() => setInviteModalOpen(false)} title="Add teammate">
+        <form onSubmit={handleInvite} className="space-y-4">
+          <p className="text-xs text-ink/50 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2">
+            They&apos;ll join your company only — never anyone else&apos;s. Give them these
+            credentials to sign in with.
+          </p>
+          <Field label="Full name">
+            <Input
+              required
+              value={inviteForm.full_name}
+              onChange={(e) => setInviteForm({ ...inviteForm, full_name: e.target.value })}
+            />
+          </Field>
+          <Field label="Email">
+            <Input
+              type="email"
+              required
+              value={inviteForm.email}
+              onChange={(e) => setInviteForm({ ...inviteForm, email: e.target.value })}
+            />
+          </Field>
+          <Field label="Temporary password" hint="At least 8 characters — share this with them securely.">
+            <Input
+              type="password"
+              required
+              minLength={8}
+              value={inviteForm.password}
+              onChange={(e) => setInviteForm({ ...inviteForm, password: e.target.value })}
+            />
+          </Field>
+          <Field label="Role">
+            <Select
+              value={inviteForm.role}
+              onChange={(e) => setInviteForm({ ...inviteForm, role: e.target.value })}
+            >
+              <option value="staff">Staff</option>
+              <option value="accountant">Accountant</option>
+              <option value="manager">Manager</option>
+              <option value="admin">Admin</option>
+            </Select>
+          </Field>
+          {inviteError && <p className="text-sm text-stamp-red">{inviteError}</p>}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" variant="ghost" onClick={() => setInviteModalOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={inviteSaving}>
+              {inviteSaving ? "Adding…" : "Add teammate"}
+            </Button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

@@ -34,6 +34,27 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return res.json();
 }
 
+// For endpoints that don't require a session yet (e.g. signup itself).
+export async function postPublic<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const bodyText = await res.text();
+    let message = bodyText;
+    try {
+      const parsed = JSON.parse(bodyText);
+      if (typeof parsed.detail === "string") message = parsed.detail;
+    } catch {
+      // not JSON, use raw text
+    }
+    throw new Error(message);
+  }
+  return res.json();
+}
+
 export const api = {
   get: <T,>(path: string) => request<T>(path),
   post: <T,>(path: string, body?: unknown) =>
