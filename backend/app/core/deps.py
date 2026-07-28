@@ -68,6 +68,18 @@ def get_current_company_id(
     return res.data["company_id"]
 
 
+def require_owner_or_admin(
+    supabase: Client = Depends(get_supabase),
+    user: dict = Depends(get_current_user),
+) -> None:
+    """Blocks the request unless the caller's role is owner or admin."""
+    profile = (
+        supabase.table("profiles").select("role").eq("id", user["user_id"]).single().execute()
+    )
+    if not profile.data or profile.data["role"] not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Only an owner or admin can do this.")
+
+
 def get_service_client() -> Client:
     """
     A Supabase client using the SERVICE ROLE key, which bypasses RLS entirely.

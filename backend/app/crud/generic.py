@@ -1,21 +1,30 @@
 """
-Factory that builds a standard list/get/create/update/delete router for a
-simple table. Used for tables that don't need special business logic
-(buildings, floors, rooms, room_history, tenants, expense_categories,
-expenses, staff, salary_payments).
+Factory that builds a standard list/get/create/update router for a simple
+table. Used for tables that don't need special business logic (buildings,
+floors, rooms, room_history, tenants, expense_categories, expenses, staff,
+salary_payments).
 
 Tables with real business logic (leases, invoices, security_deposits,
 owner_ledger) get their own dedicated router files instead.
+
+Two things apply uniformly here:
+  - Every successful edit writes a row to audit_log (who changed what, and
+    the before/after values), regardless of which table.
+  - Records are never hard-deleted. Tables passed archivable=True get an
+    is_archived flag and an /archive endpoint (owner/admin only) instead of
+    a DELETE endpoint; tables passed archivable=False (lookup-ish data like
+    expense_categories) have no delete or archive at all, since removing
+    them would silently orphan things that reference them.
 """
 
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from postgrest.exceptions import APIError
 from supabase import Client
 
-from app.core.deps import get_current_company_id, get_supabase
+from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
 
 
 def friendly_db_error(e: APIError) -> tuple[int, str]:
@@ -50,12 +59,53 @@ def friendly_db_error(e: APIError) -> tuple[int, str]:
     return 400, message
 
 
-def build_crud_router(table: str, tags: list[str]) -> APIRouter:
+def write_audit_log(
+    supabase: Client,
+    company_id: str,
+    user_id: str,
+    action: str,
+    table: str,
+    record_id: str,
+    before: Optional[dict] = None,
+    after: Optional[dict] = None,
+) -> None:
+    """
+    Best-effort audit trail write. Deliberately swallows its own errors --
+    a logging failure should never block the actual edit from succeeding.
+    """
+    try:
+        changed_fields = {}
+        if before is not None and after is not None:
+            for key, new_value in after.items():
+                old_value = before.get(key)
+                if old_value != new_value:
+                    changed_fields[key] = {"from": old_value, "to": new_value}
+        supabase.table("audit_log").insert(
+            {
+                "company_id": company_id,
+                "user_id": user_id,
+                "action": action,
+                "table_name": table,
+                "record_id": record_id,
+                "details": changed_fields or None,
+            }
+        ).execute()
+    except Exception:
+        pass
+
+
+def build_crud_router(table: str, tags: list[str], archivable: bool = False) -> APIRouter:
     router = APIRouter(prefix=f"/{table}", tags=tags)
 
     @router.get("")
-    def list_all(supabase: Client = Depends(get_supabase)):
-        res = supabase.table(table).select("*").order("created_at", desc=True).execute()
+    def list_all(
+        include_archived: bool = Query(False),
+        supabase: Client = Depends(get_supabase),
+    ):
+        query = supabase.table(table).select("*")
+        if archivable and not include_archived:
+            query = query.eq("is_archived", False)
+        res = query.order("created_at", desc=True).execute()
         return res.data
 
     @router.get("/{record_id}")
@@ -70,6 +120,7 @@ def build_crud_router(table: str, tags: list[str]) -> APIRouter:
         payload: Dict[str, Any],
         supabase: Client = Depends(get_supabase),
         company_id: str = Depends(get_current_company_id),
+        user: dict = Depends(get_current_user),
     ):
         # company_id is always forced server-side, never trusted from the client.
         payload["company_id"] = company_id
@@ -78,15 +129,26 @@ def build_crud_router(table: str, tags: list[str]) -> APIRouter:
         except APIError as e:
             status, detail = friendly_db_error(e)
             raise HTTPException(status_code=status, detail=detail)
-        return res.data[0] if res.data else None
+        created = res.data[0] if res.data else None
+        if created:
+            write_audit_log(supabase, company_id, user["user_id"], "create", table, created["id"])
+        return created
 
     @router.patch("/{record_id}")
     def update(
         record_id: str,
         payload: Dict[str, Any],
         supabase: Client = Depends(get_supabase),
+        company_id: str = Depends(get_current_company_id),
+        user: dict = Depends(get_current_user),
     ):
         payload.pop("company_id", None)  # never allow moving a record between companies
+        payload.pop("is_archived", None)  # archiving has its own gated endpoint below
+
+        before = supabase.table(table).select("*").eq("id", record_id).single().execute()
+        if not before.data:
+            raise HTTPException(status_code=404, detail="Not found")
+
         try:
             res = supabase.table(table).update(payload).eq("id", record_id).execute()
         except APIError as e:
@@ -94,15 +156,39 @@ def build_crud_router(table: str, tags: list[str]) -> APIRouter:
             raise HTTPException(status_code=status, detail=detail)
         if not res.data:
             raise HTTPException(status_code=404, detail="Not found")
-        return res.data[0]
 
-    @router.delete("/{record_id}", status_code=204)
-    def delete(record_id: str, supabase: Client = Depends(get_supabase)):
-        try:
-            supabase.table(table).delete().eq("id", record_id).execute()
-        except APIError as e:
-            status, detail = friendly_db_error(e)
-            raise HTTPException(status_code=status, detail=detail)
-        return None
+        after = res.data[0]
+        write_audit_log(supabase, company_id, user["user_id"], "update", table, record_id, before.data, after)
+        return after
+
+    if archivable:
+
+        @router.post("/{record_id}/archive")
+        def archive(
+            record_id: str,
+            supabase: Client = Depends(get_supabase),
+            company_id: str = Depends(get_current_company_id),
+            user: dict = Depends(get_current_user),
+            _perm: None = Depends(require_owner_or_admin),
+        ):
+            res = supabase.table(table).update({"is_archived": True}).eq("id", record_id).execute()
+            if not res.data:
+                raise HTTPException(status_code=404, detail="Not found")
+            write_audit_log(supabase, company_id, user["user_id"], "archive", table, record_id)
+            return res.data[0]
+
+        @router.post("/{record_id}/unarchive")
+        def unarchive(
+            record_id: str,
+            supabase: Client = Depends(get_supabase),
+            company_id: str = Depends(get_current_company_id),
+            user: dict = Depends(get_current_user),
+            _perm: None = Depends(require_owner_or_admin),
+        ):
+            res = supabase.table(table).update({"is_archived": False}).eq("id", record_id).execute()
+            if not res.data:
+                raise HTTPException(status_code=404, detail="Not found")
+            write_audit_log(supabase, company_id, user["user_id"], "unarchive", table, record_id)
+            return res.data[0]
 
     return router

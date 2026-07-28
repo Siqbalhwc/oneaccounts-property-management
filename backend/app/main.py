@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import (
+    audit_log,
     company_settings,
     invoices,
     leases,
@@ -56,6 +57,7 @@ app.include_router(company_settings.router, prefix=API_PREFIX)
 app.include_router(signup.router, prefix=API_PREFIX)
 app.include_router(team.router, prefix=API_PREFIX)
 app.include_router(platform_admin.router, prefix=API_PREFIX)
+app.include_router(audit_log.router, prefix=API_PREFIX)
 
 
 @app.get("/")

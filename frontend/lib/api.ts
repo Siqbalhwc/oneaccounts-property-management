@@ -111,6 +111,7 @@ export type Building = {
   address?: string;
   owner_name?: string;
   owner_phone?: string;
+  is_archived?: boolean;
 };
 
 export type Floor = {
@@ -128,6 +129,7 @@ export type Room = {
   room_type?: string;
   status: "vacant" | "occupied" | "under_maintenance" | "reserved";
   base_rent?: number;
+  is_archived?: boolean;
 };
 
 export type Tenant = {
@@ -136,6 +138,7 @@ export type Tenant = {
   full_name: string;
   phone: string;
   email?: string;
+  is_archived?: boolean;
 };
 
 export type Lease = {

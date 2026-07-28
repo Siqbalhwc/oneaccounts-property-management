@@ -5,7 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import Client
 
-from app.core.deps import get_current_company_id, get_supabase
+from app.core.deps import get_current_company_id, get_current_user, get_supabase
+from app.crud.generic import write_audit_log
 
 router = APIRouter(prefix="/leases", tags=["Leases"])
 
@@ -53,6 +54,36 @@ def get_lease(lease_id: str, supabase: Client = Depends(get_supabase)):
     if not res.data:
         raise HTTPException(status_code=404, detail="Lease not found")
     return res.data
+
+
+class LeaseEdit(BaseModel):
+    start_date: date | None = None
+    end_date: date | None = None
+    agreement_doc_url: str | None = None
+
+
+@router.patch("/{lease_id}")
+def edit_lease(
+    lease_id: str,
+    payload: LeaseEdit,
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+    user: dict = Depends(get_current_user),
+):
+    """Edits a lease's dates (e.g. fixing a typo made at creation)."""
+    before = supabase.table("leases").select("*").eq("id", lease_id).single().execute()
+    if not before.data:
+        raise HTTPException(status_code=404, detail="Lease not found")
+
+    updates = {k: str(v) if v is not None else None for k, v in payload.model_dump(exclude_unset=True).items()}
+    updates = {k: v for k, v in updates.items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+
+    res = supabase.table("leases").update(updates).eq("id", lease_id).execute()
+    after = res.data[0]
+    write_audit_log(supabase, company_id, user["user_id"], "update", "leases", lease_id, before.data, after)
+    return after
 
 
 @router.post("", status_code=201)

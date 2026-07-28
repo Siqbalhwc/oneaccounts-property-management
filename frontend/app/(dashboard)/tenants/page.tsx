@@ -1,21 +1,20 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, Tenant } from "@/lib/api";
+import { api, Tenant, Profile } from "@/lib/api";
 import { Card, DataTable } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
+import { ConfirmModal } from "@/components/ui/ConfirmModal";
+import { HistoryPanel } from "@/components/ui/HistoryPanel";
 import { Field, Input } from "@/components/ui/Field";
 
-// Pakistani CNIC: 13 digits total, e.g. 35202-1234567-1 (dashes optional)
 function validateCnic(value: string): string | null {
   const digits = value.replace(/\D/g, "");
   if (digits.length !== 13) return "CNIC must be exactly 13 digits (e.g. 35202-1234567-1).";
   return null;
 }
 
-// Pakistani mobile: 11 digits with leading 0 (03XX-XXXXXXX) is the standard
-// format; also accept 10 digits if the leading 0 was omitted.
 function validatePhone(value: string): string | null {
   const digits = value.replace(/\D/g, "");
   if (digits.length !== 11 && digits.length !== 10) {
@@ -27,43 +26,90 @@ function validatePhone(value: string): string | null {
   return null;
 }
 
+const emptyForm = { full_name: "", cnic: "", phone: "", email: "" };
+
 export default function TenantsPage() {
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
+  const [myRole, setMyRole] = useState<string | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
+
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [form, setForm] = useState({ full_name: "", cnic: "", phone: "", email: "" });
+  const [form, setForm] = useState(emptyForm);
   const [touched, setTouched] = useState({ cnic: false, phone: false });
 
+  const [archiveTarget, setArchiveTarget] = useState<Tenant | null>(null);
+  const [archiving, setArchiving] = useState(false);
+
   function load() {
-    api.get<Tenant[]>("/tenants").then(setTenants);
+    api.get<Tenant[]>(`/tenants${showArchived ? "?include_archived=true" : ""}`).then(setTenants);
   }
 
-  useEffect(load, []);
+  useEffect(load, [showArchived]);
+  useEffect(() => {
+    api.get<Profile>("/profile/me").then((p) => setMyRole(p.role));
+  }, []);
+
+  const canManage = myRole === "owner" || myRole === "admin";
 
   const cnicError = touched.cnic ? validateCnic(form.cnic) : null;
   const phoneError = touched.phone ? validatePhone(form.phone) : null;
   const canSubmit =
-    form.full_name.trim() !== "" &&
-    validateCnic(form.cnic) === null &&
-    validatePhone(form.phone) === null;
+    form.full_name.trim() !== "" && validateCnic(form.cnic) === null && validatePhone(form.phone) === null;
 
-  async function handleAddTenant(e: React.FormEvent) {
+  function openAddModal() {
+    setEditingId(null);
+    setError(null);
+    setForm(emptyForm);
+    setTouched({ cnic: false, phone: false });
+    setModalOpen(true);
+  }
+
+  function openEditModal(tenant: Tenant) {
+    setEditingId(tenant.id);
+    setError(null);
+    setForm({
+      full_name: tenant.full_name,
+      cnic: tenant.cnic,
+      phone: tenant.phone,
+      email: tenant.email ?? "",
+    });
+    setTouched({ cnic: true, phone: true });
+    setModalOpen(true);
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setTouched({ cnic: true, phone: true });
     if (!canSubmit) return;
     setSaving(true);
     setError(null);
     try {
-      await api.post("/tenants", form);
+      if (editingId) {
+        await api.patch(`/tenants/${editingId}`, form);
+      } else {
+        await api.post("/tenants", form);
+      }
       setModalOpen(false);
-      setForm({ full_name: "", cnic: "", phone: "", email: "" });
-      setTouched({ cnic: false, phone: false });
       load();
     } catch (err: any) {
       setError(err.message);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleArchive() {
+    if (!archiveTarget) return;
+    setArchiving(true);
+    try {
+      await api.post(`/tenants/${archiveTarget.id}/archive`, {});
+      setArchiveTarget(null);
+      load();
+    } finally {
+      setArchiving(false);
     }
   }
 
@@ -77,25 +123,58 @@ export default function TenantsPage() {
             room they&apos;ve rented.
           </p>
         </div>
-        <Button onClick={() => setModalOpen(true)}>Add tenant</Button>
+        <Button onClick={openAddModal}>Add tenant</Button>
       </div>
 
       <Card>
+        <div className="flex items-center justify-between mb-4 no-print">
+          <label className="flex items-center gap-2 text-xs text-ink/50">
+            <input
+              type="checkbox"
+              checked={showArchived}
+              onChange={(e) => setShowArchived(e.target.checked)}
+            />
+            Show archived
+          </label>
+        </div>
         <DataTable
           keyField="id"
           rows={tenants ?? []}
           emptyMessage="No tenants added yet."
           columns={[
-            { header: "Name", accessor: (t) => <span className="font-medium">{t.full_name}</span> },
+            {
+              header: "Name",
+              accessor: (t) => (
+                <span className={`font-medium ${t.is_archived ? "opacity-50" : ""}`}>
+                  {t.full_name} {t.is_archived && <span className="text-xs font-normal">(archived)</span>}
+                </span>
+              ),
+            },
             { header: "CNIC", accessor: (t) => <span className="figures text-ink/70">{t.cnic}</span> },
             { header: "Phone", accessor: (t) => <span className="figures text-ink/70">{t.phone}</span> },
             { header: "Email", accessor: (t) => t.email ?? "—" },
+            {
+              header: "",
+              accessor: (t) => (
+                <div className="flex justify-end gap-1 no-print">
+                  <Button variant="ghost" onClick={() => openEditModal(t)}>
+                    Edit
+                  </Button>
+                  {canManage && !t.is_archived && (
+                    <Button variant="ghost" onClick={() => setArchiveTarget(t)}>
+                      Archive
+                    </Button>
+                  )}
+                </div>
+              ),
+              align: "right",
+            },
           ]}
         />
       </Card>
 
-      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Add tenant">
-        <form onSubmit={handleAddTenant} className="space-y-4">
+      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editingId ? "Edit tenant" : "Add tenant"}>
+        <form onSubmit={handleSubmit} className="space-y-4">
           <Field label="Full name">
             <Input
               required
@@ -136,11 +215,27 @@ export default function TenantsPage() {
               Cancel
             </Button>
             <Button type="submit" disabled={saving || !canSubmit}>
-              {saving ? "Saving…" : "Add tenant"}
+              {saving ? "Saving…" : editingId ? "Save changes" : "Add tenant"}
             </Button>
           </div>
+          {editingId && (
+            <div className="pt-4 border-t border-border">
+              <p className="text-xs uppercase tracking-wider text-ink/45 mb-2">History</p>
+              <HistoryPanel tableName="tenants" recordId={editingId} />
+            </div>
+          )}
         </form>
       </Modal>
+
+      <ConfirmModal
+        open={!!archiveTarget}
+        onClose={() => setArchiveTarget(null)}
+        onConfirm={handleArchive}
+        title="Archive tenant?"
+        message={`"${archiveTarget?.full_name}" will be hidden from lists but all their lease and payment history stays intact. You can unarchive them later if needed.`}
+        confirmLabel="Archive"
+        confirming={archiving}
+      />
     </div>
   );
 }

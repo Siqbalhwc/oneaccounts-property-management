@@ -1,22 +1,28 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, Building, Room, Floor } from "@/lib/api";
+import { api, Building, Room, Floor, Profile } from "@/lib/api";
 import { StampBadge } from "@/components/ui/StampBadge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
+import { ConfirmModal } from "@/components/ui/ConfirmModal";
+import { HistoryPanel } from "@/components/ui/HistoryPanel";
 import { Field, Input, Select } from "@/components/ui/Field";
 
 const NEW_FLOOR_VALUE = "__new__";
 const NEW_TYPE_VALUE = "__new_type__";
+const ROOM_STATUSES = ["vacant", "occupied", "under_maintenance", "reserved"] as const;
 
 export default function BuildingsPage() {
   const [buildings, setBuildings] = useState<Building[] | null>(null);
   const [rooms, setRooms] = useState<Room[] | null>(null);
   const [floors, setFloors] = useState<Floor[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [myRole, setMyRole] = useState<string | null>(null);
 
+  // --- Add / Edit building ---
   const [buildingModalOpen, setBuildingModalOpen] = useState(false);
+  const [editingBuildingId, setEditingBuildingId] = useState<string | null>(null);
   const [buildingSaving, setBuildingSaving] = useState(false);
   const [buildingError, setBuildingError] = useState<string | null>(null);
   const [buildingForm, setBuildingForm] = useState({
@@ -25,8 +31,12 @@ export default function BuildingsPage() {
     owner_name: "",
     owner_phone: "",
   });
+  const [archiveBuildingTarget, setArchiveBuildingTarget] = useState<Building | null>(null);
+  const [archivingBuilding, setArchivingBuilding] = useState(false);
 
+  // --- Add / Edit room ---
   const [roomModalOpen, setRoomModalOpen] = useState(false);
+  const [editingRoomId, setEditingRoomId] = useState<string | null>(null);
   const [roomSaving, setRoomSaving] = useState(false);
   const [roomError, setRoomError] = useState<string | null>(null);
   const [roomForm, setRoomForm] = useState({
@@ -37,7 +47,10 @@ export default function BuildingsPage() {
     room_type_select: "",
     room_type_custom: "",
     base_rent: "",
+    status: "vacant" as string,
   });
+  const [archiveRoomTarget, setArchiveRoomTarget] = useState<Room | null>(null);
+  const [archivingRoom, setArchivingRoom] = useState(false);
 
   function loadBuildings() {
     api.get<Building[]>("/buildings").then((data) => {
@@ -54,18 +67,44 @@ export default function BuildingsPage() {
   useEffect(() => {
     loadBuildings();
     loadRoomsAndFloors();
+    api.get<Profile>("/profile/me").then((p) => setMyRole(p.role));
   }, []);
 
-  async function handleAddBuilding(e: React.FormEvent) {
+  const canManage = myRole === "owner" || myRole === "admin";
+
+  // ---------------- Building add/edit ----------------
+  function openAddBuildingModal() {
+    setEditingBuildingId(null);
+    setBuildingError(null);
+    setBuildingForm({ name: "", address: "", owner_name: "", owner_phone: "" });
+    setBuildingModalOpen(true);
+  }
+
+  function openEditBuildingModal(b: Building) {
+    setEditingBuildingId(b.id);
+    setBuildingError(null);
+    setBuildingForm({
+      name: b.name,
+      address: b.address ?? "",
+      owner_name: b.owner_name ?? "",
+      owner_phone: b.owner_phone ?? "",
+    });
+    setBuildingModalOpen(true);
+  }
+
+  async function handleSaveBuilding(e: React.FormEvent) {
     e.preventDefault();
     setBuildingSaving(true);
     setBuildingError(null);
     try {
-      const created = await api.post<Building>("/buildings", buildingForm);
+      if (editingBuildingId) {
+        await api.patch(`/buildings/${editingBuildingId}`, buildingForm);
+      } else {
+        const created = await api.post<Building>("/buildings", buildingForm);
+        setSelected(created.id);
+      }
       setBuildingModalOpen(false);
-      setBuildingForm({ name: "", address: "", owner_name: "", owner_phone: "" });
       loadBuildings();
-      setSelected(created.id);
     } catch (err: any) {
       setBuildingError(err.message);
     } finally {
@@ -73,16 +112,23 @@ export default function BuildingsPage() {
     }
   }
 
-  // Room types already used anywhere in the company -- offered as a dropdown
-  // so "2-bed apartment", "2 Bed Apartment", "2bed apt" don't all end up as
-  // different values scattered across rooms.
+  async function handleArchiveBuilding() {
+    if (!archiveBuildingTarget) return;
+    setArchivingBuilding(true);
+    try {
+      await api.post(`/buildings/${archiveBuildingTarget.id}/archive`, {});
+      setArchiveBuildingTarget(null);
+      loadBuildings();
+    } finally {
+      setArchivingBuilding(false);
+    }
+  }
+
+  // ---------------- Room add/edit ----------------
   const existingRoomTypes = Array.from(
     new Set((rooms ?? []).map((r) => r.room_type).filter((t): t is string => !!t))
   ).sort();
 
-  // Looks at existing rooms on a floor (e.g. A-101, A-102) and suggests the
-  // next one (A-103) by incrementing the trailing number, preserving
-  // whatever prefix/zero-padding pattern is already in use.
   function suggestNextRoomNumber(floorId: string): string {
     const floorRooms = (rooms ?? []).filter((r) => r.floor_id === floorId);
     let best: { prefix: string; num: number; width: number } | null = null;
@@ -100,26 +146,47 @@ export default function BuildingsPage() {
     return `${best.prefix}${nextStr}`;
   }
 
-  function isDuplicateRoomNumber(value: string): boolean {
+  function isDuplicateRoomNumber(value: string, excludeRoomId?: string): boolean {
     const normalized = value.trim().toLowerCase();
     if (!normalized) return false;
     return (rooms ?? []).some(
-      (r) => r.building_id === selected && r.room_number.trim().toLowerCase() === normalized
+      (r) =>
+        r.building_id === selected &&
+        r.id !== excludeRoomId &&
+        r.room_number.trim().toLowerCase() === normalized
     );
   }
 
-  function openRoomModal() {
+  function openAddRoomModal() {
+    setEditingRoomId(null);
     setRoomError(null);
     const existingFloor = floorsForSelected[0];
-    const initialFloorId = existingFloor ? existingFloor.id : NEW_FLOOR_VALUE;
     setRoomForm({
-      floor_id: initialFloorId,
+      floor_id: existingFloor ? existingFloor.id : NEW_FLOOR_VALUE,
       new_floor_number: String((floorsForSelected.length || 0) + 1),
       new_floor_name: "",
       room_number: existingFloor ? suggestNextRoomNumber(existingFloor.id) : "",
       room_type_select: existingRoomTypes[0] || NEW_TYPE_VALUE,
       room_type_custom: "",
       base_rent: "",
+      status: "vacant",
+    });
+    setRoomModalOpen(true);
+  }
+
+  function openEditRoomModal(room: Room) {
+    setEditingRoomId(room.id);
+    setRoomError(null);
+    const typeIsKnown = room.room_type && existingRoomTypes.includes(room.room_type);
+    setRoomForm({
+      floor_id: room.floor_id,
+      new_floor_number: "",
+      new_floor_name: "",
+      room_number: room.room_number,
+      room_type_select: typeIsKnown ? room.room_type! : NEW_TYPE_VALUE,
+      room_type_custom: typeIsKnown ? "" : room.room_type ?? "",
+      base_rent: room.base_rent ? String(room.base_rent) : "",
+      status: room.status,
     });
     setRoomModalOpen(true);
   }
@@ -128,44 +195,53 @@ export default function BuildingsPage() {
     setRoomForm((prev) => ({
       ...prev,
       floor_id: newFloorId,
-      room_number: newFloorId === NEW_FLOOR_VALUE ? prev.room_number : suggestNextRoomNumber(newFloorId),
+      room_number:
+        newFloorId === NEW_FLOOR_VALUE || editingRoomId
+          ? prev.room_number
+          : suggestNextRoomNumber(newFloorId),
     }));
   }
 
-  async function handleAddRoom(e: React.FormEvent) {
+  async function handleSaveRoom(e: React.FormEvent) {
     e.preventDefault();
     if (!selected) return;
-    if (isDuplicateRoomNumber(roomForm.room_number)) {
+    if (isDuplicateRoomNumber(roomForm.room_number, editingRoomId ?? undefined)) {
       setRoomError(`Room "${roomForm.room_number}" already exists in this building.`);
       return;
     }
     setRoomSaving(true);
     setRoomError(null);
     try {
-      let floorId = roomForm.floor_id;
-
-      if (floorId === NEW_FLOOR_VALUE) {
-        const newFloor = await api.post<Floor>("/floors", {
-          building_id: selected,
-          floor_number: parseInt(roomForm.new_floor_number, 10) || 1,
-          name: roomForm.new_floor_name || undefined,
-        });
-        floorId = newFloor.id;
-      }
-
       const roomType =
         roomForm.room_type_select === NEW_TYPE_VALUE
           ? roomForm.room_type_custom.trim()
           : roomForm.room_type_select;
 
-      await api.post("/rooms", {
-        building_id: selected,
-        floor_id: floorId,
-        room_number: roomForm.room_number,
-        room_type: roomType || undefined,
-        base_rent: roomForm.base_rent ? parseFloat(roomForm.base_rent) : undefined,
-      });
-
+      if (editingRoomId) {
+        await api.patch(`/rooms/${editingRoomId}`, {
+          room_number: roomForm.room_number,
+          room_type: roomType || undefined,
+          base_rent: roomForm.base_rent ? parseFloat(roomForm.base_rent) : undefined,
+          status: roomForm.status,
+        });
+      } else {
+        let floorId = roomForm.floor_id;
+        if (floorId === NEW_FLOOR_VALUE) {
+          const newFloor = await api.post<Floor>("/floors", {
+            building_id: selected,
+            floor_number: parseInt(roomForm.new_floor_number, 10) || 1,
+            name: roomForm.new_floor_name || undefined,
+          });
+          floorId = newFloor.id;
+        }
+        await api.post("/rooms", {
+          building_id: selected,
+          floor_id: floorId,
+          room_number: roomForm.room_number,
+          room_type: roomType || undefined,
+          base_rent: roomForm.base_rent ? parseFloat(roomForm.base_rent) : undefined,
+        });
+      }
       setRoomModalOpen(false);
       loadRoomsAndFloors();
     } catch (err: any) {
@@ -175,8 +251,22 @@ export default function BuildingsPage() {
     }
   }
 
+  async function handleArchiveRoom() {
+    if (!archiveRoomTarget) return;
+    setArchivingRoom(true);
+    try {
+      await api.post(`/rooms/${archiveRoomTarget.id}/archive`, {});
+      setArchiveRoomTarget(null);
+      setRoomModalOpen(false);
+      loadRoomsAndFloors();
+    } finally {
+      setArchivingRoom(false);
+    }
+  }
+
   const roomsForSelected = rooms?.filter((r) => r.building_id === selected) ?? [];
   const floorsForSelected = floors?.filter((f) => f.building_id === selected) ?? [];
+  const selectedBuilding = buildings?.find((b) => b.id === selected);
 
   return (
     <div className="space-y-6">
@@ -187,7 +277,7 @@ export default function BuildingsPage() {
             Every unit, its current status, and its maintenance history.
           </p>
         </div>
-        <Button onClick={() => setBuildingModalOpen(true)}>Add building</Button>
+        <Button onClick={openAddBuildingModal}>Add building</Button>
       </div>
 
       {buildings && buildings.length > 0 && (
@@ -207,9 +297,23 @@ export default function BuildingsPage() {
               </button>
             ))}
           </div>
-          <Button variant="secondary" onClick={openRoomModal} className="mb-2">
-            Add room
-          </Button>
+          <div className="flex gap-2 mb-2 no-print">
+            {selectedBuilding && (
+              <>
+                <Button variant="ghost" onClick={() => openEditBuildingModal(selectedBuilding)}>
+                  Edit building
+                </Button>
+                {canManage && (
+                  <Button variant="ghost" onClick={() => setArchiveBuildingTarget(selectedBuilding)}>
+                    Archive building
+                  </Button>
+                )}
+              </>
+            )}
+            <Button variant="secondary" onClick={openAddRoomModal}>
+              Add room
+            </Button>
+          </div>
         </div>
       )}
 
@@ -227,7 +331,11 @@ export default function BuildingsPage() {
             </p>
           )}
           {roomsForSelected.map((room) => (
-            <div key={room.id} className="card p-4 text-left">
+            <button
+              key={room.id}
+              onClick={() => openEditRoomModal(room)}
+              className="card p-4 text-left hover:border-brass-dark/50 transition-colors"
+            >
               <div className="flex items-center justify-between mb-3">
                 <span className="font-display text-lg font-semibold">{room.room_number}</span>
                 <StampBadge status={room.status} />
@@ -238,14 +346,18 @@ export default function BuildingsPage() {
                   Rs {Number(room.base_rent).toLocaleString("en-PK")}/mo
                 </p>
               )}
-            </div>
+            </button>
           ))}
         </div>
       )}
 
-      {/* Add building modal */}
-      <Modal open={buildingModalOpen} onClose={() => setBuildingModalOpen(false)} title="Add building">
-        <form onSubmit={handleAddBuilding} className="space-y-4">
+      {/* Add / Edit building modal */}
+      <Modal
+        open={buildingModalOpen}
+        onClose={() => setBuildingModalOpen(false)}
+        title={editingBuildingId ? "Edit building" : "Add building"}
+      >
+        <form onSubmit={handleSaveBuilding} className="space-y-4">
           <Field label="Building name">
             <Input
               required
@@ -278,39 +390,42 @@ export default function BuildingsPage() {
               Cancel
             </Button>
             <Button type="submit" disabled={buildingSaving}>
-              {buildingSaving ? "Saving…" : "Add building"}
+              {buildingSaving ? "Saving…" : editingBuildingId ? "Save changes" : "Add building"}
             </Button>
           </div>
+          {editingBuildingId && (
+            <div className="pt-4 border-t border-border">
+              <p className="text-xs uppercase tracking-wider text-ink/45 mb-2">History</p>
+              <HistoryPanel tableName="buildings" recordId={editingBuildingId} />
+            </div>
+          )}
         </form>
       </Modal>
 
-      {/* Add room modal (creates a floor automatically if needed) */}
-      <Modal open={roomModalOpen} onClose={() => setRoomModalOpen(false)} title="Add room">
-        <form onSubmit={handleAddRoom} className="space-y-4">
-          <Field label="Floor">
-            <Select
-              value={roomForm.floor_id}
-              onChange={(e) => handleFloorChange(e.target.value)}
-            >
-              {floorsForSelected.map((f) => (
-                <option key={f.id} value={f.id}>
-                  {f.name || `Floor ${f.floor_number}`}
-                </option>
-              ))}
-              <option value={NEW_FLOOR_VALUE}>+ Add a new floor…</option>
-            </Select>
-          </Field>
+      {/* Add / Edit room modal */}
+      <Modal open={roomModalOpen} onClose={() => setRoomModalOpen(false)} title={editingRoomId ? "Edit room" : "Add room"}>
+        <form onSubmit={handleSaveRoom} className="space-y-4">
+          {!editingRoomId && (
+            <Field label="Floor">
+              <Select value={roomForm.floor_id} onChange={(e) => handleFloorChange(e.target.value)}>
+                {floorsForSelected.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.name || `Floor ${f.floor_number}`}
+                  </option>
+                ))}
+                <option value={NEW_FLOOR_VALUE}>+ Add a new floor…</option>
+              </Select>
+            </Field>
+          )}
 
-          {roomForm.floor_id === NEW_FLOOR_VALUE && (
+          {!editingRoomId && roomForm.floor_id === NEW_FLOOR_VALUE && (
             <div className="grid grid-cols-2 gap-3 pl-3 border-l-2 border-border">
               <Field label="Floor number">
                 <Input
                   type="number"
                   required
                   value={roomForm.new_floor_number}
-                  onChange={(e) =>
-                    setRoomForm({ ...roomForm, new_floor_number: e.target.value })
-                  }
+                  onChange={(e) => setRoomForm({ ...roomForm, new_floor_number: e.target.value })}
                 />
               </Field>
               <Field label="Floor name (optional)">
@@ -326,9 +441,11 @@ export default function BuildingsPage() {
           <Field
             label="Room number"
             hint={
-              isDuplicateRoomNumber(roomForm.room_number)
+              isDuplicateRoomNumber(roomForm.room_number, editingRoomId ?? undefined)
                 ? undefined
-                : "Suggested automatically based on this floor's existing rooms — edit freely."
+                : !editingRoomId
+                ? "Suggested automatically based on this floor's existing rooms — edit freely."
+                : undefined
             }
           >
             <Input
@@ -336,23 +453,16 @@ export default function BuildingsPage() {
               placeholder="e.g. A-101"
               value={roomForm.room_number}
               onChange={(e) => setRoomForm({ ...roomForm, room_number: e.target.value })}
-              className={isDuplicateRoomNumber(roomForm.room_number) ? "border-stamp-red" : ""}
+              className={isDuplicateRoomNumber(roomForm.room_number, editingRoomId ?? undefined) ? "border-stamp-red" : ""}
             />
-            {isDuplicateRoomNumber(roomForm.room_number) && (
+            {isDuplicateRoomNumber(roomForm.room_number, editingRoomId ?? undefined) && (
               <p className="text-xs text-stamp-red mt-1">
                 A room with this number already exists in this building.
               </p>
             )}
           </Field>
 
-          <Field
-            label="Room type"
-            hint={
-              existingRoomTypes.length > 0
-                ? "Pick an existing type to keep naming consistent, or add a new one."
-                : undefined
-            }
-          >
+          <Field label="Room type" hint="Pick an existing type to keep naming consistent, or add a new one.">
             <Select
               value={roomForm.room_type_select}
               onChange={(e) => setRoomForm({ ...roomForm, room_type_select: e.target.value })}
@@ -385,17 +495,77 @@ export default function BuildingsPage() {
             />
           </Field>
 
+          {editingRoomId && (
+            <Field label="Status">
+              <Select
+                value={roomForm.status}
+                onChange={(e) => setRoomForm({ ...roomForm, status: e.target.value })}
+              >
+                {ROOM_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {s.replace("_", " ")}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
+
           {roomError && <p className="text-sm text-stamp-red">{roomError}</p>}
-          <div className="flex justify-end gap-2 pt-2">
-            <Button type="button" variant="ghost" onClick={() => setRoomModalOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={roomSaving || isDuplicateRoomNumber(roomForm.room_number)}>
-              {roomSaving ? "Saving…" : "Add room"}
-            </Button>
+          <div className="flex justify-between items-center pt-2">
+            <div>
+              {editingRoomId && canManage && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => {
+                    const room = rooms?.find((r) => r.id === editingRoomId);
+                    if (room) setArchiveRoomTarget(room);
+                  }}
+                >
+                  Archive room
+                </Button>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <Button type="button" variant="ghost" onClick={() => setRoomModalOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={roomSaving || isDuplicateRoomNumber(roomForm.room_number, editingRoomId ?? undefined)}
+              >
+                {roomSaving ? "Saving…" : editingRoomId ? "Save changes" : "Add room"}
+              </Button>
+            </div>
           </div>
+          {editingRoomId && (
+            <div className="pt-4 border-t border-border">
+              <p className="text-xs uppercase tracking-wider text-ink/45 mb-2">History</p>
+              <HistoryPanel tableName="rooms" recordId={editingRoomId} />
+            </div>
+          )}
         </form>
       </Modal>
+
+      <ConfirmModal
+        open={!!archiveBuildingTarget}
+        onClose={() => setArchiveBuildingTarget(null)}
+        onConfirm={handleArchiveBuilding}
+        title="Archive building?"
+        message={`"${archiveBuildingTarget?.name}" and its rooms will be hidden from lists, but all history stays intact.`}
+        confirmLabel="Archive"
+        confirming={archivingBuilding}
+      />
+
+      <ConfirmModal
+        open={!!archiveRoomTarget}
+        onClose={() => setArchiveRoomTarget(null)}
+        onConfirm={handleArchiveRoom}
+        title="Archive room?"
+        message={`Room "${archiveRoomTarget?.room_number}" will be hidden from lists, but its history stays intact.`}
+        confirmLabel="Archive"
+        confirming={archivingRoom}
+      />
     </div>
   );
 }
