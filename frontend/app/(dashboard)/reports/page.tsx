@@ -4,10 +4,11 @@ import { useEffect, useState } from "react";
 import { Printer } from "lucide-react";
 import { Card, DataTable } from "@/components/ui/Card";
 import { StampBadge } from "@/components/ui/StampBadge";
-import { Select, Field } from "@/components/ui/Field";
+import { Select, Field, Input, AmountInput } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
-import { api, Tenant, Lease, Room, Building, Invoice } from "@/lib/api";
+import { PrintHeader } from "@/components/ui/PrintHeader";
+import { api, Tenant, Lease, Room, Building, Invoice, Company } from "@/lib/api";
 
 type PnlRow = {
   month: string;
@@ -76,14 +77,28 @@ export default function ReportsPage() {
   const [expenses, setExpenses] = useState<Expense[] | null>(null);
   const [salaryPayments, setSalaryPayments] = useState<SalaryPayment[] | null>(null);
   const [collectionVsExpense, setCollectionVsExpense] = useState<CollectionVsExpenseRow[] | null>(null);
+  const [company, setCompany] = useState<Company | null>(null);
   const [selectedTenantId, setSelectedTenantId] = useState<string>("");
   const [selectedBuildingFilter, setSelectedBuildingFilter] = useState<string>("");
+  const [selectedMonthFilter, setSelectedMonthFilter] = useState<string>("");
+
+  const [refundModalOpen, setRefundModalOpen] = useState(false);
+  const [refundTarget, setRefundTarget] = useState<SecurityDeposit | null>(null);
+  const [refundSaving, setRefundSaving] = useState(false);
+  const [refundError, setRefundError] = useState<string | null>(null);
+  const [refundDate, setRefundDate] = useState(new Date().toISOString().slice(0, 10));
+  const [deductions, setDeductions] = useState<{ reason: string; amount: string }[]>([]);
 
   const [pnlDetailMonth, setPnlDetailMonth] = useState<PnlRow | null>(null);
 
+  function loadDeposits() {
+    api.get<SecurityDeposit[]>("/security-deposits").then(setDeposits);
+  }
+
   useEffect(() => {
     api.get<PnlRow[]>("/reports/pnl").then(setPnl);
-    api.get<SecurityDeposit[]>("/security-deposits").then(setDeposits);
+    api.get<Company>("/company/me").then(setCompany);
+    loadDeposits();
     api.get<Lease[]>("/leases").then(setLeases);
     api.get<Tenant[]>("/tenants").then((data) => {
       setTenants(data);
@@ -109,6 +124,50 @@ export default function ReportsPage() {
     return room ? `${building?.name ?? "—"} — ${room.room_number}` : "—";
   };
   const categoryName = (id: string) => categories?.find((c) => c.id === id)?.name ?? "—";
+
+  function openRefundModal(deposit: SecurityDeposit) {
+    setRefundTarget(deposit);
+    setRefundError(null);
+    setRefundDate(new Date().toISOString().slice(0, 10));
+    setDeductions([]);
+    setRefundModalOpen(true);
+  }
+
+  function addDeduction() {
+    setDeductions((prev) => [...prev, { reason: "", amount: "" }]);
+  }
+
+  function updateDeduction(index: number, field: "reason" | "amount", value: string) {
+    setDeductions((prev) => prev.map((d, i) => (i === index ? { ...d, [field]: value } : d)));
+  }
+
+  function removeDeduction(index: number) {
+    setDeductions((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  const totalDeductions = deductions.reduce((s, d) => s + (parseFloat(d.amount) || 0), 0);
+  const netRefund = refundTarget ? Number(refundTarget.amount_received) - totalDeductions : 0;
+
+  async function handleRefund(e: React.FormEvent) {
+    e.preventDefault();
+    if (!refundTarget) return;
+    setRefundSaving(true);
+    setRefundError(null);
+    try {
+      await api.post(`/security-deposits/${refundTarget.id}/refund`, {
+        deductions: deductions
+          .filter((d) => d.reason && d.amount)
+          .map((d) => ({ reason: d.reason, amount: parseFloat(d.amount) })),
+        refund_date: refundDate,
+      });
+      setRefundModalOpen(false);
+      loadDeposits();
+    } catch (err: any) {
+      setRefundError(err.message);
+    } finally {
+      setRefundSaving(false);
+    }
+  }
 
   // --- Tenant ledger ---
   const tenantLeaseIds = (leases ?? []).filter((l) => l.tenant_id === selectedTenantId).map((l) => l.id);
@@ -142,9 +201,14 @@ export default function ReportsPage() {
 
   // --- Collection vs bills ---
   const buildingsForFilter = buildings ?? [];
-  const filteredCollectionVsExpense = (collectionVsExpense ?? []).filter(
-    (r) => !selectedBuildingFilter || r.building_id === selectedBuildingFilter
-  );
+  const availableMonths = Array.from(
+    new Set((collectionVsExpense ?? []).map((r) => monthOf(r.month)))
+  ).sort((a, b) => b.localeCompare(a));
+  const filteredCollectionVsExpense = (collectionVsExpense ?? []).filter((r) => {
+    if (selectedBuildingFilter && r.building_id !== selectedBuildingFilter) return false;
+    if (selectedMonthFilter && monthOf(r.month) !== selectedMonthFilter) return false;
+    return true;
+  });
   // Match each billed line-item to the actual expense total for the same building+category+month
   const collectionVsExpenseRows = filteredCollectionVsExpense.map((r) => {
     const matchingCategory = categories?.find(
@@ -159,7 +223,12 @@ export default function ReportsPage() {
           monthOf(e.expense_date) === monthOf(r.month)
       )
       .reduce((s, e) => s + Number(e.amount || 0), 0);
-    return { ...r, actualExpense, diff: Number(r.amount_billed_to_tenants) - actualExpense };
+    return {
+      ...r,
+      rowKey: `${r.building_id}-${r.label}-${r.month}`,
+      actualExpense,
+      diff: Number(r.amount_billed_to_tenants) - actualExpense,
+    };
   });
 
   // --- P&L detail breakdown for the clicked month ---
@@ -181,6 +250,7 @@ export default function ReportsPage() {
 
   return (
     <div className="space-y-6">
+      <PrintHeader company={company} reportTitle={tab} />
       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-display font-semibold">Reports</h1>
@@ -251,6 +321,16 @@ export default function ReportsPage() {
               {
                 header: "Refunded",
                 accessor: (d) => (d.amount_refunded ? <span className="figures">{formatPkr(d.amount_refunded)}</span> : "—"),
+                align: "right",
+              },
+              {
+                header: "",
+                accessor: (d) =>
+                  d.status !== "refunded" ? (
+                    <Button variant="secondary" onClick={() => openRefundModal(d)} className="no-print">
+                      Refund
+                    </Button>
+                  ) : null,
                 align: "right",
               },
             ]}
@@ -362,20 +442,32 @@ export default function ReportsPage() {
       {tab === "Collection vs Bills" && (
         <div className="space-y-4">
           <Card className="no-print">
-            <Field label="Building">
-              <Select value={selectedBuildingFilter} onChange={(e) => setSelectedBuildingFilter(e.target.value)}>
-                <option value="">All buildings</option>
-                {buildingsForFilter.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.name}
-                  </option>
-                ))}
-              </Select>
-            </Field>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Field label="Building">
+                <Select value={selectedBuildingFilter} onChange={(e) => setSelectedBuildingFilter(e.target.value)}>
+                  <option value="">All buildings</option>
+                  {buildingsForFilter.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="Month">
+                <Select value={selectedMonthFilter} onChange={(e) => setSelectedMonthFilter(e.target.value)}>
+                  <option value="">All months</option>
+                  {availableMonths.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
           </Card>
           <Card title="What tenants were billed vs. what was actually paid out">
             <DataTable
-              keyField="building_id"
+              keyField="rowKey"
               rows={collectionVsExpenseRows}
               emptyMessage="Not enough invoice data yet to compare."
               columns={[
@@ -460,6 +552,71 @@ export default function ReportsPage() {
               );
             })()}
           </div>
+        )}
+      </Modal>
+
+      <Modal
+        open={refundModalOpen}
+        onClose={() => setRefundModalOpen(false)}
+        title="Refund security deposit"
+      >
+        {refundTarget && (
+          <form onSubmit={handleRefund} className="space-y-4">
+            <p className="text-xs text-ink/50 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2">
+              {tenantName(leaseById(refundTarget.lease_id)?.tenant_id ?? "")} —{" "}
+              {roomLabel(leaseById(refundTarget.lease_id)?.room_id)} — held:{" "}
+              <span className="figures font-medium">{formatPkr(refundTarget.amount_received)}</span>
+            </p>
+
+            <div>
+              <p className="text-sm font-medium mb-2">Deductions (optional)</p>
+              {deductions.map((d, i) => (
+                <div key={i} className="flex items-end gap-2 mb-2">
+                  <div className="flex-1">
+                    <Input
+                      placeholder="Reason (e.g. wall damage)"
+                      value={d.reason}
+                      onChange={(e) => updateDeduction(i, "reason", e.target.value)}
+                    />
+                  </div>
+                  <div className="w-32">
+                    <AmountInput
+                      value={d.amount}
+                      onChange={(e) => updateDeduction(i, "amount", e.target.value)}
+                    />
+                  </div>
+                  <Button type="button" variant="ghost" onClick={() => removeDeduction(i)}>
+                    Remove
+                  </Button>
+                </div>
+              ))}
+              <Button type="button" variant="secondary" onClick={addDeduction}>
+                + Add deduction
+              </Button>
+            </div>
+
+            <Field label="Refund date">
+              <Input type="date" required value={refundDate} onChange={(e) => setRefundDate(e.target.value)} />
+            </Field>
+
+            <div className="ledger-rule pt-3 flex justify-between items-center">
+              <span className="text-sm font-medium">Net refund</span>
+              <span className="text-lg font-display font-semibold figures">{formatPkr(netRefund)}</span>
+            </div>
+
+            {refundError && <p className="text-sm text-stamp-red">{refundError}</p>}
+            <div className="flex justify-end gap-2 pt-2">
+              <Button type="button" variant="ghost" onClick={() => setRefundModalOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={refundSaving || netRefund < 0}>
+                {refundSaving ? "Processing…" : "Refund deposit"}
+              </Button>
+            </div>
+            {netRefund < 0 && (
+              <p className="text-xs text-stamp-red">Deductions can&apos;t exceed the amount held.</p>
+            )}
+          </form>
         )}
       </Modal>
     </div>

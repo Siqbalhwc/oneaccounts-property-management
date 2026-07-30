@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, Invoice, Lease, Building, fetchPdfBlob } from "@/lib/api";
+import { api, Invoice, Lease, Building, Tenant, Room, fetchPdfBlob } from "@/lib/api";
 import { Card, DataTable } from "@/components/ui/Card";
 import { StampBadge } from "@/components/ui/StampBadge";
 import { Button } from "@/components/ui/Button";
@@ -15,7 +15,11 @@ function formatPkr(n: number) {
 export default function InvoicesPage() {
   const [invoices, setInvoices] = useState<Invoice[] | null>(null);
   const [buildings, setBuildings] = useState<Building[] | null>(null);
+  const [leases, setLeases] = useState<Lease[] | null>(null);
+  const [tenants, setTenants] = useState<Tenant[] | null>(null);
+  const [rooms, setRooms] = useState<Room[] | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [monthFilter, setMonthFilter] = useState<string>("");
 
   const [generateModalOpen, setGenerateModalOpen] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -45,6 +49,9 @@ export default function InvoicesPage() {
   useEffect(() => {
     load();
     api.get<Building[]>("/buildings").then(setBuildings);
+    api.get<Lease[]>("/leases").then(setLeases);
+    api.get<Tenant[]>("/tenants").then(setTenants);
+    api.get<Room[]>("/rooms").then(setRooms);
   }, []);
 
   async function handleGenerate(e: React.FormEvent) {
@@ -110,7 +117,6 @@ export default function InvoicesPage() {
     setPaymentSaving(true);
     setPaymentError(null);
     try {
-      // The tenant behind this invoice comes from its lease.
       const lease = await api.get<Lease>(`/leases/${activeInvoice.lease_id}`);
       await api.post("/payments", {
         invoice_id: activeInvoice.id,
@@ -129,9 +135,28 @@ export default function InvoicesPage() {
     }
   }
 
+  const leaseById = (id: string) => leases?.find((l) => l.id === id);
+  const tenantName = (leaseId: string) => {
+    const tenantId = leaseById(leaseId)?.tenant_id;
+    return tenants?.find((t) => t.id === tenantId)?.full_name ?? "—";
+  };
+  const propertyAndRoom = (leaseId: string) => {
+    const roomId = leaseById(leaseId)?.room_id;
+    const room = rooms?.find((r) => r.id === roomId);
+    const building = buildings?.find((b) => b.id === room?.building_id);
+    return room ? `${building?.name ?? "—"} — ${room.room_number}` : "—";
+  };
+
+  const availableMonths = Array.from(new Set((invoices ?? []).map((i) => i.invoice_month.slice(0, 7)))).sort(
+    (a, b) => b.localeCompare(a)
+  );
+  const filteredInvoices = (invoices ?? []).filter(
+    (i) => !monthFilter || i.invoice_month.startsWith(monthFilter)
+  );
+
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-display font-semibold">Invoices</h1>
           <p className="text-sm text-ink/55 mt-1">
@@ -142,13 +167,26 @@ export default function InvoicesPage() {
       </div>
 
       <Card>
+        <div className="flex items-center justify-between mb-4 no-print">
+          <div className="w-48">
+            <Select value={monthFilter} onChange={(e) => setMonthFilter(e.target.value)}>
+              <option value="">All months</option>
+              {availableMonths.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </Select>
+          </div>
+        </div>
         <DataTable
           keyField="id"
-          rows={invoices ?? []}
+          rows={filteredInvoices}
           emptyMessage="No invoices generated yet."
           columns={[
             { header: "Month", accessor: (i) => i.invoice_month },
-            { header: "Due date", accessor: (i) => i.due_date },
+            { header: "Tenant", accessor: (i) => tenantName(i.lease_id) },
+            { header: "Property / Room", accessor: (i) => propertyAndRoom(i.lease_id) },
             {
               header: "Amount",
               accessor: (i) => <span className="figures">{formatPkr(i.total_amount)}</span>,
@@ -158,7 +196,7 @@ export default function InvoicesPage() {
             {
               header: "",
               accessor: (i) => (
-                <div className="flex items-center justify-end gap-1">
+                <div className="flex items-center justify-end gap-1 no-print">
                   {i.status !== "paid" && (
                     <Button variant="secondary" onClick={() => openPaymentModal(i)}>
                       Record payment

@@ -13,6 +13,7 @@ from app.routers import (
     security_deposits,
     signup,
     simple_resources,
+    staff_allocations,
     team,
 )
 
@@ -58,6 +59,7 @@ app.include_router(signup.router, prefix=API_PREFIX)
 app.include_router(team.router, prefix=API_PREFIX)
 app.include_router(platform_admin.router, prefix=API_PREFIX)
 app.include_router(audit_log.router, prefix=API_PREFIX)
+app.include_router(staff_allocations.router, prefix=API_PREFIX)
 
 
 @app.get("/")

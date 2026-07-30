@@ -57,6 +57,14 @@ export default function StaffPage() {
     payment_date: new Date().toISOString().slice(0, 10),
   });
 
+  const [allocationModalOpen, setAllocationModalOpen] = useState(false);
+  const [allocationStaff, setAllocationStaff] = useState<Staff | null>(null);
+  const [allocationSaving, setAllocationSaving] = useState(false);
+  const [allocationError, setAllocationError] = useState<string | null>(null);
+  const [allocationEnabled, setAllocationEnabled] = useState(false);
+  const [allocationType, setAllocationType] = useState<"percentage" | "fixed">("percentage");
+  const [allocationRows, setAllocationRows] = useState<{ building_id: string; value: string }[]>([]);
+
   function load() {
     api.get<Staff[]>("/staff").then(setStaff);
     api.get<SalaryPayment[]>("/salary_payments").then(setSalaryPayments);
@@ -134,6 +142,69 @@ export default function StaffPage() {
     }
   }
 
+  async function openAllocationModal(member: Staff) {
+    setAllocationStaff(member);
+    setAllocationError(null);
+    try {
+      const existing = await api.get<
+        { building_id: string; allocation_type: string; value: number }[]
+      >(`/staff/${member.id}/allocations`);
+      if (existing.length > 0) {
+        setAllocationEnabled(true);
+        setAllocationType(existing[0].allocation_type as "percentage" | "fixed");
+        setAllocationRows(existing.map((a) => ({ building_id: a.building_id, value: String(a.value) })));
+      } else {
+        setAllocationEnabled(false);
+        setAllocationType("percentage");
+        setAllocationRows([]);
+      }
+    } catch {
+      setAllocationEnabled(false);
+      setAllocationRows([]);
+    }
+    setAllocationModalOpen(true);
+  }
+
+  function toggleBuildingRow(buildingId: string, checked: boolean) {
+    setAllocationRows((prev) =>
+      checked
+        ? [...prev, { building_id: buildingId, value: "" }]
+        : prev.filter((r) => r.building_id !== buildingId)
+    );
+  }
+
+  function updateAllocationValue(buildingId: string, value: string) {
+    setAllocationRows((prev) =>
+      prev.map((r) => (r.building_id === buildingId ? { ...r, value } : r))
+    );
+  }
+
+  const allocationTotal = allocationRows.reduce((s, r) => s + (parseFloat(r.value) || 0), 0);
+  const allocationOverLimit = allocationType === "percentage" && allocationTotal > 100;
+
+  async function handleSaveAllocations() {
+    if (!allocationStaff) return;
+    setAllocationSaving(true);
+    setAllocationError(null);
+    try {
+      const allocations = allocationEnabled
+        ? allocationRows
+            .filter((r) => r.value)
+            .map((r) => ({
+              building_id: r.building_id,
+              allocation_type: allocationType,
+              value: parseFloat(r.value),
+            }))
+        : [];
+      await api.put(`/staff/${allocationStaff.id}/allocations`, { allocations });
+      setAllocationModalOpen(false);
+    } catch (err: any) {
+      setAllocationError(err.message);
+    } finally {
+      setAllocationSaving(false);
+    }
+  }
+
   const buildingName = (id?: string) => buildings?.find((b) => b.id === id)?.name ?? "All buildings";
   const paymentsFor = (staffId: string) =>
     (salaryPayments ?? []).filter((p) => p.staff_id === staffId).sort((a, b) => b.salary_month.localeCompare(a.salary_month));
@@ -181,9 +252,14 @@ export default function StaffPage() {
             {
               header: "",
               accessor: (s) => (
-                <Button variant="secondary" onClick={() => openPayModal(s)}>
-                  Pay salary
-                </Button>
+                <div className="flex justify-end gap-1">
+                  <Button variant="ghost" onClick={() => openAllocationModal(s)}>
+                    Allocation
+                  </Button>
+                  <Button variant="secondary" onClick={() => openPayModal(s)}>
+                    Pay salary
+                  </Button>
+                </div>
               ),
               align: "right",
             },
@@ -291,6 +367,94 @@ export default function StaffPage() {
             </Button>
           </div>
         </form>
+      </Modal>
+
+      <Modal
+        open={allocationModalOpen}
+        onClose={() => setAllocationModalOpen(false)}
+        title={`Salary allocation — ${allocationStaff?.full_name ?? ""}`}
+      >
+        <div className="space-y-4">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={allocationEnabled}
+              onChange={(e) => setAllocationEnabled(e.target.checked)}
+            />
+            Split this person&apos;s salary cost across multiple properties
+          </label>
+          <p className="text-xs text-ink/50">
+            Useful for a manager or staff member who oversees more than one
+            building — each building&apos;s owner ledger will then reflect its
+            fair share of the cost whenever a salary payment is recorded.
+          </p>
+
+          {allocationEnabled && (
+            <>
+              <Field label="Allocation method">
+                <Select
+                  value={allocationType}
+                  onChange={(e) => setAllocationType(e.target.value as "percentage" | "fixed")}
+                >
+                  <option value="percentage">Percentage of salary</option>
+                  <option value="fixed">Fixed amount</option>
+                </Select>
+              </Field>
+
+              <div className="space-y-2">
+                {buildings?.map((b) => {
+                  const row = allocationRows.find((r) => r.building_id === b.id);
+                  const checked = !!row;
+                  return (
+                    <div key={b.id} className="flex items-center gap-3">
+                      <label className="flex items-center gap-2 text-sm flex-1">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => toggleBuildingRow(b.id, e.target.checked)}
+                        />
+                        {b.name}
+                      </label>
+                      {checked && (
+                        <div className="w-28">
+                          {allocationType === "percentage" ? (
+                            <Input
+                              type="number"
+                              placeholder="%"
+                              value={row?.value ?? ""}
+                              onChange={(e) => updateAllocationValue(b.id, e.target.value)}
+                            />
+                          ) : (
+                            <AmountInput
+                              value={row?.value ?? ""}
+                              onChange={(e) => updateAllocationValue(b.id, e.target.value)}
+                            />
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {allocationType === "percentage" && (
+                <p className={`text-xs ${allocationOverLimit ? "text-stamp-red" : "text-ink/50"}`}>
+                  Total: {allocationTotal}% {allocationOverLimit && "— can't exceed 100%"}
+                </p>
+              )}
+            </>
+          )}
+
+          {allocationError && <p className="text-sm text-stamp-red">{allocationError}</p>}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" variant="ghost" onClick={() => setAllocationModalOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleSaveAllocations} disabled={allocationSaving || allocationOverLimit}>
+              {allocationSaving ? "Saving…" : "Save allocation"}
+            </Button>
+          </div>
+        </div>
       </Modal>
     </div>
   );

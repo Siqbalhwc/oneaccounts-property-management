@@ -6,8 +6,9 @@ import { Card, DataTable } from "@/components/ui/Card";
 import { StampBadge } from "@/components/ui/StampBadge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
+import { PrintHeader } from "@/components/ui/PrintHeader";
 import { Field, Input, AmountInput, Select } from "@/components/ui/Field";
-import { api, Building } from "@/lib/api";
+import { api, Building, Company } from "@/lib/api";
 
 type LedgerRow = {
   id: string;
@@ -27,6 +28,7 @@ function formatPkr(n: number) {
 export default function OwnerLedgerPage() {
   const [rows, setRows] = useState<LedgerRow[] | null>(null);
   const [buildings, setBuildings] = useState<Building[] | null>(null);
+  const [company, setCompany] = useState<Company | null>(null);
 
   const [computeModalOpen, setComputeModalOpen] = useState(false);
   const [computeSaving, setComputeSaving] = useState(false);
@@ -54,6 +56,7 @@ export default function OwnerLedgerPage() {
 
   useEffect(() => {
     load();
+    api.get<Company>("/company/me").then(setCompany);
     api.get<Building[]>("/buildings").then((data) => {
       setBuildings(data);
       setComputeForm((f) => (f.building_id ? f : { ...f, building_id: data[0]?.id ?? "" }));
@@ -130,6 +133,7 @@ export default function OwnerLedgerPage() {
 
   return (
     <div className="space-y-6">
+      <PrintHeader company={company} reportTitle="Owner Ledger" />
       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-display font-semibold">Owner ledger</h1>

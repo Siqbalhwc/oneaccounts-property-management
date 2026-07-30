@@ -85,6 +85,36 @@ def compute_ledger(
         .data
     )
     total_expenses = sum(float(e["amount"]) for e in expenses)
+
+    # Add this building's allocated share of any staff salaries actually paid
+    # this month (e.g. a manager overseeing 3 buildings, split by %/fixed).
+    allocations = (
+        supabase.table("staff_allocations")
+        .select("staff_id, allocation_type, value")
+        .eq("building_id", payload.building_id)
+        .execute()
+        .data
+    )
+    allocated_salary_cost = 0.0
+    for alloc in allocations:
+        payments_this_month = (
+            supabase.table("salary_payments")
+            .select("amount_paid")
+            .eq("staff_id", alloc["staff_id"])
+            .gte("salary_month", str(ledger_month))
+            .lt("salary_month", str(next_month))
+            .execute()
+            .data
+        )
+        paid_amount = sum(float(p["amount_paid"]) for p in payments_this_month)
+        if paid_amount == 0:
+            continue
+        if alloc["allocation_type"] == "percentage":
+            allocated_salary_cost += paid_amount * (float(alloc["value"]) / 100)
+        else:  # fixed
+            allocated_salary_cost += min(float(alloc["value"]), paid_amount)
+    total_expenses += allocated_salary_cost
+
     amount_payable = total_collected - total_expenses
 
     existing = (

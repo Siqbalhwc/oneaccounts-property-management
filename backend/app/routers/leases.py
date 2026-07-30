@@ -101,6 +101,30 @@ def create_lease(
     want true atomicity later, wrap this logic in a single Postgres function
     and call it via supabase.rpc() instead.
     """
+    existing_active = (
+        supabase.table("leases")
+        .select("id, room_id")
+        .eq("tenant_id", payload.tenant_id)
+        .eq("status", "active")
+        .execute()
+    )
+    if existing_active.data:
+        room = (
+            supabase.table("rooms")
+            .select("room_number, building_id")
+            .eq("id", existing_active.data[0]["room_id"])
+            .single()
+            .execute()
+        )
+        room_label = room.data["room_number"] if room.data else "another room"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This tenant already has an active lease (room {room_label}). "
+                "Terminate the existing lease before creating a new one."
+            ),
+        )
+
     lease_row = {
         "company_id": company_id,
         "tenant_id": payload.tenant_id,
