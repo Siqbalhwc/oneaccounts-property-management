@@ -19,6 +19,7 @@ export default function InvoicesPage() {
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
   const [rooms, setRooms] = useState<Room[] | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [sendingWhatsappId, setSendingWhatsappId] = useState<string | null>(null);
   const [monthFilter, setMonthFilter] = useState<string>("");
 
   const [generateModalOpen, setGenerateModalOpen] = useState(false);
@@ -96,6 +97,20 @@ export default function InvoicesPage() {
       window.open(url, "_blank");
     } finally {
       setDownloadingId(null);
+    }
+  }
+
+  async function handleSendWhatsapp(invoiceId: string) {
+    setSendingWhatsappId(invoiceId);
+    try {
+      const result = await api.post<{ whatsapp_url: string }>(`/invoices/${invoiceId}/whatsapp-link`);
+      window.open(result.whatsapp_url, "_blank");
+      await api.post(`/invoices/${invoiceId}/mark-sent`, {});
+      load();
+    } catch (err: any) {
+      alert(`Couldn't prepare the WhatsApp message: ${err.message}`);
+    } finally {
+      setSendingWhatsappId(null);
     }
   }
 
@@ -202,6 +217,13 @@ export default function InvoicesPage() {
                       Record payment
                     </Button>
                   )}
+                  <Button
+                    variant="ghost"
+                    onClick={() => handleSendWhatsapp(i.id)}
+                    disabled={sendingWhatsappId === i.id}
+                  >
+                    {sendingWhatsappId === i.id ? "Preparing…" : "Send via WhatsApp"}
+                  </Button>
                   <Button
                     variant="ghost"
                     onClick={() => handleViewPdf(i.id)}

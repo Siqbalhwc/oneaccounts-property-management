@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import Client
 
-from app.core.deps import get_current_company_id, get_supabase
+from app.core.deps import get_current_company_id, get_service_client, get_supabase
 
 router = APIRouter(prefix="/invoices", tags=["Invoices"])
 
@@ -157,194 +157,94 @@ def invoice_pdf(invoice_id: str, supabase: Client = Depends(get_supabase)):
     with reportlab (pure Python, no system dependencies -- works fine on
     Vercel's serverless Python runtime).
     """
-    import io
-    import urllib.request
-
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from reportlab.lib.utils import ImageReader
-    from reportlab.pdfgen import canvas
     from fastapi.responses import StreamingResponse
+    import io
 
-    invoice = supabase.table("invoices").select("*").eq("id", invoice_id).single().execute()
-    if not invoice.data:
-        raise HTTPException(status_code=404, detail="Invoice not found")
-    invoice = invoice.data
+    from app.services.invoice_pdf import fetch_invoice_context, render_invoice_pdf
 
-    line_items = (
-        supabase.table("invoice_line_items")
-        .select("*")
-        .eq("invoice_id", invoice_id)
-        .execute()
-        .data
-    )
-
-    lease = (
-        supabase.table("leases").select("*").eq("id", invoice["lease_id"]).single().execute().data
-    )
-    tenant = (
-        supabase.table("tenants").select("*").eq("id", lease["tenant_id"]).single().execute().data
-    )
-    room = supabase.table("rooms").select("*").eq("id", lease["room_id"]).single().execute().data
-    building = (
-        supabase.table("buildings")
-        .select("*")
-        .eq("id", room["building_id"])
-        .single()
-        .execute()
-        .data
-    )
-    company = (
-        supabase.table("companies")
-        .select("*")
-        .eq("id", invoice["company_id"])
-        .single()
-        .execute()
-        .data
-    )
-
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
-
-    # Brand colors (same palette as the app)
-    LEDGER = (0.184, 0.310, 0.239)   # #2F4F3D
-    BRASS = (0.784, 0.608, 0.361)    # #C89B5C
-    INK = (0.122, 0.176, 0.141)      # #1F2D24
-    PAPER = (0.953, 0.949, 0.902)    # #F3F1E6
-    STATUS_COLORS = {
-        "paid": (0.184, 0.310, 0.239),
-        "sent": (0.722, 0.525, 0.180),
-        "draft": (0.722, 0.525, 0.180),
-        "partial": (0.722, 0.525, 0.180),
-        "overdue": (0.651, 0.239, 0.251),
-        "cancelled": (0.337, 0.373, 0.353),
-    }
-
-    # --- Header band ---
-    band_height = 38 * mm
-    c.setFillColorRGB(*LEDGER)
-    c.rect(0, height - band_height, width, band_height, fill=1, stroke=0)
-
-    text_x = 20 * mm
-    if company.get("logo_url"):
-        try:
-            with urllib.request.urlopen(company["logo_url"], timeout=5) as resp:
-                logo_bytes = io.BytesIO(resp.read())
-            logo_size = 22 * mm
-            c.drawImage(
-                ImageReader(logo_bytes),
-                20 * mm,
-                height - band_height / 2 - logo_size / 2,
-                width=logo_size,
-                height=logo_size,
-                preserveAspectRatio=True,
-                mask="auto",
-            )
-            text_x = 20 * mm + logo_size + 8 * mm
-        except Exception:
-            pass  # logo fetch failed -- fall back to text-only letterhead
-
-    c.setFillColorRGB(1, 1, 1)
-    c.setFont("Helvetica-Bold", 17)
-    c.drawString(text_x, height - 16 * mm, company.get("name") or "")
-    c.setFont("Helvetica", 9)
-    c.setFillColorRGB(0.9, 0.92, 0.9)
-    line_y = height - 23 * mm
-    if company.get("address"):
-        c.drawString(text_x, line_y, company["address"])
-        line_y -= 5 * mm
-    if company.get("phone"):
-        c.drawString(text_x, line_y, company["phone"])
-
-    # --- Invoice title + status badge ---
-    y = height - band_height - 14 * mm
-    c.setFillColorRGB(*INK)
-    c.setFont("Helvetica-Bold", 15)
-    c.drawString(20 * mm, y, "INVOICE")
-
-    status = invoice["status"]
-    status_color = STATUS_COLORS.get(status, (0.34, 0.37, 0.35))
-    badge_text = status.upper()
-    c.setFont("Helvetica-Bold", 9)
-    badge_width = c.stringWidth(badge_text, "Helvetica-Bold", 9) + 10 * mm
-    badge_x = width - 20 * mm - badge_width
-    c.setFillColorRGB(*status_color)
-    c.roundRect(badge_x, y - 3 * mm, badge_width, 8 * mm, 1.5 * mm, fill=1, stroke=0)
-    c.setFillColorRGB(1, 1, 1)
-    c.drawCentredString(badge_x + badge_width / 2, y - 0.5 * mm, badge_text)
-
-    # --- Brass accent rule (echoes the app's "ledger-rule" divider) ---
-    y -= 10 * mm
-    c.setStrokeColorRGB(*BRASS)
-    c.setLineWidth(2)
-    c.line(20 * mm, y, 20 * mm + 12 * mm, y)
-    c.setStrokeColorRGB(0.86, 0.84, 0.77)
-    c.setLineWidth(0.75)
-    c.line(20 * mm + 12 * mm, y, width - 20 * mm, y)
-
-    y -= 8 * mm
-    c.setFillColorRGB(*INK)
-    c.setFont("Helvetica", 10)
-    c.drawString(20 * mm, y, f"Invoice month: {invoice['invoice_month']}")
-    c.drawRightString(width - 20 * mm, y, f"Due date: {invoice['due_date']}")
-
-    y -= 12 * mm
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(20 * mm, y, "Billed to")
-    y -= 6 * mm
-    c.setFont("Helvetica", 10)
-    c.drawString(20 * mm, y, tenant.get("full_name") or "")
-    y -= 5 * mm
-    c.setFillColorRGB(0.3, 0.34, 0.32)
-    c.drawString(20 * mm, y, f"CNIC: {tenant.get('cnic') or ''}")
-    y -= 5 * mm
-    c.drawString(20 * mm, y, f"{building.get('name') or ''} — Room {room.get('room_number') or ''}")
-    c.setFillColorRGB(*INK)
-
-    y -= 14 * mm
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(20 * mm, y, "Description")
-    c.drawRightString(width - 20 * mm, y, "Amount")
-    y -= 3 * mm
-    c.setStrokeColorRGB(*INK)
-    c.setLineWidth(0.75)
-    c.line(20 * mm, y, width - 20 * mm, y)
-
-    c.setFont("Helvetica", 10)
-    for item in line_items:
-        # Supabase/PostgREST returns `numeric` columns as strings (to avoid
-        # floating-point precision loss), not JSON numbers -- cast explicitly.
-        amount = float(item["amount"])
-        y -= 7 * mm
-        c.drawString(20 * mm, y, item["label"])
-        c.drawRightString(width - 20 * mm, y, f"Rs {amount:,.0f}")
-
-    y -= 5 * mm
-    c.setStrokeColorRGB(*INK)
-    c.line(20 * mm, y, width - 20 * mm, y)
-
-    # --- Total, in a shaded band for emphasis ---
-    y -= 12 * mm
-    c.setFillColorRGB(*PAPER)
-    c.rect(20 * mm, y - 3 * mm, width - 40 * mm, 11 * mm, fill=1, stroke=0)
-    c.setFillColorRGB(*LEDGER)
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(24 * mm, y, "Total")
-    c.drawRightString(width - 24 * mm, y, f"Rs {float(invoice['total_amount']):,.0f}")
-
-    y -= 20 * mm
-    c.setFillColorRGB(0.4, 0.43, 0.41)
-    c.setFont("Helvetica-Oblique", 8)
-    c.drawString(20 * mm, y, "Thank you for your prompt payment.")
-
-    c.save()
-    buffer.seek(0)
+    ctx = fetch_invoice_context(supabase, invoice_id)
+    pdf_bytes = render_invoice_pdf(ctx)
 
     return StreamingResponse(
-        buffer,
+        io.BytesIO(pdf_bytes),
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f'inline; filename="invoice_{invoice["invoice_month"]}.pdf"'
+            "Content-Disposition": f'inline; filename="invoice_{ctx["invoice"]["invoice_month"]}.pdf"'
         },
     )
+
+
+def normalize_pakistani_phone(phone: str) -> str:
+    """
+    Converts a locally-formatted Pakistani number (e.g. "0300-1234567") into
+    the international digits-only format wa.me requires (e.g. "923001234567").
+    Already-international numbers (92... or +92...) pass through unchanged.
+    """
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    if digits.startswith("0092"):
+        digits = digits[2:]
+    if digits.startswith("92"):
+        return digits
+    if digits.startswith("0"):
+        return "92" + digits[1:]
+    return digits  # already looks international, or malformed -- pass through as-is
+
+
+@router.post("/{invoice_id}/whatsapp-link")
+def get_whatsapp_link(
+    invoice_id: str,
+    supabase: Client = Depends(get_supabase),
+    service_client=Depends(get_service_client),
+):
+    """
+    Generates the invoice PDF, uploads it to private Supabase Storage, and
+    returns a wa.me click-to-chat link with a pre-filled message (including a
+    signed, time-limited download link to the PDF). Opening the link lets the
+    person send it themselves via the WhatsApp app or WhatsApp Web -- exactly
+    like OneAccounts' existing WhatsApp buttons, just applied to invoices.
+
+    This does NOT send anything automatically; WhatsApp's rules require the
+    human to press Send. Requires a private Storage bucket named "invoices"
+    to already exist in Supabase (Storage -> New bucket -> "invoices", leave
+    Public OFF).
+    """
+    from app.services.invoice_pdf import fetch_invoice_context, render_invoice_pdf
+
+    ctx = fetch_invoice_context(supabase, invoice_id)
+    invoice, tenant, room, building, company = (
+        ctx["invoice"], ctx["tenant"], ctx["room"], ctx["building"], ctx["company"]
+    )
+
+    if not tenant.get("phone"):
+        raise HTTPException(status_code=400, detail="This tenant has no phone number on file.")
+
+    pdf_bytes = render_invoice_pdf(ctx)
+
+    storage_path = f"{invoice['company_id']}/{invoice_id}.pdf"
+    try:
+        service_client.storage.from_("invoices").upload(
+            storage_path,
+            pdf_bytes,
+            {"content-type": "application/pdf", "upsert": "true"},
+        )
+        signed = service_client.storage.from_("invoices").create_signed_url(
+            storage_path, 60 * 60 * 24 * 7  # valid 7 days
+        )
+        pdf_url = signed.get("signedURL") or signed.get("signed_url")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not prepare the invoice PDF: {e}")
+
+    message = (
+        f"Hi {tenant.get('full_name') or ''}, your rent invoice for "
+        f"{invoice['invoice_month']} ({building.get('name') or ''} - Room "
+        f"{room.get('room_number') or ''}) is Rs {float(invoice['total_amount']):,.0f}, "
+        f"due on {invoice['due_date']}.\n\nView/download invoice: {pdf_url}\n\n"
+        f"Thank you — {company.get('name') or ''}"
+    )
+
+    import urllib.parse
+
+    phone = normalize_pakistani_phone(tenant["phone"])
+    whatsapp_url = f"https://wa.me/{phone}?text={urllib.parse.quote(message)}"
+
+    return {"whatsapp_url": whatsapp_url, "phone": phone, "message_preview": message}
