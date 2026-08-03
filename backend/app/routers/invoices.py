@@ -176,17 +176,22 @@ def invoice_pdf(invoice_id: str, supabase: Client = Depends(get_supabase)):
 
 def normalize_pakistani_phone(phone: str) -> str:
     """
-    Converts a locally-formatted Pakistani number (e.g. "0300-1234567") into
-    the international digits-only format wa.me requires (e.g. "923001234567").
-    Already-international numbers (92... or +92...) pass through unchanged.
+    Converts a Pakistani number in any common local format into the
+    international digits-only format wa.me requires (e.g. "923001234567").
+    Length is checked alongside the prefix at every step, since a bare
+    10-digit number starting with "3" (e.g. "3214315665", the OneAccounts
+    storage format) would otherwise be misread the same way WhatsApp itself
+    misreads it -- as country code 32 (Belgium) + a shorter local number.
     """
     digits = "".join(ch for ch in phone if ch.isdigit())
-    if digits.startswith("0092"):
+    if digits.startswith("0092") and len(digits) == 14:
         digits = digits[2:]
-    if digits.startswith("92"):
+    if digits.startswith("92") and len(digits) == 12:
         return digits
-    if digits.startswith("0"):
+    if digits.startswith("0") and len(digits) == 11:
         return "92" + digits[1:]
+    if digits.startswith("3") and len(digits) == 10:
+        return "92" + digits
     return digits  # already looks international, or malformed -- pass through as-is
 
 
