@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import Client
 
+from app.core.config import settings
 from app.core.deps import get_current_company_id, get_service_client, get_supabase
 
 router = APIRouter(prefix="/invoices", tags=["Invoices"])
@@ -195,25 +196,44 @@ def normalize_pakistani_phone(phone: str) -> str:
     return digits  # already looks international, or malformed -- pass through as-is
 
 
-@router.post("/{invoice_id}/whatsapp-link")
-def get_whatsapp_link(
-    invoice_id: str,
-    supabase: Client = Depends(get_supabase),
-    service_client=Depends(get_service_client),
-):
+@router.get("/{invoice_id}/view")
+def view_invoice_public(invoice_id: str, service_client=Depends(get_service_client)):
     """
-    Generates the invoice PDF, uploads it to private Supabase Storage, and
-    returns a wa.me click-to-chat link with a pre-filled message (including a
-    signed, time-limited download link to the PDF). Opening the link lets the
-    person send it themselves via the WhatsApp app or WhatsApp Web -- exactly
-    like OneAccounts' existing WhatsApp buttons, just applied to invoices.
+    Public, unauthenticated invoice viewer -- this is what the short link in
+    WhatsApp messages points to. Security here comes from the invoice_id
+    itself being an unguessable random UUID, the same approach services like
+    Stripe use for "view your invoice" links; there is no login step because
+    a tenant clicking a link from WhatsApp has no session at all.
+    """
+    from fastapi.responses import StreamingResponse
+    import io
 
-    This does NOT send anything automatically; WhatsApp's rules require the
-    human to press Send. Requires a private Storage bucket named "invoices"
-    to already exist in Supabase (Storage -> New bucket -> "invoices", leave
-    Public OFF).
-    """
     from app.services.invoice_pdf import fetch_invoice_context, render_invoice_pdf
+
+    ctx = fetch_invoice_context(service_client, invoice_id)
+    pdf_bytes = render_invoice_pdf(ctx)
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="invoice_{ctx["invoice"]["invoice_month"]}.pdf"'
+        },
+    )
+
+
+@router.post("/{invoice_id}/whatsapp-link")
+def get_whatsapp_link(invoice_id: str, supabase: Client = Depends(get_supabase)):
+    """
+    Returns a wa.me click-to-chat link with a pre-filled message, including a
+    short link to view the invoice (the public /view endpoint above) instead
+    of a long Supabase signed URL. Opening the link lets the person send it
+    themselves via the WhatsApp app or WhatsApp Web -- exactly like
+    OneAccounts' existing WhatsApp buttons, just applied to invoices. This
+    does NOT send anything automatically; WhatsApp's rules require the human
+    to press Send.
+    """
+    from app.services.invoice_pdf import fetch_invoice_context
 
     ctx = fetch_invoice_context(supabase, invoice_id)
     invoice, tenant, room, building, company = (
@@ -223,21 +243,7 @@ def get_whatsapp_link(
     if not tenant.get("phone"):
         raise HTTPException(status_code=400, detail="This tenant has no phone number on file.")
 
-    pdf_bytes = render_invoice_pdf(ctx)
-
-    storage_path = f"{invoice['company_id']}/{invoice_id}.pdf"
-    try:
-        service_client.storage.from_("invoices").upload(
-            storage_path,
-            pdf_bytes,
-            {"content-type": "application/pdf", "upsert": "true"},
-        )
-        signed = service_client.storage.from_("invoices").create_signed_url(
-            storage_path, 60 * 60 * 24 * 7  # valid 7 days
-        )
-        pdf_url = signed.get("signedURL") or signed.get("signed_url")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not prepare the invoice PDF: {e}")
+    pdf_url = f"{settings.backend_public_url}/api/invoices/{invoice_id}/view"
 
     message = (
         f"Hi {tenant.get('full_name') or ''}, your rent invoice for "
