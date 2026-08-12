@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from supabase import Client
 
 from app.core.deps import get_current_company_id, get_supabase
+from app.services.ledger import get_account_id, post_journal_entry, resolve_room_owner
 
 router = APIRouter(prefix="/security-deposits", tags=["Security Deposits"])
 
@@ -94,4 +95,46 @@ def refund_deposit(
         .eq("id", deposit_id)
         .execute()
     )
+
+    # Dr Security Deposits Held (clears the full liability) /
+    # Cr Bank (actual cash going out) + Cr Other Income (any deductions --
+    # damages/unpaid dues retained by the company, not the owner).
+    lease = (
+        supabase.table("leases")
+        .select("tenant_id, room_id")
+        .eq("id", deposit.data["lease_id"])
+        .single()
+        .execute()
+        .data
+    )
+    building_id, room_id, owner_id, tenant_id = None, None, None, None
+    if lease:
+        tenant_id, room_id = lease["tenant_id"], lease["room_id"]
+        room = supabase.table("rooms").select("building_id").eq("id", room_id).single().execute().data
+        building_id = room["building_id"] if room else None
+        owner_id = resolve_room_owner(supabase, room_id)
+
+    deposits_held_id = get_account_id(supabase, company_id, "2100")
+    bank_id = get_account_id(supabase, company_id, "1000")
+    tags = {"building_id": building_id, "room_id": room_id, "owner_id": owner_id, "tenant_id": tenant_id}
+
+    lines = [
+        {"account_id": deposits_held_id, "direction": "debit", "amount": float(deposit.data["amount_received"]), **tags},
+    ]
+    if amount_refunded > 0:
+        lines.append({"account_id": bank_id, "direction": "credit", "amount": amount_refunded, **tags})
+    if total_deductions > 0:
+        other_income_id = get_account_id(supabase, company_id, "4100")
+        lines.append({"account_id": other_income_id, "direction": "credit", "amount": total_deductions, **tags})
+
+    post_journal_entry(
+        supabase,
+        company_id=company_id,
+        entry_date=str(refund_date),
+        source_type="security_deposit_refund",
+        source_id=deposit_id,
+        description=f"Security deposit refund - {deposit_id}",
+        lines=lines,
+    )
+
     return updated.data[0]

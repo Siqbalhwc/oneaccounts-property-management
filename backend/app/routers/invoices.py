@@ -7,6 +7,8 @@ from supabase import Client
 
 from app.core.config import settings
 from app.core.deps import get_current_company_id, get_service_client, get_supabase
+from app.services.ledger import get_account_for_charge_label, get_account_id, post_journal_entry, resolve_room_owner
+from app.services.phone import normalize_to_whatsapp
 
 router = APIRouter(prefix="/invoices", tags=["Invoices"])
 
@@ -68,6 +70,7 @@ def generate_monthly_invoices(
         leases = [l for l in leases if l["room_id"] in room_ids]
 
     created, skipped = [], []
+    ar_account_id = get_account_id(supabase, company_id, "1100")  # Accounts Receivable - Tenants
 
     for lease in leases:
         existing = (
@@ -121,6 +124,66 @@ def generate_monthly_invoices(
             for c in charges
         ]
         supabase.table("invoice_line_items").insert(line_items).execute()
+
+        # --- Post the double-entry journal for this invoice -----------------
+        # Dr Accounts Receivable (full amount) / Cr each charge's mapped
+        # income account. A charge only carries owner_id when its account
+        # is flagged transfers_to_owner (i.e. Rent) -- everything else
+        # (parking, electricity recovery, etc.) stays tagged to the room
+        # for drill-down but isn't owner money.
+        room = (
+            supabase.table("rooms")
+            .select("id, building_id, owner_id")
+            .eq("id", lease["room_id"])
+            .single()
+            .execute()
+            .data
+        )
+        building_id = room["building_id"] if room else None
+        room_owner_id = resolve_room_owner(supabase, lease["room_id"]) if room else None
+
+        credit_by_account: dict[str, dict] = {}  # account_id -> {"amount": x, "transfers_to_owner": bool}
+        for c in charges:
+            account = get_account_for_charge_label(supabase, company_id, c["label"])
+            acct_id = account["id"]
+            if acct_id not in credit_by_account:
+                credit_by_account[acct_id] = {"amount": 0.0, "transfers_to_owner": account["transfers_to_owner"]}
+            credit_by_account[acct_id]["amount"] += float(c["amount"])
+
+        journal_lines = [
+            {
+                "account_id": ar_account_id,
+                "direction": "debit",
+                "amount": total,
+                "building_id": building_id,
+                "room_id": lease["room_id"],
+                "owner_id": room_owner_id,
+                "tenant_id": lease["tenant_id"],
+            }
+        ]
+        for acct_id, info in credit_by_account.items():
+            journal_lines.append(
+                {
+                    "account_id": acct_id,
+                    "direction": "credit",
+                    "amount": info["amount"],
+                    "building_id": building_id,
+                    "room_id": lease["room_id"],
+                    "owner_id": room_owner_id if info["transfers_to_owner"] else None,
+                    "tenant_id": lease["tenant_id"],
+                }
+            )
+
+        post_journal_entry(
+            supabase,
+            company_id=company_id,
+            entry_date=str(invoice_month),
+            source_type="invoice",
+            source_id=inv["id"],
+            description=f"Invoice {inv['id']} - {invoice_month}",
+            lines=journal_lines,
+        )
+
         created.append(inv["id"])
 
     return {"created": created, "skipped_existing_or_no_charges": skipped}
@@ -173,27 +236,6 @@ def invoice_pdf(invoice_id: str, supabase: Client = Depends(get_supabase)):
             "Content-Disposition": f'inline; filename="invoice_{ctx["invoice"]["invoice_month"]}.pdf"'
         },
     )
-
-
-def normalize_pakistani_phone(phone: str) -> str:
-    """
-    Converts a Pakistani number in any common local format into the
-    international digits-only format wa.me requires (e.g. "923001234567").
-    Length is checked alongside the prefix at every step, since a bare
-    10-digit number starting with "3" (e.g. "3214315665", the OneAccounts
-    storage format) would otherwise be misread the same way WhatsApp itself
-    misreads it -- as country code 32 (Belgium) + a shorter local number.
-    """
-    digits = "".join(ch for ch in phone if ch.isdigit())
-    if digits.startswith("0092") and len(digits) == 14:
-        digits = digits[2:]
-    if digits.startswith("92") and len(digits) == 12:
-        return digits
-    if digits.startswith("0") and len(digits) == 11:
-        return "92" + digits[1:]
-    if digits.startswith("3") and len(digits) == 10:
-        return "92" + digits
-    return digits  # already looks international, or malformed -- pass through as-is
 
 
 @router.get("/{invoice_id}/view")
@@ -255,7 +297,7 @@ def get_whatsapp_link(invoice_id: str, supabase: Client = Depends(get_supabase))
 
     import urllib.parse
 
-    phone = normalize_pakistani_phone(tenant["phone"])
+    phone = normalize_to_whatsapp(tenant["phone"])
     whatsapp_url = f"https://wa.me/{phone}?text={urllib.parse.quote(message)}"
 
     return {"whatsapp_url": whatsapp_url, "phone": phone, "message_preview": message}

@@ -94,8 +94,26 @@ def write_audit_log(
         pass
 
 
-def build_crud_router(table: str, tags: list[str], archivable: bool = False) -> APIRouter:
+def build_crud_router(
+    table: str,
+    tags: list[str],
+    archivable: bool = False,
+    validators: dict[str, Any] | None = None,
+) -> APIRouter:
+    """
+    validators: optional {field_name: fn(raw_value) -> normalized_value}.
+    fn should raise HTTPException(400, ...) on invalid input, or return the
+    (possibly normalized/cleaned) value to store. Runs on create AND update,
+    only when that field is present in the payload -- so a PATCH that
+    doesn't touch phone, for example, doesn't re-validate it.
+    """
     router = APIRouter(prefix=f"/{table}", tags=tags)
+    validators = validators or {}
+
+    def _run_validators(payload: Dict[str, Any]) -> None:
+        for field, validate in validators.items():
+            if field in payload and payload[field] is not None:
+                payload[field] = validate(payload[field])
 
     @router.get("")
     def list_all(
@@ -122,6 +140,7 @@ def build_crud_router(table: str, tags: list[str], archivable: bool = False) -> 
         company_id: str = Depends(get_current_company_id),
         user: dict = Depends(get_current_user),
     ):
+        _run_validators(payload)
         # company_id is always forced server-side, never trusted from the client.
         payload["company_id"] = company_id
         try:
@@ -142,6 +161,7 @@ def build_crud_router(table: str, tags: list[str], archivable: bool = False) -> 
         company_id: str = Depends(get_current_company_id),
         user: dict = Depends(get_current_user),
     ):
+        _run_validators(payload)
         payload.pop("company_id", None)  # never allow moving a record between companies
         payload.pop("is_archived", None)  # archiving has its own gated endpoint below
 

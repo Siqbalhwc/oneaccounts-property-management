@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import (
     audit_log,
+    chart_of_accounts,
     company_settings,
     invoices,
     leases,
@@ -39,6 +40,7 @@ app.add_middleware(
 API_PREFIX = "/api"
 
 app.include_router(simple_resources.buildings_router, prefix=API_PREFIX)
+app.include_router(simple_resources.owners_router, prefix=API_PREFIX)
 app.include_router(simple_resources.floors_router, prefix=API_PREFIX)
 app.include_router(simple_resources.rooms_router, prefix=API_PREFIX)
 app.include_router(simple_resources.room_history_router, prefix=API_PREFIX)
@@ -60,6 +62,7 @@ app.include_router(team.router, prefix=API_PREFIX)
 app.include_router(platform_admin.router, prefix=API_PREFIX)
 app.include_router(audit_log.router, prefix=API_PREFIX)
 app.include_router(staff_allocations.router, prefix=API_PREFIX)
+app.include_router(chart_of_accounts.router, prefix=API_PREFIX)
 
 
 @app.get("/")

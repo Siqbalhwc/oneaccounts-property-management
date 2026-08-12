@@ -7,6 +7,7 @@ from supabase import Client
 
 from app.core.deps import get_current_company_id, get_current_user, get_supabase
 from app.crud.generic import write_audit_log
+from app.services.ledger import get_account_id, post_journal_entry, resolve_room_owner
 
 router = APIRouter(prefix="/leases", tags=["Leases"])
 
@@ -166,6 +167,35 @@ def create_lease(
         supabase.table("rooms").update({"status": "occupied"}).eq(
             "id", payload.room_id
         ).execute()
+
+        # Dr Bank / Cr Security Deposits Held -- cash received, held as a
+        # liability until it's refunded (or partially retained) later via
+        # security_deposits.py's /refund endpoint.
+        if payload.security_deposit_amount > 0:
+            bank_id = get_account_id(supabase, company_id, "1000")
+            deposits_held_id = get_account_id(supabase, company_id, "2100")
+            owner_id = resolve_room_owner(supabase, payload.room_id)
+            room = supabase.table("rooms").select("building_id").eq("id", payload.room_id).single().execute().data
+            building_id = room["building_id"] if room else None
+
+            post_journal_entry(
+                supabase,
+                company_id=company_id,
+                entry_date=str(payload.security_deposit_date_received),
+                source_type="security_deposit",
+                source_id=lease_id,
+                description=f"Security deposit received - lease {lease_id}",
+                lines=[
+                    {
+                        "account_id": bank_id, "direction": "debit", "amount": payload.security_deposit_amount,
+                        "building_id": building_id, "room_id": payload.room_id, "owner_id": owner_id, "tenant_id": payload.tenant_id,
+                    },
+                    {
+                        "account_id": deposits_held_id, "direction": "credit", "amount": payload.security_deposit_amount,
+                        "building_id": building_id, "room_id": payload.room_id, "owner_id": owner_id, "tenant_id": payload.tenant_id,
+                    },
+                ],
+            )
     except Exception as e:
         # Best-effort rollback since this isn't a real DB transaction.
         supabase.table("leases").delete().eq("id", lease_id).execute()
