@@ -11,6 +11,4 @@ tenants_router = build_crud_router(
     validators={"phone": validate_and_normalize, "emergency_contact_phone": validate_and_normalize},
 )
 expense_categories_router = build_crud_router("expense_categories", ["Expense Categories"])
-expenses_router = build_crud_router("expenses", ["Expenses"])
 staff_router = build_crud_router("staff", ["Staff"])
-salary_payments_router = build_crud_router("salary_payments", ["Salary Payments"])

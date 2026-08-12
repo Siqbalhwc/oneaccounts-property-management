@@ -53,6 +53,11 @@ def generate_monthly_invoices(
     this endpoint) once you wire up WhatsApp sending.
     """
     invoice_month = payload.month.replace(day=1)
+    next_month = (
+        date(invoice_month.year + 1, 1, 1)
+        if invoice_month.month == 12
+        else date(invoice_month.year, invoice_month.month + 1, 1)
+    )
     due_date = invoice_month + timedelta(days=payload.due_in_days)
 
     leases_query = supabase.table("leases").select("*").eq("status", "active")
@@ -96,7 +101,33 @@ def generate_monthly_invoices(
             skipped.append(lease["id"])
             continue
 
-        total = sum(float(c["amount"]) for c in charges)
+        # --- Proration: only matters if the lease started or ended mid-month.
+        # A lease active for the entire month gets a factor of exactly 1.0 --
+        # charges are used as-is, with no rounding drift on the common case.
+        lease_start = date.fromisoformat(str(lease["start_date"]))
+        lease_end = date.fromisoformat(str(lease["end_date"]))
+        month_last_day = next_month - timedelta(days=1)
+        overlap_start = max(lease_start, invoice_month)
+        overlap_end = min(lease_end, month_last_day)
+
+        if overlap_end < overlap_start:
+            # Lease doesn't actually overlap this month at all (shouldn't
+            # normally happen for a status='active' lease, but guard anyway
+            # rather than generate a nonsensical negative/zero invoice).
+            skipped.append(lease["id"])
+            continue
+
+        days_in_month = (next_month - invoice_month).days
+        days_active = (overlap_end - overlap_start).days + 1
+        is_full_month = days_active >= days_in_month
+
+        if is_full_month:
+            prorated_charges = [{"label": c["label"], "amount": float(c["amount"])} for c in charges]
+        else:
+            factor = days_active / days_in_month
+            prorated_charges = [{"label": c["label"], "amount": round(float(c["amount"]) * factor, 2)} for c in charges]
+
+        total = sum(c["amount"] for c in prorated_charges)
 
         inv = (
             supabase.table("invoices")
@@ -121,7 +152,7 @@ def generate_monthly_invoices(
                 "label": c["label"],
                 "amount": c["amount"],
             }
-            for c in charges
+            for c in prorated_charges
         ]
         supabase.table("invoice_line_items").insert(line_items).execute()
 
@@ -143,7 +174,7 @@ def generate_monthly_invoices(
         room_owner_id = resolve_room_owner(supabase, lease["room_id"]) if room else None
 
         credit_by_account: dict[str, dict] = {}  # account_id -> {"amount": x, "transfers_to_owner": bool}
-        for c in charges:
+        for c in prorated_charges:
             account = get_account_for_charge_label(supabase, company_id, c["label"])
             acct_id = account["id"]
             if acct_id not in credit_by_account:

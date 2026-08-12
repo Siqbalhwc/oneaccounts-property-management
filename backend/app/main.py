@@ -5,12 +5,15 @@ from app.routers import (
     audit_log,
     chart_of_accounts,
     company_settings,
+    expenses,
     invoices,
     leases,
     owner_ledger,
     payments,
     platform_admin,
     reports,
+    room_occupants,
+    salary_payments,
     security_deposits,
     signup,
     simple_resources,
@@ -46,9 +49,10 @@ app.include_router(simple_resources.rooms_router, prefix=API_PREFIX)
 app.include_router(simple_resources.room_history_router, prefix=API_PREFIX)
 app.include_router(simple_resources.tenants_router, prefix=API_PREFIX)
 app.include_router(simple_resources.expense_categories_router, prefix=API_PREFIX)
-app.include_router(simple_resources.expenses_router, prefix=API_PREFIX)
 app.include_router(simple_resources.staff_router, prefix=API_PREFIX)
-app.include_router(simple_resources.salary_payments_router, prefix=API_PREFIX)
+app.include_router(expenses.router, prefix=API_PREFIX)
+app.include_router(salary_payments.router, prefix=API_PREFIX)
+app.include_router(room_occupants.router, prefix=API_PREFIX)
 
 app.include_router(leases.router, prefix=API_PREFIX)
 app.include_router(security_deposits.router, prefix=API_PREFIX)
