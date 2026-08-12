@@ -12,6 +12,7 @@ import { api, Building, Company } from "@/lib/api";
 
 type LedgerRow = {
   id: string;
+  owner_id: string;
   building_id: string;
   ledger_month: string;
   total_collected: number;
@@ -21,6 +22,8 @@ type LedgerRow = {
   status: string;
 };
 
+type OwnerRecord = { id: string; name: string };
+
 function formatPkr(n: number) {
   return `Rs ${Number(n || 0).toLocaleString("en-PK")}`;
 }
@@ -28,6 +31,7 @@ function formatPkr(n: number) {
 export default function OwnerLedgerPage() {
   const [rows, setRows] = useState<LedgerRow[] | null>(null);
   const [buildings, setBuildings] = useState<Building[] | null>(null);
+  const [owners, setOwners] = useState<OwnerRecord[] | null>(null);
   const [company, setCompany] = useState<Company | null>(null);
 
   const [computeModalOpen, setComputeModalOpen] = useState(false);
@@ -57,6 +61,7 @@ export default function OwnerLedgerPage() {
   useEffect(() => {
     load();
     api.get<Company>("/company/me").then(setCompany);
+    api.get<OwnerRecord[]>("/owners").then(setOwners);
     api.get<Building[]>("/buildings").then((data) => {
       setBuildings(data);
       setComputeForm((f) => (f.building_id ? f : { ...f, building_id: data[0]?.id ?? "" }));
@@ -117,15 +122,16 @@ export default function OwnerLedgerPage() {
 
   const buildingById = (id: string) => buildings?.find((b) => b.id === id);
   const buildingName = (id: string) => buildingById(id)?.name ?? "—";
-  const ownerName = (id: string) => buildingById(id)?.owner_name || "—";
+  const ownerById = (id: string) => owners?.find((o) => o.id === id);
+  const ownerName = (id: string) => ownerById(id)?.name || "—";
 
-  const owners = Array.from(
-    new Set((buildings ?? []).map((b) => b.owner_name).filter((n): n is string => !!n))
+  const ownerOptions = Array.from(
+    new Set((owners ?? []).map((o) => o.name))
   ).sort();
 
   const filteredRows = (rows ?? []).filter((r) => {
     if (filterBuilding && r.building_id !== filterBuilding) return false;
-    if (filterOwner && ownerName(r.building_id) !== filterOwner) return false;
+    if (filterOwner && ownerName(r.owner_id) !== filterOwner) return false;
     if (filterMonth && !r.ledger_month.startsWith(filterMonth)) return false;
     if (filterStatus && r.status !== filterStatus) return false;
     return true;
@@ -154,7 +160,7 @@ export default function OwnerLedgerPage() {
           <Field label="Owner">
             <Select value={filterOwner} onChange={(e) => setFilterOwner(e.target.value)}>
               <option value="">All owners</option>
-              {owners.map((o) => (
+              {ownerOptions.map((o) => (
                 <option key={o} value={o}>
                   {o}
                 </option>
@@ -195,7 +201,7 @@ export default function OwnerLedgerPage() {
           rows={filteredRows}
           emptyMessage="No ledger entries match these filters — try &quot;Compute ledger&quot; for a building and month."
           columns={[
-            { header: "Owner", accessor: (r) => ownerName(r.building_id) },
+            { header: "Owner", accessor: (r) => ownerName(r.owner_id) },
             { header: "Building", accessor: (r) => buildingName(r.building_id) },
             { header: "Month", accessor: (r) => r.ledger_month },
             {

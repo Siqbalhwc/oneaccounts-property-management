@@ -82,6 +82,17 @@ function relativeTime(iso?: string) {
 
 const DONUT_COLORS = { occupied: "#2F4F3D", vacant: "#C89B5C", maintenance: "#A63D40", reserved: "#565F5A" };
 
+// Self-contained WhatsApp glyph. The project already has a components/ui/WhatsAppIcon
+// (per the project brief) -- swap this for that shared component once its exact
+// prop interface is confirmed; using a local one for now avoids guessing it wrong.
+function WhatsAppGlyph({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2 22l5.28-1.39a9.9 9.9 0 0 0 4.76 1.21h.01c5.46 0 9.9-4.45 9.9-9.91C21.96 6.45 17.5 2 12.04 2Zm0 18.15h-.01a8.2 8.2 0 0 1-4.19-1.15l-.3-.18-3.13.82.84-3.05-.2-.31a8.2 8.2 0 0 1-1.27-4.38c0-4.55 3.7-8.25 8.26-8.25 2.2 0 4.27.86 5.83 2.42a8.2 8.2 0 0 1 2.42 5.84c0 4.55-3.71 8.24-8.25 8.24Zm4.52-6.17c-.25-.12-1.47-.72-1.7-.81-.23-.08-.39-.12-.56.13-.17.24-.64.8-.78.97-.14.17-.29.19-.53.06-.25-.12-1.04-.38-1.98-1.22-.73-.65-1.23-1.46-1.37-1.7-.14-.25-.02-.38.11-.5.11-.11.25-.29.37-.43.12-.15.16-.25.24-.42.08-.17.04-.31-.02-.43-.06-.13-.56-1.34-.76-1.84-.2-.48-.41-.42-.56-.42h-.48c-.17 0-.43.06-.66.31-.23.24-.86.85-.86 2.06 0 1.22.89 2.4 1.01 2.56.12.17 1.75 2.66 4.23 3.73.59.26 1.05.41 1.41.52.59.19 1.13.16 1.55.1.47-.07 1.47-.6 1.68-1.18.21-.58.21-1.08.14-1.18-.06-.11-.23-.17-.48-.29Z" />
+    </svg>
+  );
+}
+
 export default function DashboardHome() {
   const [buildings, setBuildings] = useState<Building[] | null>(null);
   const [rooms, setRooms] = useState<Room[] | null>(null);
@@ -100,6 +111,8 @@ export default function DashboardHome() {
     return monthKey(d);
   });
   const [selectedMonth, setSelectedMonth] = useState(monthOptions[0]);
+  const [sendingReminderId, setSendingReminderId] = useState<string | null>(null);
+  const [reminderError, setReminderError] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([
@@ -273,6 +286,24 @@ export default function DashboardHome() {
     .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
     .slice(0, 6);
 
+  async function sendReminder(invoiceId: string) {
+    setSendingReminderId(invoiceId);
+    setReminderError(null);
+    try {
+      const result = (await api.post(`/invoices/${invoiceId}/whatsapp-link`, {})) as {
+        whatsapp_url: string;
+      };
+      // Opens WhatsApp with the message pre-filled -- the user still has to
+      // press Send themselves, same as the existing WhatsApp buttons
+      // elsewhere in the app. This does not send anything automatically.
+      window.open(result.whatsapp_url, "_blank");
+    } catch (err: any) {
+      setReminderError(err.message ?? "Couldn't prepare the WhatsApp reminder.");
+    } finally {
+      setSendingReminderId(null);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
@@ -425,6 +456,9 @@ export default function DashboardHome() {
           </Link>
         }
       >
+        {reminderError && (
+          <p className="text-xs text-stamp-red mb-2">{reminderError}</p>
+        )}
         <DataTable
           keyField="id"
           rows={awaitingPayment}
@@ -444,6 +478,20 @@ export default function DashboardHome() {
                 ) : (
                   <StampBadge status={r.status} />
                 ),
+            },
+            {
+              header: "",
+              accessor: (r) => (
+                <button
+                  onClick={() => sendReminder(r.id)}
+                  disabled={sendingReminderId === r.id}
+                  title="Send WhatsApp reminder"
+                  className="p-1.5 rounded-full text-stamp-green hover:bg-stamp-green/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed no-print"
+                >
+                  <WhatsAppGlyph size={16} />
+                </button>
+              ),
+              align: "right",
             },
           ]}
         />
