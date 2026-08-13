@@ -10,7 +10,7 @@ from app.core.deps import get_current_company_id, get_current_user, get_supabase
 from app.crud.generic import friendly_db_error, write_audit_log
 from app.services.ledger import get_account_id, post_journal_entry
 
-router = APIRouter(prefix="/salary-payments", tags=["Salary Payments"])
+router = APIRouter(prefix="/salary_payments", tags=["Salary Payments"])
 
 
 class SalaryPaymentCreate(BaseModel):
