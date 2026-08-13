@@ -118,12 +118,14 @@ def build_crud_router(
     @router.get("")
     def list_all(
         include_archived: bool = Query(False),
+        limit: int = Query(1000, le=5000),
+        offset: int = Query(0, ge=0),
         supabase: Client = Depends(get_supabase),
     ):
         query = supabase.table(table).select("*")
         if archivable and not include_archived:
             query = query.eq("is_archived", False)
-        res = query.order("created_at", desc=True).execute()
+        res = query.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
         return res.data
 
     @router.get("/{record_id}")
