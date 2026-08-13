@@ -11,12 +11,19 @@ import { Field, Input, Select } from "@/components/ui/Field";
 
 const NEW_FLOOR_VALUE = "__new__";
 const NEW_TYPE_VALUE = "__new_type__";
+const NEW_OWNER_VALUE = "__new_owner__";
 const ROOM_STATUSES = ["vacant", "occupied", "under_maintenance", "reserved"] as const;
+
+// Augmented locally since lib/api.ts's Room type may not yet declare owner_id --
+// safe either way since it's optional (a plain Room is still assignable to this).
+type RoomWithOwner = Room & { owner_id?: string | null };
+type OwnerRecord = { id: string; name: string; phone?: string };
 
 export default function BuildingsPage() {
   const [buildings, setBuildings] = useState<Building[] | null>(null);
-  const [rooms, setRooms] = useState<Room[] | null>(null);
+  const [rooms, setRooms] = useState<RoomWithOwner[] | null>(null);
   const [floors, setFloors] = useState<Floor[] | null>(null);
+  const [owners, setOwners] = useState<OwnerRecord[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [myRole, setMyRole] = useState<string | null>(null);
 
@@ -48,6 +55,9 @@ export default function BuildingsPage() {
     room_type_custom: "",
     base_rent: "",
     status: "vacant" as string,
+    owner_id: "",           // "" = inherit from building
+    new_owner_name: "",
+    new_owner_phone: "",
   });
   const [archiveRoomTarget, setArchiveRoomTarget] = useState<Room | null>(null);
   const [archivingRoom, setArchivingRoom] = useState(false);
@@ -60,7 +70,7 @@ export default function BuildingsPage() {
   }
 
   function loadRoomsAndFloors() {
-    api.get<Room[]>("/rooms").then(setRooms);
+    api.get<RoomWithOwner[]>("/rooms").then(setRooms);
     api.get<Floor[]>("/floors").then(setFloors);
   }
 
@@ -68,6 +78,7 @@ export default function BuildingsPage() {
     loadBuildings();
     loadRoomsAndFloors();
     api.get<Profile>("/profile/me").then((p) => setMyRole(p.role));
+    api.get<OwnerRecord[]>("/owners").then(setOwners);
   }, []);
 
   const canManage = myRole === "owner" || myRole === "admin";
@@ -170,11 +181,14 @@ export default function BuildingsPage() {
       room_type_custom: "",
       base_rent: "",
       status: "vacant",
+      owner_id: "",
+      new_owner_name: "",
+      new_owner_phone: "",
     });
     setRoomModalOpen(true);
   }
 
-  function openEditRoomModal(room: Room) {
+  function openEditRoomModal(room: RoomWithOwner) {
     setEditingRoomId(room.id);
     setRoomError(null);
     const typeIsKnown = room.room_type && existingRoomTypes.includes(room.room_type);
@@ -187,6 +201,9 @@ export default function BuildingsPage() {
       room_type_custom: typeIsKnown ? "" : room.room_type ?? "",
       base_rent: room.base_rent ? String(room.base_rent) : "",
       status: room.status,
+      owner_id: room.owner_id ?? "",
+      new_owner_name: "",
+      new_owner_phone: "",
     });
     setRoomModalOpen(true);
   }
@@ -217,12 +234,31 @@ export default function BuildingsPage() {
           ? roomForm.room_type_custom.trim()
           : roomForm.room_type_select;
 
+      // Resolve owner_id: create a new owner first if the person chose
+      // "+ Add new owner…", otherwise use the picked one, or null to
+      // explicitly inherit the building's default owner.
+      let ownerId: string | null = roomForm.owner_id || null;
+      if (roomForm.owner_id === NEW_OWNER_VALUE) {
+        if (!roomForm.new_owner_name.trim()) {
+          setRoomError("Enter a name for the new owner.");
+          setRoomSaving(false);
+          return;
+        }
+        const newOwner = await api.post<OwnerRecord>("/owners", {
+          name: roomForm.new_owner_name.trim(),
+          phone: roomForm.new_owner_phone || undefined,
+        });
+        ownerId = newOwner.id;
+        setOwners((prev) => [...(prev ?? []), newOwner]);
+      }
+
       if (editingRoomId) {
         await api.patch(`/rooms/${editingRoomId}`, {
           room_number: roomForm.room_number,
           room_type: roomType || undefined,
           base_rent: roomForm.base_rent ? parseFloat(roomForm.base_rent) : undefined,
           status: roomForm.status,
+          owner_id: ownerId,
         });
       } else {
         let floorId = roomForm.floor_id;
@@ -240,6 +276,7 @@ export default function BuildingsPage() {
           room_number: roomForm.room_number,
           room_type: roomType || undefined,
           base_rent: roomForm.base_rent ? parseFloat(roomForm.base_rent) : undefined,
+          owner_id: ownerId,
         });
       }
       setRoomModalOpen(false);
@@ -267,6 +304,7 @@ export default function BuildingsPage() {
   const roomsForSelected = rooms?.filter((r) => r.building_id === selected) ?? [];
   const floorsForSelected = floors?.filter((f) => f.building_id === selected) ?? [];
   const selectedBuilding = buildings?.find((b) => b.id === selected);
+  const ownerName = (id: string) => owners?.find((o) => o.id === id)?.name ?? "—";
 
   return (
     <div className="space-y-6">
@@ -344,6 +382,11 @@ export default function BuildingsPage() {
               {room.base_rent && (
                 <p className="text-sm figures mt-2 text-ink/70">
                   Rs {Number(room.base_rent).toLocaleString("en-PK")}/mo
+                </p>
+              )}
+              {room.owner_id && (
+                <p className="text-[10px] text-brass-dark mt-1.5 truncate">
+                  Owner: {ownerName(room.owner_id)}
                 </p>
               )}
             </button>
@@ -494,6 +537,42 @@ export default function BuildingsPage() {
               onChange={(e) => setRoomForm({ ...roomForm, base_rent: e.target.value })}
             />
           </Field>
+
+          <Field
+            label="Owner"
+            hint="Leave as 'Inherit from building' unless this specific room belongs to a different owner than the rest of the building — e.g. one room sold separately."
+          >
+            <Select
+              value={roomForm.owner_id}
+              onChange={(e) => setRoomForm({ ...roomForm, owner_id: e.target.value })}
+            >
+              <option value="">Inherit from building</option>
+              {owners?.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.name}
+                </option>
+              ))}
+              <option value={NEW_OWNER_VALUE}>+ Add a new owner…</option>
+            </Select>
+          </Field>
+
+          {roomForm.owner_id === NEW_OWNER_VALUE && (
+            <div className="grid grid-cols-2 gap-3 pl-3 border-l-2 border-border">
+              <Field label="Owner name">
+                <Input
+                  required
+                  value={roomForm.new_owner_name}
+                  onChange={(e) => setRoomForm({ ...roomForm, new_owner_name: e.target.value })}
+                />
+              </Field>
+              <Field label="Owner phone (optional)">
+                <Input
+                  value={roomForm.new_owner_phone}
+                  onChange={(e) => setRoomForm({ ...roomForm, new_owner_phone: e.target.value })}
+                />
+              </Field>
+            </div>
+          )}
 
           {editingRoomId && (
             <Field label="Status">
