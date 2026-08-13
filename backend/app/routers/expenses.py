@@ -12,6 +12,16 @@ from app.services.ledger import get_account_id, post_journal_entry
 router = APIRouter(prefix="/expenses", tags=["Expenses"])
 
 
+class AllocationEntry(BaseModel):
+    building_id: str
+    allocation_type: str  # 'percentage' | 'fixed'
+    value: float
+
+
+class SetAllocationsRequest(BaseModel):
+    allocations: list[AllocationEntry]
+
+
 class ExpenseCreate(BaseModel):
     building_id: Optional[str] = None  # null = company-wide (e.g. shared across sites via allocation)
     category_id: str
@@ -201,3 +211,55 @@ def generate_recurring_expenses(
         created.append(expense["id"])
 
     return {"created": created, "skipped_already_generated": skipped}
+
+
+@router.get("/{expense_id}/allocations")
+def get_expense_allocations(expense_id: str, supabase: Client = Depends(get_supabase)):
+    """How this expense is split across buildings for owner-ledger purposes
+    (e.g. a shared generator fuel bill split 40/60 between two buildings).
+    Only meaningful for an expense NOT already tied to one building directly."""
+    return (
+        supabase.table("cost_allocations")
+        .select("*")
+        .eq("source_type", "expense")
+        .eq("source_id", expense_id)
+        .execute()
+        .data
+    )
+
+
+@router.put("/{expense_id}/allocations")
+def set_expense_allocations(
+    expense_id: str,
+    payload: SetAllocationsRequest,
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+):
+    """
+    Replaces the full allocation split for this expense -- deletes whatever
+    was set before and inserts the new list, same as how the existing
+    staff allocation endpoint works. Does NOT re-post any journal entry:
+    the expense's own Dr/Cr posting already happened at creation time and
+    is untouched by how it's later split for owner-ledger reporting.
+    """
+    expense = supabase.table("expenses").select("id").eq("id", expense_id).single().execute()
+    if not expense.data:
+        raise HTTPException(status_code=404, detail="Expense not found")
+
+    supabase.table("cost_allocations").delete().eq("source_type", "expense").eq("source_id", expense_id).execute()
+
+    if payload.allocations:
+        rows = [
+            {
+                "company_id": company_id,
+                "source_type": "expense",
+                "source_id": expense_id,
+                "building_id": a.building_id,
+                "allocation_type": a.allocation_type,
+                "value": a.value,
+            }
+            for a in payload.allocations
+        ]
+        supabase.table("cost_allocations").insert(rows).execute()
+
+    return get_expense_allocations(expense_id, supabase)
