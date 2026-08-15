@@ -158,19 +158,24 @@ export default function NewLeasePage() {
 
   // Mirrors the backend's exact proration logic, purely for a preview here --
   // the real charge happens server-side when the first invoice is generated.
-  function firstInvoicePreview(): { prorated: boolean; days: number; daysInMonth: number; total: number } | null {
+  function computeBillPreview() {
     if (!startDate) return null;
     const start = new Date(startDate + "T00:00:00");
-    if (start.getDate() === 1) return null; // starts on the 1st -- full month, nothing to preview
-    const monthStart = new Date(start.getFullYear(), start.getMonth(), 1);
     const monthEnd = new Date(start.getFullYear(), start.getMonth() + 1, 0);
     const daysInMonth = monthEnd.getDate();
     const daysActive = daysInMonth - start.getDate() + 1;
     const factor = daysActive / daysInMonth;
-    const prorated = recurringTotal * factor + oneTimeTotal; // one-time fees are never prorated
-    return { prorated: true, days: daysActive, daysInMonth, total: Math.round(prorated * 100) / 100 };
+    const isProrated = start.getDate() !== 1;
+    const lineItems = filledCharges.map((c) => {
+      const monthlyAmount = parseFloat(c.amount) || 0;
+      const currentAmount =
+        c.recurrence === "one_time" ? monthlyAmount : Math.round(monthlyAmount * factor * 100) / 100;
+      return { label: c.label, recurrence: c.recurrence, monthlyAmount, currentAmount };
+    });
+    const currentSubtotal = lineItems.reduce((s, li) => s + li.currentAmount, 0);
+    return { isProrated, days: daysActive, daysInMonth, lineItems, currentSubtotal };
   }
-  const preview = firstInvoicePreview();
+  const billPreview = computeBillPreview();
   const canProceedStep2 = depositAmount && depositDate;
 
   return (
@@ -282,9 +287,9 @@ export default function NewLeasePage() {
             {charges.map((c, i) => {
               const isKnownLabel = c.label && chargeMappings.some((m) => m.label.toLowerCase() === c.label.toLowerCase());
               return (
-                <div key={i} className="border border-border rounded-card p-3 space-y-3">
-                  <div className="flex items-end gap-3">
-                    <div className="flex-1">
+                <div key={i} className="border border-border rounded-card p-3">
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-start">
+                    <div className="lg:col-span-3">
                       <Field label={i < 4 ? c.label : "Fee name"}>
                         {i < 4 ? (
                           <Input value={c.label} disabled />
@@ -297,7 +302,7 @@ export default function NewLeasePage() {
                         )}
                       </Field>
                     </div>
-                    <div className="w-32">
+                    <div className="lg:col-span-2">
                       <Field label="Amount">
                         <AmountInput
                           value={c.amount}
@@ -305,14 +310,7 @@ export default function NewLeasePage() {
                         />
                       </Field>
                     </div>
-                    {i >= 4 && (
-                      <Button variant="ghost" onClick={() => removeCharge(i)} className="mb-0.5">
-                        Remove
-                      </Button>
-                    )}
-                  </div>
-                  <div className="flex items-end gap-3">
-                    <div className="w-44">
+                    <div className="lg:col-span-2">
                       <Field label="Charged">
                         <Select
                           value={c.recurrence}
@@ -323,14 +321,14 @@ export default function NewLeasePage() {
                         </Select>
                       </Field>
                     </div>
-                    <div className="flex-1">
+                    <div className={i >= 4 ? "lg:col-span-4" : "lg:col-span-5"}>
                       <Field
                         label="Posts to account"
                         hint={
                           isKnownLabel
                             ? undefined
                             : c.label
-                            ? `New — pick an account once, and every future "${c.label}" charge will use it automatically.`
+                            ? `New — remembered automatically from now on.`
                             : undefined
                         }
                       >
@@ -346,6 +344,13 @@ export default function NewLeasePage() {
                         </Select>
                       </Field>
                     </div>
+                    {i >= 4 && (
+                      <div className="lg:col-span-1 flex lg:justify-end lg:pt-6">
+                        <Button variant="ghost" onClick={() => removeCharge(i)}>
+                          Remove
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -409,25 +414,54 @@ export default function NewLeasePage() {
                 {startDate} to {endDate}
               </p>
             </div>
-            <div>
-              <p className="text-xs uppercase tracking-wider text-ink/45 mb-2">
-                Monthly charges
-              </p>
-              <div className="space-y-1.5">
-                {charges
-                  .filter((c) => c.label && c.amount)
-                  .map((c, i) => (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+              <div>
+                <p className="text-xs uppercase tracking-wider text-ink/45 mb-2">
+                  Monthly agreement (from next month)
+                </p>
+                <div className="space-y-1.5">
+                  {billPreview?.lineItems
+                    .filter((li) => li.recurrence === "recurring")
+                    .map((li, i) => (
+                      <div key={i} className="flex justify-between text-sm">
+                        <span className="text-ink/70">{li.label}</span>
+                        <span className="figures">{formatPkr(li.monthlyAmount)}</span>
+                      </div>
+                    ))}
+                  <div className="flex justify-between text-sm font-semibold pt-1.5 border-t border-border">
+                    <span>Total agreement</span>
+                    <span className="figures">{formatPkr(recurringTotal)}</span>
+                  </div>
+                  {oneTimeTotal > 0 && (
+                    <p className="text-xs text-ink/45 pt-1">
+                      Plus {formatPkr(oneTimeTotal)} one-time, at signing only — not repeated.
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <p className="text-xs uppercase tracking-wider text-ink/45 mb-2">
+                  {billPreview?.isProrated ? `Current bill (${billPreview.days} of ${billPreview.daysInMonth} days)` : "Current bill (full month)"}
+                </p>
+                <div className="space-y-1.5">
+                  {billPreview?.lineItems.map((li, i) => (
                     <div key={i} className="flex justify-between text-sm">
-                      <span className="text-ink/70">{c.label}</span>
-                      <span className="figures">{formatPkr(parseFloat(c.amount))}</span>
+                      <span className="text-ink/70">
+                        {li.label}
+                        {li.recurrence === "one_time" && <span className="text-ink/35 text-xs"> (one-time)</span>}
+                      </span>
+                      <span className="figures">{formatPkr(li.currentAmount)}</span>
                     </div>
                   ))}
-                <div className="flex justify-between text-sm font-semibold pt-1.5 border-t border-border">
-                  <span>Total</span>
-                  <span className="figures">{formatPkr(totalRent)}</span>
+                  <div className="flex justify-between text-sm font-semibold pt-1.5 border-t border-border">
+                    <span>Current bill subtotal</span>
+                    <span className="figures">{formatPkr(billPreview?.currentSubtotal ?? 0)}</span>
+                  </div>
                 </div>
               </div>
             </div>
+
             <div>
               <p className="text-xs uppercase tracking-wider text-ink/45 mb-1">
                 Security deposit
@@ -436,18 +470,18 @@ export default function NewLeasePage() {
                 {formatPkr(parseFloat(depositAmount || "0"))}
               </p>
             </div>
-            {preview && (
-              <div className="bg-brass/10 border border-brass/25 rounded-card px-3 py-2">
-                <p className="text-sm font-medium">
-                  First invoice will be prorated: {formatPkr(preview.total)}
-                </p>
+
+            <div className="bg-brass/10 border border-brass/25 rounded-card px-3 py-2.5 flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium">Total due now</p>
                 <p className="text-xs text-ink/50 mt-0.5">
-                  {preview.days} of {preview.daysInMonth} days this month
-                  {oneTimeTotal > 0 ? ` — recurring charges prorated, ${formatPkr(oneTimeTotal)} in one-time fees charged in full` : ""}.
-                  Every month after this one is charged in full.
+                  Current bill + security deposit. Every month after this one is billed in full ({formatPkr(recurringTotal)}).
                 </p>
               </div>
-            )}
+              <span className="text-lg font-display font-semibold figures">
+                {formatPkr((billPreview?.currentSubtotal ?? 0) + parseFloat(depositAmount || "0"))}
+              </span>
+            </div>
             {error && <p className="text-sm text-stamp-red">{error}</p>}
           </div>
         )}
