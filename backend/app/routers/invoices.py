@@ -101,9 +101,21 @@ def generate_monthly_invoices(
             skipped.append(lease["id"])
             continue
 
+        # One-time charges (e.g. a signing commission) only ever appear on
+        # this lease's FIRST invoice, never on later months' invoices --
+        # unlike Rent, which recurs every month.
+        prior_invoices = supabase.table("invoices").select("id").eq("lease_id", lease["id"]).execute().data
+        is_first_invoice = len(prior_invoices) == 0
+        active_charges = charges if is_first_invoice else [c for c in charges if c.get("recurrence", "recurring") != "one_time"]
+        if not active_charges:
+            skipped.append(lease["id"])
+            continue
+
         # --- Proration: only matters if the lease started or ended mid-month.
         # A lease active for the entire month gets a factor of exactly 1.0 --
         # charges are used as-is, with no rounding drift on the common case.
+        # One-time charges are NEVER prorated regardless -- a signing
+        # commission is a flat fee, not a per-day rate.
         lease_start = date.fromisoformat(str(lease["start_date"]))
         lease_end = date.fromisoformat(str(lease["end_date"]))
         month_last_day = next_month - timedelta(days=1)
@@ -120,12 +132,16 @@ def generate_monthly_invoices(
         days_in_month = (next_month - invoice_month).days
         days_active = (overlap_end - overlap_start).days + 1
         is_full_month = days_active >= days_in_month
+        factor = days_active / days_in_month
 
-        if is_full_month:
-            prorated_charges = [{"label": c["label"], "amount": float(c["amount"])} for c in charges]
-        else:
-            factor = days_active / days_in_month
-            prorated_charges = [{"label": c["label"], "amount": round(float(c["amount"]) * factor, 2)} for c in charges]
+        prorated_charges = []
+        for c in active_charges:
+            amount = float(c["amount"])
+            if c.get("recurrence", "recurring") == "one_time" or is_full_month:
+                final_amount = amount
+            else:
+                final_amount = round(amount * factor, 2)
+            prorated_charges.append({"label": c["label"], "amount": final_amount})
 
         total = sum(c["amount"] for c in prorated_charges)
 

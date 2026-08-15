@@ -26,6 +26,8 @@ export default function BuildingsPage() {
   const [owners, setOwners] = useState<OwnerRecord[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [myRole, setMyRole] = useState<string | null>(null);
+  const [roomSearch, setRoomSearch] = useState("");
+  const [roomStatusFilter, setRoomStatusFilter] = useState("");
 
   // --- Add / Edit building ---
   const [buildingModalOpen, setBuildingModalOpen] = useState(false);
@@ -301,7 +303,14 @@ export default function BuildingsPage() {
     }
   }
 
-  const roomsForSelected = rooms?.filter((r) => r.building_id === selected) ?? [];
+  const roomsForSelected = (rooms?.filter((r) => r.building_id === selected) ?? []).filter((r) => {
+    if (roomStatusFilter && r.status !== roomStatusFilter) return false;
+    if (roomSearch.trim()) {
+      const q = roomSearch.toLowerCase();
+      if (!r.room_number.toLowerCase().includes(q) && !(r.room_type ?? "").toLowerCase().includes(q)) return false;
+    }
+    return true;
+  });
   const floorsForSelected = floors?.filter((f) => f.building_id === selected) ?? [];
   const selectedBuilding = buildings?.find((b) => b.id === selected);
   const ownerName = (id: string) => owners?.find((o) => o.id === id)?.name ?? "—";
@@ -362,36 +371,56 @@ export default function BuildingsPage() {
       )}
 
       {buildings && buildings.length > 0 && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-          {roomsForSelected.length === 0 && (
-            <p className="col-span-full text-sm text-ink/45 py-8 text-center border border-dashed border-border rounded-card">
-              No rooms yet for this building — click &quot;Add room&quot; above.
-            </p>
-          )}
-          {roomsForSelected.map((room) => (
-            <button
-              key={room.id}
-              onClick={() => openEditRoomModal(room)}
-              className="card p-4 text-left hover:border-brass-dark/50 transition-colors"
-            >
-              <div className="flex items-center justify-between mb-3">
-                <span className="font-display text-lg font-semibold">{room.room_number}</span>
-                <StampBadge status={room.status} />
-              </div>
-              <p className="text-xs text-ink/50">{room.room_type ?? "Unit"}</p>
-              {room.base_rent && (
-                <p className="text-sm figures mt-2 text-ink/70">
-                  Rs {Number(room.base_rent).toLocaleString("en-PK")}/mo
-                </p>
-              )}
-              {room.owner_id && (
-                <p className="text-[10px] text-brass-dark mt-1.5 truncate">
-                  Owner: {ownerName(room.owner_id)}
-                </p>
-              )}
-            </button>
-          ))}
-        </div>
+        <>
+          <div className="flex flex-col sm:flex-row gap-3">
+            <Input
+              placeholder="Search rooms by number or type…"
+              value={roomSearch}
+              onChange={(e) => setRoomSearch(e.target.value)}
+              className="flex-1"
+            />
+            <Select value={roomStatusFilter} onChange={(e) => setRoomStatusFilter(e.target.value)}>
+              <option value="">All statuses</option>
+              {ROOM_STATUSES.map((s) => (
+                <option key={s} value={s}>
+                  {s.replace("_", " ")}
+                </option>
+              ))}
+            </Select>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+            {roomsForSelected.length === 0 && (
+              <p className="col-span-full text-sm text-ink/45 py-8 text-center border border-dashed border-border rounded-card">
+                {roomSearch || roomStatusFilter
+                  ? "No rooms match this search/filter."
+                  : 'No rooms yet for this building — click "Add room" above.'}
+              </p>
+            )}
+            {roomsForSelected.map((room) => (
+              <button
+                key={room.id}
+                onClick={() => openEditRoomModal(room)}
+                className="card p-4 text-left hover:border-brass-dark/50 transition-colors"
+              >
+                <div className="flex items-center justify-between mb-3">
+                  <span className="font-display text-lg font-semibold">{room.room_number}</span>
+                  <StampBadge status={room.status} />
+                </div>
+                <p className="text-xs text-ink/50">{room.room_type ?? "Unit"}</p>
+                {room.base_rent && (
+                  <p className="text-sm figures mt-2 text-ink/70">
+                    Rs {Number(room.base_rent).toLocaleString("en-PK")}/mo
+                  </p>
+                )}
+                {room.owner_id && (
+                  <p className="text-[10px] text-brass-dark mt-1.5 truncate">
+                    Owner: {ownerName(room.owner_id)}
+                  </p>
+                )}
+              </button>
+            ))}
+          </div>
+        </>
       )}
 
       {/* Add / Edit building modal */}

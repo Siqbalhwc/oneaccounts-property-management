@@ -1,0 +1,178 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { Card, DataTable } from "@/components/ui/Card";
+import { Button } from "@/components/ui/Button";
+import { Modal } from "@/components/ui/Modal";
+import { Field, Input } from "@/components/ui/Field";
+import { api } from "@/lib/api";
+
+type Owner = {
+  id: string;
+  name: string;
+  phone?: string;
+  cnic?: string;
+  address?: string;
+  is_archived: boolean;
+};
+
+export default function OwnersPage() {
+  const [owners, setOwners] = useState<Owner[] | null>(null);
+  const [search, setSearch] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
+
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [form, setForm] = useState({ name: "", phone: "", cnic: "", address: "" });
+
+  function load() {
+    api.get<Owner[]>(`/owners${showArchived ? "?include_archived=true" : ""}`).then(setOwners);
+  }
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showArchived]);
+
+  function openAddModal() {
+    setEditingId(null);
+    setError(null);
+    setForm({ name: "", phone: "", cnic: "", address: "" });
+    setModalOpen(true);
+  }
+
+  function openEditModal(owner: Owner) {
+    setEditingId(owner.id);
+    setError(null);
+    setForm({
+      name: owner.name,
+      phone: owner.phone ?? "",
+      cnic: owner.cnic ?? "",
+      address: owner.address ?? "",
+    });
+    setModalOpen(true);
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setSaving(true);
+    setError(null);
+    const payload = {
+      name: form.name,
+      phone: form.phone || undefined,
+      cnic: form.cnic || undefined,
+      address: form.address || undefined,
+    };
+    try {
+      if (editingId) {
+        await api.patch(`/owners/${editingId}`, payload);
+      } else {
+        await api.post("/owners", payload);
+      }
+      setModalOpen(false);
+      load();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleArchive(owner: Owner) {
+    await api.post(`/owners/${owner.id}/${owner.is_archived ? "unarchive" : "archive"}`, {});
+    load();
+  }
+
+  const filtered = (owners ?? []).filter((o) => {
+    if (!search.trim()) return true;
+    const q = search.toLowerCase();
+    return (
+      o.name.toLowerCase().includes(q) ||
+      (o.phone ?? "").toLowerCase().includes(q) ||
+      (o.cnic ?? "").toLowerCase().includes(q)
+    );
+  });
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-display font-semibold">Owners</h1>
+          <p className="text-sm text-ink/55 mt-1">
+            Everyone rent gets paid out to — assign them to a building or an
+            individual room from the Buildings page.
+          </p>
+        </div>
+        <Button onClick={openAddModal}>Add owner</Button>
+      </div>
+
+      <Card>
+        <div className="flex flex-col sm:flex-row gap-3 mb-4">
+          <Input
+            placeholder="Search by name, phone, or CNIC…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="flex-1"
+          />
+          <label className="flex items-center gap-2 text-sm text-ink/60 whitespace-nowrap">
+            <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+            Show archived
+          </label>
+        </div>
+        <DataTable
+          keyField="id"
+          rows={filtered}
+          emptyMessage={search ? "No owners match that search." : "No owners yet."}
+          columns={[
+            { header: "Name", accessor: (o) => o.name },
+            { header: "Phone", accessor: (o) => o.phone ?? "—" },
+            { header: "CNIC", accessor: (o) => o.cnic ?? "—" },
+            { header: "Address", accessor: (o) => o.address ?? "—" },
+            {
+              header: "",
+              accessor: (o) => (
+                <div className="flex gap-1 justify-end no-print">
+                  <Button variant="ghost" onClick={() => openEditModal(o)}>
+                    Edit
+                  </Button>
+                  <Button variant="ghost" onClick={() => handleArchive(o)}>
+                    {o.is_archived ? "Unarchive" : "Archive"}
+                  </Button>
+                </div>
+              ),
+              align: "right",
+            },
+          ]}
+        />
+      </Card>
+
+      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editingId ? "Edit owner" : "Add owner"}>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <Field label="Name">
+            <Input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          </Field>
+          <Field label="Phone (optional)">
+            <Input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
+          </Field>
+          <Field label="CNIC (optional)">
+            <Input value={form.cnic} onChange={(e) => setForm({ ...form, cnic: e.target.value })} />
+          </Field>
+          <Field label="Address (optional)">
+            <Input value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
+          </Field>
+          {error && <p className="text-sm text-stamp-red">{error}</p>}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" variant="ghost" onClick={() => setModalOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={saving}>
+              {saving ? "Saving…" : editingId ? "Save changes" : "Add owner"}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+    </div>
+  );
+}

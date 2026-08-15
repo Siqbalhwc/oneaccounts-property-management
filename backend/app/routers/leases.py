@@ -18,6 +18,7 @@ router = APIRouter(prefix="/leases", tags=["Leases"])
 class LeaseCharge(BaseModel):
     label: str
     amount: float
+    recurrence: str = "recurring"  # 'recurring' | 'one_time' -- e.g. Rent vs a one-off Commission fee
 
 
 class LeaseCreate(BaseModel):
@@ -142,12 +143,17 @@ def create_lease(
     lease_id = lease["id"]
 
     try:
+        for c in payload.charges:
+            if c.recurrence not in ("recurring", "one_time"):
+                raise HTTPException(status_code=400, detail=f"Invalid recurrence for '{c.label}': must be 'recurring' or 'one_time'")
+
         charge_rows = [
             {
                 "company_id": company_id,
                 "lease_id": lease_id,
                 "label": c.label,
                 "amount": c.amount,
+                "recurrence": c.recurrence,
                 "effective_from": str(payload.start_date),
             }
             for c in payload.charges

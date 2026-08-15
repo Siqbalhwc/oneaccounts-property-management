@@ -70,6 +70,25 @@ def record_payment(
                 room = supabase.table("rooms").select("building_id").eq("id", room_id).single().execute().data
                 building_id = room["building_id"] if room else None
                 owner_id = resolve_room_owner(supabase, room_id)
+    elif tenant_id:
+        # No invoice given (e.g. an advance/on-account payment) -- best-effort
+        # resolve tags via the tenant's current active lease, so this entry
+        # still carries room/building/owner tags for financial-statement
+        # drill-down instead of floating completely untagged. If the tenant
+        # has no active lease, it genuinely can't be tagged and stays blank.
+        active_lease = (
+            supabase.table("leases")
+            .select("room_id")
+            .eq("tenant_id", tenant_id)
+            .eq("status", "active")
+            .execute()
+            .data
+        )
+        if active_lease:
+            room_id = active_lease[0]["room_id"]
+            room = supabase.table("rooms").select("building_id").eq("id", room_id).single().execute().data
+            building_id = room["building_id"] if room else None
+            owner_id = resolve_room_owner(supabase, room_id)
 
     # Dr Bank / Cr Accounts Receivable -- the actual cash coming in. This
     # does NOT touch Rent Income or Due to Owners again -- that was already

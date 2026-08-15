@@ -14,6 +14,7 @@ const NAV_SECTIONS = [
     label: "Property",
     items: [
       { href: "/buildings", label: "Buildings & rooms" },
+      { href: "/owners", label: "Owners" },
       { href: "/tenants", label: "Tenants" },
       { href: "/leases", label: "Leases" },
     ],

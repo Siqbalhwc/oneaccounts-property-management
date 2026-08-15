@@ -7,7 +7,8 @@ import { Modal } from "@/components/ui/Modal";
 import { Field, Input, AmountInput, Select } from "@/components/ui/Field";
 import { api, Building } from "@/lib/api";
 
-type ExpenseCategory = { id: string; name: string };
+type ExpenseCategory = { id: string; name: string; account_id?: string };
+type Account = { id: string; code: string; name: string };
 type Expense = {
   id: string;
   category_id: string;
@@ -19,6 +20,8 @@ type Expense = {
   recurrence?: "one_time" | "monthly";
 };
 type Allocation = { id?: string; building_id: string; allocation_type: "percentage" | "fixed"; value: string };
+type AllocationSummaryRow = { source_id: string; building_id: string; allocation_type: string; value: number };
+type JournalLine = { id: string; account_id: string; direction: "debit" | "credit"; amount: number; building_id?: string };
 
 function formatPkr(n: number) {
   return `Rs ${Number(n || 0).toLocaleString("en-PK")}`;
@@ -28,6 +31,9 @@ export default function ExpensesPage() {
   const [expenses, setExpenses] = useState<Expense[] | null>(null);
   const [categories, setCategories] = useState<ExpenseCategory[] | null>(null);
   const [buildings, setBuildings] = useState<Building[] | null>(null);
+  const [accounts, setAccounts] = useState<Account[] | null>(null);
+  const [allocationsSummary, setAllocationsSummary] = useState<AllocationSummaryRow[]>([]);
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -50,7 +56,11 @@ export default function ExpensesPage() {
   const [allocationSaving, setAllocationSaving] = useState(false);
   const [allocationError, setAllocationError] = useState<string | null>(null);
 
-  // --- Generate this month's recurring expenses ---
+  // --- View ledger (read-only journal entry drill-down) ---
+  const [ledgerModalOpen, setLedgerModalOpen] = useState(false);
+  const [ledgerTarget, setLedgerTarget] = useState<Expense | null>(null);
+  const [ledgerLines, setLedgerLines] = useState<JournalLine[] | null>(null);
+  const [ledgerError, setLedgerError] = useState<string | null>(null);
   const [generateModalOpen, setGenerateModalOpen] = useState(false);
   const [generateMonth, setGenerateMonth] = useState(new Date().toISOString().slice(0, 10));
   const [generateSaving, setGenerateSaving] = useState(false);
@@ -59,6 +69,7 @@ export default function ExpensesPage() {
 
   function load() {
     api.get<Expense[]>("/expenses").then(setExpenses);
+    api.get<AllocationSummaryRow[]>("/expenses/allocations/summary").then(setAllocationsSummary);
   }
 
   useEffect(() => {
@@ -68,7 +79,18 @@ export default function ExpensesPage() {
       setForm((f) => (f.category_id ? f : { ...f, category_id: cats[0]?.id ?? "" }));
     });
     api.get<Building[]>("/buildings").then(setBuildings);
+    api.get<Account[]>("/chart-of-accounts").then(setAccounts);
   }, []);
+
+  useEffect(() => {
+    function handleClickOutside() {
+      setOpenMenuId(null);
+    }
+    if (openMenuId) {
+      document.addEventListener("click", handleClickOutside);
+      return () => document.removeEventListener("click", handleClickOutside);
+    }
+  }, [openMenuId]);
 
   function openAddModal() {
     setEditingId(null);
@@ -135,6 +157,32 @@ export default function ExpensesPage() {
 
   const categoryName = (id: string) => categories?.find((c) => c.id === id)?.name ?? "—";
   const buildingName = (id: string) => buildings?.find((b) => b.id === id)?.name ?? "—";
+  const accountLabel = (categoryId: string) => {
+    const cat = categories?.find((c) => c.id === categoryId);
+    const acct = accounts?.find((a) => a.id === cat?.account_id);
+    return acct ? `${acct.code} · ${acct.name}` : "—";
+  };
+  const splitSummary = (expenseId: string) => {
+    const rows = allocationsSummary.filter((r) => r.source_id === expenseId);
+    if (rows.length === 0) return null;
+    return rows.map((r) => `${buildingName(r.building_id)} ${r.value}${r.allocation_type === "percentage" ? "%" : " Rs"}`).join(", ");
+  };
+
+  async function openLedgerModal(expense: Expense) {
+    setOpenMenuId(null);
+    setLedgerTarget(expense);
+    setLedgerError(null);
+    setLedgerLines(null);
+    setLedgerModalOpen(true);
+    try {
+      const result = await api.get<{ entries: any[]; lines: JournalLine[] }>(
+        `/ledger/entries?source_type=expense&source_id=${expense.id}`
+      );
+      setLedgerLines(result.lines);
+    } catch (err: any) {
+      setLedgerError(err.message);
+    }
+  }
 
   async function openAllocationModal(expense: Expense) {
     setAllocationTarget(expense);
@@ -170,19 +218,29 @@ export default function ExpensesPage() {
   async function handleSaveAllocations(e: React.FormEvent) {
     e.preventDefault();
     if (!allocationTarget) return;
+
+    const filled = allocationRows.filter((r) => r.building_id && r.value);
+    const percentageRows = filled.filter((r) => r.allocation_type === "percentage");
+    if (percentageRows.length > 0 && percentageRows.length === filled.length) {
+      const total = percentageRows.reduce((sum, r) => sum + (parseFloat(r.value) || 0), 0);
+      if (Math.abs(total - 100) > 0.01) {
+        setAllocationError(`Percentages must add up to 100% — currently ${total}%.`);
+        return;
+      }
+    }
+
     setAllocationSaving(true);
     setAllocationError(null);
     try {
       await api.put(`/expenses/${allocationTarget.id}/allocations`, {
-        allocations: allocationRows
-          .filter((r) => r.building_id && r.value)
-          .map((r) => ({
-            building_id: r.building_id,
-            allocation_type: r.allocation_type,
-            value: parseFloat(r.value),
-          })),
+        allocations: filled.map((r) => ({
+          building_id: r.building_id,
+          allocation_type: r.allocation_type,
+          value: parseFloat(r.value),
+        })),
       });
       setAllocationModalOpen(false);
+      load();
     } catch (err: any) {
       setAllocationError(err.message);
     } finally {
@@ -235,7 +293,7 @@ export default function ExpensesPage() {
           columns={[
             { header: "Date", accessor: (e) => e.expense_date },
             { header: "Category", accessor: (e) => categoryName(e.category_id) },
-            { header: "Building", accessor: (e) => (e.building_id ? buildingName(e.building_id) : <span className="text-ink/40">Company-wide</span>) },
+            { header: "GL account", accessor: (e) => <span className="text-xs text-ink/50">{accountLabel(e.category_id)}</span> },
             { header: "Vendor", accessor: (e) => e.vendor_name ?? "—" },
             {
               header: "Recurs",
@@ -247,6 +305,17 @@ export default function ExpensesPage() {
                 ),
             },
             {
+              header: "Building / Split",
+              accessor: (e) =>
+                e.building_id ? (
+                  <span className="text-xs text-ink/60">{buildingName(e.building_id)}</span>
+                ) : splitSummary(e.id) ? (
+                  <span className="text-xs text-ink/60">{splitSummary(e.id)}</span>
+                ) : (
+                  <span className="text-xs text-stamp-red">Company-wide, not split yet</span>
+                ),
+            },
+            {
               header: "Amount",
               accessor: (e) => <span className="figures">{formatPkr(e.amount)}</span>,
               align: "right",
@@ -254,15 +323,41 @@ export default function ExpensesPage() {
             {
               header: "",
               accessor: (e) => (
-                <div className="flex gap-1 justify-end no-print">
-                  {!e.building_id && (
-                    <Button variant="ghost" onClick={() => openAllocationModal(e)}>
-                      Split
-                    </Button>
+                <div className="relative no-print">
+                  <button
+                    onClick={(ev) => { ev.stopPropagation(); setOpenMenuId(openMenuId === e.id ? null : e.id); }}
+                    className="w-6 h-6 flex items-center justify-center rounded hover:bg-ledger/5 text-ink/50"
+                    title="Actions"
+                  >
+                    ›
+                  </button>
+                  {openMenuId === e.id && (
+                    <div
+                      onClick={(ev) => ev.stopPropagation()}
+                      className="absolute right-0 top-7 z-10 bg-paper border border-border rounded-card shadow-md py-1 w-40"
+                    >
+                      <button
+                        onClick={() => { setOpenMenuId(null); openEditModal(e); }}
+                        className="block w-full text-left px-3 py-1.5 text-sm hover:bg-ledger/5"
+                      >
+                        Edit
+                      </button>
+                      {!e.building_id && (
+                        <button
+                          onClick={() => { setOpenMenuId(null); openAllocationModal(e); }}
+                          className="block w-full text-left px-3 py-1.5 text-sm hover:bg-ledger/5"
+                        >
+                          Manage split
+                        </button>
+                      )}
+                      <button
+                        onClick={() => openLedgerModal(e)}
+                        className="block w-full text-left px-3 py-1.5 text-sm hover:bg-ledger/5"
+                      >
+                        View ledger
+                      </button>
+                    </div>
                   )}
-                  <Button variant="ghost" onClick={() => openEditModal(e)}>
-                    Edit
-                  </Button>
                 </div>
               ),
               align: "right",
@@ -451,6 +546,51 @@ export default function ExpensesPage() {
             </Button>
           </div>
         </form>
+      </Modal>
+
+      <Modal
+        open={ledgerModalOpen}
+        onClose={() => setLedgerModalOpen(false)}
+        title={ledgerTarget ? `Ledger — ${categoryName(ledgerTarget.category_id)}, ${formatPkr(ledgerTarget.amount)}` : "Ledger"}
+      >
+        <div className="space-y-3">
+          <p className="text-xs text-ink/50">
+            Exactly what this expense posted to the double-entry ledger — read-only.
+          </p>
+          {ledgerError && <p className="text-sm text-stamp-red">{ledgerError}</p>}
+          {!ledgerError && ledgerLines === null && <p className="text-sm text-ink/40">Loading…</p>}
+          {ledgerLines && ledgerLines.length === 0 && (
+            <p className="text-sm text-ink/40">No journal entry found for this expense.</p>
+          )}
+          {ledgerLines && ledgerLines.length > 0 && (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-ink/50 text-xs">
+                  <th className="pb-1">Account</th>
+                  <th className="pb-1 text-right">Debit</th>
+                  <th className="pb-1 text-right">Credit</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ledgerLines.map((line) => {
+                  const account = accounts?.find((a) => a.id === line.account_id);
+                  return (
+                    <tr key={line.id} className="border-t border-border">
+                      <td className="py-1.5">{account ? `${account.code} · ${account.name}` : line.account_id}</td>
+                      <td className="py-1.5 text-right figures">{line.direction === "debit" ? formatPkr(line.amount) : ""}</td>
+                      <td className="py-1.5 text-right figures">{line.direction === "credit" ? formatPkr(line.amount) : ""}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+          <div className="flex justify-end pt-2">
+            <Button type="button" variant="ghost" onClick={() => setLedgerModalOpen(false)}>
+              Close
+            </Button>
+          </div>
+        </div>
       </Modal>
     </div>
   );

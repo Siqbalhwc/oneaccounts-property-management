@@ -87,6 +87,23 @@ def list_expenses(
     return query.order("expense_date", desc=True).execute().data
 
 
+@router.get("/allocations/summary")
+def list_all_expense_allocations(
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+):
+    """All cost_allocations for every expense in one call, so a list page
+    can show each shared expense's split without an N+1 request per row."""
+    return (
+        supabase.table("cost_allocations")
+        .select("*")
+        .eq("company_id", company_id)
+        .eq("source_type", "expense")
+        .execute()
+        .data
+    )
+
+
 @router.get("/{expense_id}")
 def get_expense(expense_id: str, supabase: Client = Depends(get_supabase)):
     res = supabase.table("expenses").select("*").eq("id", expense_id).single().execute()
@@ -245,6 +262,18 @@ def set_expense_allocations(
     expense = supabase.table("expenses").select("id").eq("id", expense_id).single().execute()
     if not expense.data:
         raise HTTPException(status_code=404, detail="Expense not found")
+
+    percentage_rows = [a for a in payload.allocations if a.allocation_type == "percentage"]
+    if percentage_rows and len(percentage_rows) == len(payload.allocations):
+        # Only enforced when EVERY row is percentage-based -- a mix of
+        # percentage and fixed-amount rows doesn't have one obvious "100%"
+        # to check against, so that combination is left unvalidated for now.
+        total_pct = sum(a.value for a in percentage_rows)
+        if abs(total_pct - 100) > 0.01:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Percentage split must add up to 100% (currently {total_pct}%) so the full expense is accounted for.",
+            )
 
     supabase.table("cost_allocations").delete().eq("source_type", "expense").eq("source_id", expense_id).execute()
 
