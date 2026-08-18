@@ -179,7 +179,7 @@ export default function NewLeasePage() {
   const canProceedStep2 = depositAmount && depositDate;
 
   return (
-    <div className="max-w-2xl space-y-6">
+    <div className="max-w-5xl space-y-6">
       <div>
         <h1 className="text-2xl font-display font-semibold">New lease</h1>
         <p className="text-sm text-ink/55 mt-1">

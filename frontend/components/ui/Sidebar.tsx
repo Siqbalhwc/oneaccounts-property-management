@@ -27,6 +27,8 @@ const NAV_SECTIONS = [
       { href: "/staff", label: "Staff & salaries" },
       { href: "/owner-ledger", label: "Owner ledger" },
       { href: "/chart-of-accounts", label: "Chart of accounts" },
+      { href: "/journal", label: "Journal entries" },
+      { href: "/trial-balance", label: "Trial balance" },
       { href: "/reports", label: "Reports" },
     ],
   },

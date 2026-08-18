@@ -6,6 +6,7 @@ from app.routers import (
     chart_of_accounts,
     company_settings,
     expenses,
+    financials,
     invoices,
     ledger,
     leases,
@@ -69,6 +70,7 @@ app.include_router(audit_log.router, prefix=API_PREFIX)
 app.include_router(staff_allocations.router, prefix=API_PREFIX)
 app.include_router(chart_of_accounts.router, prefix=API_PREFIX)
 app.include_router(ledger.router, prefix=API_PREFIX)
+app.include_router(financials.router, prefix=API_PREFIX)
 
 
 @app.get("/")

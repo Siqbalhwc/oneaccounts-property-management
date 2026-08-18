@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -8,6 +8,7 @@ from supabase import Client
 from app.core.deps import get_current_company_id, get_current_user, get_supabase
 from app.crud.generic import write_audit_log
 from app.services.ledger import get_account_id, post_journal_entry, resolve_room_owner
+from app.routers.invoices import generate_invoice_for_lease
 
 router = APIRouter(prefix="/leases", tags=["Leases"])
 
@@ -207,7 +208,24 @@ def create_lease(
         supabase.table("leases").delete().eq("id", lease_id).execute()
         raise HTTPException(status_code=400, detail=f"Failed to fully create lease: {e}")
 
-    return {"lease": lease, "message": "Lease, charges, and deposit created"}
+    # Auto-generate the lease's first invoice right now, rather than waiting
+    # for the next monthly batch run -- so there's an actual invoice_id to
+    # share with the tenant (WhatsApp link, PDF) immediately at signing.
+    # Best-effort: if this fails for any reason, the lease itself is still
+    # valid -- the monthly batch generator would pick it up as a fallback.
+    first_invoice = None
+    try:
+        invoice_month = payload.start_date.replace(day=1)
+        due_date = payload.start_date + timedelta(days=7)
+        first_invoice = generate_invoice_for_lease(supabase, company_id, lease, invoice_month, due_date)
+    except Exception:
+        pass
+
+    return {
+        "lease": lease,
+        "first_invoice": first_invoice,
+        "message": "Lease, charges, and deposit created" + (" — first invoice generated" if first_invoice else ""),
+    }
 
 
 @router.get("/{lease_id}/charges")

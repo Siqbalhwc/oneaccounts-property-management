@@ -87,7 +87,12 @@ def compute_ledger(
         invoice_ids = [i["id"] for i in paid_invoices]
 
         if invoice_ids:
-            rent_account_id = get_account_id(supabase, company_id, "4000")
+            # Rent (and anything else tagged owner-transferring) now credits
+            # the Due to Owners LIABILITY directly at invoice time -- it was
+            # never the company's own income. This account's own credits
+            # ARE the owner's payable ledger now, so this query just reads
+            # straight off it rather than an income account.
+            owner_liability_account_id = get_account_id(supabase, company_id, "2200")
             entries = (
                 supabase.table("journal_entries")
                 .select("id")
@@ -102,7 +107,7 @@ def compute_ledger(
                     supabase.table("journal_lines")
                     .select("amount, owner_id")
                     .in_("journal_entry_id", entry_ids)
-                    .eq("account_id", rent_account_id)
+                    .eq("account_id", owner_liability_account_id)
                     .execute()
                     .data
                 )
