@@ -132,9 +132,12 @@ def generate_invoice_for_lease(
     ]
     supabase.table("invoice_line_items").insert(line_items).execute()
 
-    room = supabase.table("rooms").select("id, building_id, owner_id").eq("id", lease["room_id"]).single().execute().data
+    room = supabase.table("rooms").select("id, room_number, building_id, owner_id").eq("id", lease["room_id"]).single().execute().data
     building_id = room["building_id"] if room else None
     room_owner_id = resolve_room_owner(supabase, lease["room_id"]) if room else None
+    tenant = supabase.table("tenants").select("full_name").eq("id", lease["tenant_id"]).single().execute().data
+    tenant_name = tenant["full_name"] if tenant else "Tenant"
+    room_label = room.get("room_number", "room") if room else "room"
 
     credit_by_account: dict[str, dict] = {}
     for c in prorated_charges:
@@ -147,7 +150,8 @@ def generate_invoice_for_lease(
     journal_lines = [
         {
             "account_id": ar_account_id, "direction": "debit", "amount": total,
-            "building_id": building_id, "room_id": lease["room_id"], "owner_id": room_owner_id, "tenant_id": lease["tenant_id"],
+            "building_id": building_id, "room_id": lease["room_id"], "owner_id": room_owner_id,
+            "tenant_id": lease["tenant_id"], "lease_id": lease["id"],
         }
     ]
     for acct_id, info in credit_by_account.items():
@@ -155,14 +159,21 @@ def generate_invoice_for_lease(
             {
                 "account_id": acct_id, "direction": "credit", "amount": info["amount"],
                 "building_id": building_id, "room_id": lease["room_id"],
-                "owner_id": room_owner_id if info["transfers_to_owner"] else None,
-                "tenant_id": lease["tenant_id"],
+                # owner_id here means "this happened at this owner's property" --
+                # a REPORTING tag, always set. It's a separate question from
+                # whether the money is actually OWED to the owner, which is
+                # determined by which account this credits (Due to Owners vs
+                # a company income account), not by this tag's presence.
+                "owner_id": room_owner_id,
+                "tenant_id": lease["tenant_id"], "lease_id": lease["id"],
             }
         )
 
     post_journal_entry(
         supabase, company_id=company_id, entry_date=str(invoice_month), source_type="invoice",
-        source_id=inv["id"], description=f"Invoice {inv['id']} - {invoice_month}", lines=journal_lines,
+        source_id=inv["id"],
+        description=f"Rent invoice — {tenant_name}, Room {room_label} — {invoice_month.strftime('%B %Y')}",
+        lines=journal_lines,
     )
 
     return inv

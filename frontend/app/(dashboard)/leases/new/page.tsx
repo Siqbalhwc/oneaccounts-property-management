@@ -53,6 +53,16 @@ export default function NewLeasePage() {
   const [depositAmount, setDepositAmount] = useState("");
   const [depositDate, setDepositDate] = useState("");
 
+  // The deposit date field visually defaults to the lease start date, but
+  // the underlying STATE stayed empty until this fired -- which is exactly
+  // what made Continue stay disabled even though a date was showing.
+  useEffect(() => {
+    if (step === 2 && !depositDate && startDate) {
+      setDepositDate(startDate);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, startDate]);
+
   useEffect(() => {
     api.get<Tenant[]>("/tenants").then(setTenants);
     api.get<Building[]>("/buildings").then(setBuildings);
@@ -335,7 +345,7 @@ export default function NewLeasePage() {
                         <Select value={c.account_id} onChange={(e) => updateCharge(i, "account_id", e.target.value)}>
                           <option value="">Select account…</option>
                           {accounts
-                            .filter((a) => a.account_type === "income")
+                            .filter((a) => a.account_type === "income" || a.account_type === "liability")
                             .map((a) => (
                               <option key={a.id} value={a.id}>
                                 {a.code} · {a.name}{a.transfers_to_owner ? " (owner)" : " (company)"}

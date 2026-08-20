@@ -99,24 +99,27 @@ def refund_deposit(
     # Dr Security Deposits Held (clears the full liability) /
     # Cr Bank (actual cash going out) + Cr Other Income (any deductions --
     # damages/unpaid dues retained by the company, not the owner).
+    lease_id = deposit.data["lease_id"]
     lease = (
         supabase.table("leases")
         .select("tenant_id, room_id")
-        .eq("id", deposit.data["lease_id"])
+        .eq("id", lease_id)
         .single()
         .execute()
         .data
     )
-    building_id, room_id, owner_id, tenant_id = None, None, None, None
+    building_id, room_id, owner_id, tenant_id, tenant_name = None, None, None, None, "Tenant"
     if lease:
         tenant_id, room_id = lease["tenant_id"], lease["room_id"]
         room = supabase.table("rooms").select("building_id").eq("id", room_id).single().execute().data
         building_id = room["building_id"] if room else None
         owner_id = resolve_room_owner(supabase, room_id)
+        tenant = supabase.table("tenants").select("full_name").eq("id", tenant_id).single().execute().data
+        tenant_name = tenant["full_name"] if tenant else "Tenant"
 
     deposits_held_id = get_account_id(supabase, company_id, "2100")
     bank_id = get_account_id(supabase, company_id, "1000")
-    tags = {"building_id": building_id, "room_id": room_id, "owner_id": owner_id, "tenant_id": tenant_id}
+    tags = {"building_id": building_id, "room_id": room_id, "owner_id": owner_id, "tenant_id": tenant_id, "lease_id": lease_id}
 
     lines = [
         {"account_id": deposits_held_id, "direction": "debit", "amount": float(deposit.data["amount_received"]), **tags},
@@ -133,7 +136,7 @@ def refund_deposit(
         entry_date=str(refund_date),
         source_type="security_deposit_refund",
         source_id=deposit_id,
-        description=f"Security deposit refund - {deposit_id}",
+        description=f"Security deposit refund — {tenant_name}",
         lines=lines,
     )
 

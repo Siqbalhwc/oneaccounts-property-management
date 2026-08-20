@@ -328,13 +328,13 @@ export default function BuildingsPage() {
       </div>
 
       {buildings && buildings.length > 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border">
-          <div className="flex gap-2 flex-wrap">
+        <div className="flex items-center justify-between gap-3 border-b border-border">
+          <div className="flex gap-2 overflow-x-auto min-w-0 [scrollbar-width:thin]">
             {buildings.map((b) => (
               <button
                 key={b.id}
                 onClick={() => setSelected(b.id)}
-                className={`px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
+                className={`px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors whitespace-nowrap shrink-0 ${
                   selected === b.id
                     ? "border-brass-dark text-ink"
                     : "border-transparent text-ink/50 hover:text-ink"
@@ -344,7 +344,7 @@ export default function BuildingsPage() {
               </button>
             ))}
           </div>
-          <div className="flex gap-2 mb-2 no-print">
+          <div className="flex gap-2 mb-2 no-print shrink-0">
             {selectedBuilding && (
               <>
                 <Button variant="ghost" onClick={() => openEditBuildingModal(selectedBuilding)}>
@@ -373,20 +373,24 @@ export default function BuildingsPage() {
       {buildings && buildings.length > 0 && (
         <>
           <div className="flex flex-col sm:flex-row gap-3">
-            <Input
-              placeholder="Search rooms by number or type…"
-              value={roomSearch}
-              onChange={(e) => setRoomSearch(e.target.value)}
-              className="flex-1"
-            />
-            <Select value={roomStatusFilter} onChange={(e) => setRoomStatusFilter(e.target.value)}>
-              <option value="">All statuses</option>
-              {ROOM_STATUSES.map((s) => (
-                <option key={s} value={s}>
-                  {s.replace("_", " ")}
-                </option>
-              ))}
-            </Select>
+            <div className="flex-1 min-w-0">
+              <Input
+                placeholder="Search rooms by number or type…"
+                value={roomSearch}
+                onChange={(e) => setRoomSearch(e.target.value)}
+                className="w-full"
+              />
+            </div>
+            <div className="sm:w-56 shrink-0">
+              <Select value={roomStatusFilter} onChange={(e) => setRoomStatusFilter(e.target.value)} className="w-full">
+                <option value="">All statuses</option>
+                {ROOM_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {s.replace("_", " ")}
+                  </option>
+                ))}
+              </Select>
+            </div>
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
             {roomsForSelected.length === 0 && (

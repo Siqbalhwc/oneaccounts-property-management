@@ -62,13 +62,19 @@ def _post_expense_journal(supabase: Client, company_id: str, expense: dict):
     account_id = category["account_id"] if category and category.get("account_id") else get_account_id(supabase, company_id, "5900")
     bank_id = get_account_id(supabase, company_id, "1000")
 
+    fallback_label = "Expense"
+    if not expense.get("description"):
+        cat_name = supabase.table("expense_categories").select("name").eq("id", expense["category_id"]).single().execute().data
+        vendor = f" — {expense['vendor_name']}" if expense.get("vendor_name") else ""
+        fallback_label = f"{(cat_name or {}).get('name', 'Expense')}{vendor}"
+
     post_journal_entry(
         supabase,
         company_id=company_id,
         entry_date=str(expense["expense_date"]),
         source_type="expense",
         source_id=expense["id"],
-        description=expense.get("description") or f"Expense - {expense['id']}",
+        description=expense.get("description") or fallback_label,
         lines=[
             {"account_id": account_id, "direction": "debit", "amount": float(expense["amount"]), "building_id": expense.get("building_id")},
             {"account_id": bank_id, "direction": "credit", "amount": float(expense["amount"]), "building_id": expense.get("building_id")},

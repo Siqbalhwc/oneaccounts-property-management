@@ -30,7 +30,7 @@ def record_payment(
     payment = supabase.table("payments").insert(payload).execute().data[0]
 
     invoice_id = payload.get("invoice_id")
-    building_id, room_id, owner_id = None, None, None
+    building_id, room_id, owner_id, lease_id = None, None, None, None
     tenant_id = payload.get("tenant_id")
 
     if invoice_id:
@@ -56,6 +56,7 @@ def record_payment(
             # Resolve the same building/room/owner/tenant tags the original
             # invoice posted with, so the payment lines up with it in
             # drill-down reports instead of floating untagged.
+            lease_id = invoice.data["lease_id"]
             lease = (
                 supabase.table("leases")
                 .select("room_id, tenant_id")
@@ -78,13 +79,14 @@ def record_payment(
         # has no active lease, it genuinely can't be tagged and stays blank.
         active_lease = (
             supabase.table("leases")
-            .select("room_id")
+            .select("id, room_id")
             .eq("tenant_id", tenant_id)
             .eq("status", "active")
             .execute()
             .data
         )
         if active_lease:
+            lease_id = active_lease[0]["id"]
             room_id = active_lease[0]["room_id"]
             room = supabase.table("rooms").select("building_id").eq("id", room_id).single().execute().data
             building_id = room["building_id"] if room else None
@@ -96,21 +98,27 @@ def record_payment(
     # receivable.
     bank_id = get_account_id(supabase, company_id, "1000")
     ar_id = get_account_id(supabase, company_id, "1100")
+    tenant_name = "Tenant"
+    if tenant_id:
+        tenant = supabase.table("tenants").select("full_name").eq("id", tenant_id).single().execute().data
+        tenant_name = tenant["full_name"] if tenant else "Tenant"
     post_journal_entry(
         supabase,
         company_id=company_id,
         entry_date=str(payload.get("payment_date") or date.today()),
         source_type="payment",
         source_id=payment["id"],
-        description=f"Payment received - {payment['id']}",
+        description=f"Payment received — {tenant_name}",
         lines=[
             {
                 "account_id": bank_id, "direction": "debit", "amount": float(payload["amount"]),
-                "building_id": building_id, "room_id": room_id, "owner_id": owner_id, "tenant_id": tenant_id,
+                "building_id": building_id, "room_id": room_id, "owner_id": owner_id,
+                "tenant_id": tenant_id, "lease_id": lease_id,
             },
             {
                 "account_id": ar_id, "direction": "credit", "amount": float(payload["amount"]),
-                "building_id": building_id, "room_id": room_id, "owner_id": owner_id, "tenant_id": tenant_id,
+                "building_id": building_id, "room_id": room_id, "owner_id": owner_id,
+                "tenant_id": tenant_id, "lease_id": lease_id,
             },
         ],
     )

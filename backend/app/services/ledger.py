@@ -29,6 +29,7 @@ class JournalLine(TypedDict, total=False):
     room_id: Optional[str]
     owner_id: Optional[str]
     tenant_id: Optional[str]
+    lease_id: Optional[str]
 
 
 def get_account_id(supabase: Client, company_id: str, code: str) -> str:
@@ -154,9 +155,58 @@ def post_journal_entry(
             "room_id": l.get("room_id"),
             "owner_id": l.get("owner_id"),
             "tenant_id": l.get("tenant_id"),
+            "lease_id": l.get("lease_id"),
         }
         for l in lines
     ]
     supabase.table("journal_lines").insert(line_rows).execute()
 
     return entry
+
+
+def reverse_journal_entry(supabase: Client, company_id: str, entry_id: str, reason: Optional[str] = None) -> dict:
+    """
+    Posts an equal-and-opposite entry to cancel a mistaken one, rather than
+    editing or deleting the original -- posted entries are never touched
+    once written, only reversed. Marks both entries' status so the reversed
+    one is excluded from reports going forward while the audit trail (who
+    posted what, when) stays fully intact.
+    """
+    original = supabase.table("journal_entries").select("*").eq("id", entry_id).single().execute()
+    if not original.data:
+        raise ValueError(f"Journal entry {entry_id} not found")
+    if original.data["status"] == "reversed":
+        raise ValueError(f"Journal entry {entry_id} was already reversed")
+
+    original_lines = supabase.table("journal_lines").select("*").eq("journal_entry_id", entry_id).execute().data
+
+    flipped_lines: list[JournalLine] = [
+        {
+            "account_id": l["account_id"],
+            "direction": "credit" if l["direction"] == "debit" else "debit",
+            "amount": float(l["amount"]),
+            "building_id": l.get("building_id"),
+            "room_id": l.get("room_id"),
+            "owner_id": l.get("owner_id"),
+            "tenant_id": l.get("tenant_id"),
+            "lease_id": l.get("lease_id"),
+        }
+        for l in original_lines
+    ]
+
+    from datetime import date as _date
+
+    reversal = post_journal_entry(
+        supabase,
+        company_id=company_id,
+        entry_date=str(_date.today()),
+        source_type=original.data["source_type"],
+        source_id=original.data["source_id"],
+        description=f"Reversal of: {original.data.get('description') or entry_id}" + (f" — {reason}" if reason else ""),
+        lines=flipped_lines,
+    )
+
+    supabase.table("journal_entries").update({"reversal_of": entry_id}).eq("id", reversal["id"]).execute()
+    supabase.table("journal_entries").update({"status": "reversed", "reversed_by": reversal["id"]}).eq("id", entry_id).execute()
+
+    return reversal

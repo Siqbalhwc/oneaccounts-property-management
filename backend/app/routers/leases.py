@@ -182,8 +182,11 @@ def create_lease(
             bank_id = get_account_id(supabase, company_id, "1000")
             deposits_held_id = get_account_id(supabase, company_id, "2100")
             owner_id = resolve_room_owner(supabase, payload.room_id)
-            room = supabase.table("rooms").select("building_id").eq("id", payload.room_id).single().execute().data
+            room = supabase.table("rooms").select("room_number, building_id").eq("id", payload.room_id).single().execute().data
             building_id = room["building_id"] if room else None
+            room_label = room.get("room_number", "room") if room else "room"
+            tenant = supabase.table("tenants").select("full_name").eq("id", payload.tenant_id).single().execute().data
+            tenant_name = tenant["full_name"] if tenant else "Tenant"
 
             post_journal_entry(
                 supabase,
@@ -191,15 +194,17 @@ def create_lease(
                 entry_date=str(payload.security_deposit_date_received),
                 source_type="security_deposit",
                 source_id=lease_id,
-                description=f"Security deposit received - lease {lease_id}",
+                description=f"Security deposit — {tenant_name}, Room {room_label}",
                 lines=[
                     {
                         "account_id": bank_id, "direction": "debit", "amount": payload.security_deposit_amount,
-                        "building_id": building_id, "room_id": payload.room_id, "owner_id": owner_id, "tenant_id": payload.tenant_id,
+                        "building_id": building_id, "room_id": payload.room_id, "owner_id": owner_id,
+                        "tenant_id": payload.tenant_id, "lease_id": lease_id,
                     },
                     {
                         "account_id": deposits_held_id, "direction": "credit", "amount": payload.security_deposit_amount,
-                        "building_id": building_id, "room_id": payload.room_id, "owner_id": owner_id, "tenant_id": payload.tenant_id,
+                        "building_id": building_id, "room_id": payload.room_id, "owner_id": owner_id,
+                        "tenant_id": payload.tenant_id, "lease_id": lease_id,
                     },
                 ],
             )

@@ -40,7 +40,7 @@ def record_salary_payment(
     across buildings for owner_ledger purposes comes from cost_allocations,
     same as before, not from a second set of journal lines.
     """
-    staff = supabase.table("staff").select("building_id").eq("id", payload.staff_id).single().execute()
+    staff = supabase.table("staff").select("full_name, building_id").eq("id", payload.staff_id).single().execute()
     if not staff.data:
         raise HTTPException(status_code=404, detail="Staff member not found")
 
@@ -60,13 +60,14 @@ def record_salary_payment(
 
     salaries_expense_id = get_account_id(supabase, company_id, "5400")
     bank_id = get_account_id(supabase, company_id, "1000")
+    staff_name = staff.data.get("full_name") or "Staff"
     post_journal_entry(
         supabase,
         company_id=company_id,
         entry_date=row["payment_date"],
         source_type="salary_payment",
         source_id=payment["id"],
-        description=f"Salary payment - {payment['id']}",
+        description=f"Salary — {staff_name}, {payload.salary_month.strftime('%B %Y')}",
         lines=[
             {"account_id": salaries_expense_id, "direction": "debit", "amount": payload.amount_paid, "building_id": staff.data.get("building_id")},
             {"account_id": bank_id, "direction": "credit", "amount": payload.amount_paid, "building_id": staff.data.get("building_id")},

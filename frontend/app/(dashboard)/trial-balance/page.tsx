@@ -18,13 +18,8 @@ type TrialBalanceRow = {
 type LedgerRow = {
   entry_date: string;
   description?: string;
-  source_type: string;
   direction: "debit" | "credit";
   amount: number;
-  building_name?: string;
-  room_number?: string;
-  owner_name?: string;
-  tenant_name?: string;
   running_balance: number;
 };
 
@@ -36,6 +31,11 @@ const TYPE_ORDER = ["asset", "liability", "equity", "income", "expense"];
 const TYPE_LABELS: Record<string, string> = {
   asset: "Assets", liability: "Liabilities", equity: "Equity", income: "Income", expense: "Expenses",
 };
+
+// A row in the rendered table is either a section heading or an account row.
+type TableRow =
+  | { kind: "heading"; key: string; label: string }
+  | { kind: "account"; key: string; row: TrialBalanceRow };
 
 export default function TrialBalancePage() {
   const [rows, setRows] = useState<TrialBalanceRow[] | null>(null);
@@ -78,11 +78,18 @@ export default function TrialBalancePage() {
     }
   }
 
-  const grouped = TYPE_ORDER.map((type) => ({
-    type,
-    label: TYPE_LABELS[type],
-    rows: (rows ?? []).filter((r) => r.account_type === type),
-  })).filter((g) => g.rows.length > 0);
+  // Build one flat list of heading + account rows, in the standard trial
+  // balance order, so it renders as ONE continuous table (not separate
+  // boxed cards per type) with Dr/Cr aligned consistently throughout.
+  const tableRows: TableRow[] = [];
+  for (const type of TYPE_ORDER) {
+    const rowsOfType = (rows ?? []).filter((r) => r.account_type === type);
+    if (rowsOfType.length === 0) continue;
+    tableRows.push({ kind: "heading", key: `h-${type}`, label: TYPE_LABELS[type] });
+    for (const r of rowsOfType) {
+      tableRows.push({ kind: "account", key: r.account_id, row: r });
+    }
+  }
 
   const totalDebit = (rows ?? []).reduce((s, r) => s + Number(r.total_debit), 0);
   const totalCredit = (rows ?? []).reduce((s, r) => s + Number(r.total_credit), 0);
@@ -93,7 +100,7 @@ export default function TrialBalancePage() {
       <div>
         <h1 className="text-2xl font-display font-semibold">Trial balance</h1>
         <p className="text-sm text-ink/55 mt-1">
-          Every account&apos;s total movement as of a date — click any account to see its full ledger.
+          Every account&apos;s total movement as of a date — click any account to see its ledger.
         </p>
       </div>
 
@@ -112,48 +119,64 @@ export default function TrialBalancePage() {
             <Select value={buildingFilter} onChange={(e) => setBuildingFilter(e.target.value)}>
               <option value="">All buildings</option>
               {buildings?.map((b) => (
-                <option key={b.id} value={b.id}>
-                  {b.name}
-                </option>
+                <option key={b.id} value={b.id}>{b.name}</option>
               ))}
             </Select>
           </Field>
         </div>
       </Card>
 
-      {grouped.map((group) => (
-        <Card key={group.type} title={group.label}>
-          <DataTable
-            keyField="account_id"
-            rows={group.rows}
-            emptyMessage=""
-            columns={[
-              {
-                header: "Account",
-                accessor: (r) => (
-                  <button onClick={() => openLedger(r)} className="text-left hover:underline">
-                    {r.account_code} · {r.account_name}
-                  </button>
-                ),
-              },
-              { header: "Debit", accessor: (r) => <span className="figures">{formatPkr(r.total_debit)}</span>, align: "right" },
-              { header: "Credit", accessor: (r) => <span className="figures">{formatPkr(r.total_credit)}</span>, align: "right" },
-            ]}
-          />
-        </Card>
-      ))}
-
-      {rows && rows.length > 0 && (
-        <Card>
-          <div className="flex justify-end gap-6 text-sm font-medium">
-            <span>Total debits: <span className="figures">{formatPkr(totalDebit)}</span></span>
-            <span>Total credits: <span className="figures">{formatPkr(totalCredit)}</span></span>
-            <span className={balanced ? "text-stamp-green" : "text-stamp-red"}>
-              {balanced ? "✓ Balances" : "⚠ Does not balance"}
-            </span>
-          </div>
-        </Card>
-      )}
+      <Card>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-ink/50 text-xs border-b border-border">
+              <th className="pb-2 font-medium">Account</th>
+              <th className="pb-2 font-medium text-right">Dr</th>
+              <th className="pb-2 font-medium text-right">Cr</th>
+            </tr>
+          </thead>
+          <tbody>
+            {tableRows.length === 0 && (
+              <tr>
+                <td colSpan={3} className="py-8 text-center text-ink/40">No account activity yet.</td>
+              </tr>
+            )}
+            {tableRows.map((tr) =>
+              tr.kind === "heading" ? (
+                <tr key={tr.key}>
+                  <td colSpan={3} className="pt-4 pb-1.5 text-xs uppercase tracking-wider text-brass-dark font-semibold">
+                    {tr.label}
+                  </td>
+                </tr>
+              ) : (
+                <tr key={tr.key} className="border-t border-border/60">
+                  <td className="py-1.5">
+                    <button onClick={() => openLedger(tr.row)} className="text-left hover:underline">
+                      {tr.row.account_code} · {tr.row.account_name}
+                    </button>
+                  </td>
+                  <td className="py-1.5 text-right figures">{tr.row.total_debit ? formatPkr(tr.row.total_debit) : ""}</td>
+                  <td className="py-1.5 text-right figures">{tr.row.total_credit ? formatPkr(tr.row.total_credit) : ""}</td>
+                </tr>
+              )
+            )}
+          </tbody>
+          {tableRows.length > 0 && (
+            <tfoot>
+              <tr className="border-t-2 border-ink/20 font-semibold">
+                <td className="pt-2">Total</td>
+                <td className="pt-2 text-right figures">{formatPkr(totalDebit)}</td>
+                <td className="pt-2 text-right figures">{formatPkr(totalCredit)}</td>
+              </tr>
+              <tr>
+                <td colSpan={3} className={`pt-1 text-xs ${balanced ? "text-stamp-green" : "text-stamp-red"}`}>
+                  {balanced ? "✓ Balances" : "⚠ Does not balance"}
+                </td>
+              </tr>
+            </tfoot>
+          )}
+        </table>
+      </Card>
 
       <Modal
         open={ledgerOpen}
@@ -170,9 +193,8 @@ export default function TrialBalancePage() {
                 <tr className="text-left text-ink/50 text-xs">
                   <th className="pb-1">Date</th>
                   <th className="pb-1">Description</th>
-                  <th className="pb-1">Tags</th>
-                  <th className="pb-1 text-right">Debit</th>
-                  <th className="pb-1 text-right">Credit</th>
+                  <th className="pb-1 text-right">Dr</th>
+                  <th className="pb-1 text-right">Cr</th>
                   <th className="pb-1 text-right">Balance</th>
                 </tr>
               </thead>
@@ -181,9 +203,6 @@ export default function TrialBalancePage() {
                   <tr key={i} className="border-t border-border">
                     <td className="py-1.5 whitespace-nowrap">{l.entry_date}</td>
                     <td className="py-1.5">{l.description ?? "—"}</td>
-                    <td className="py-1.5 text-xs text-ink/50">
-                      {[l.building_name, l.room_number, l.owner_name, l.tenant_name].filter(Boolean).join(" · ") || "—"}
-                    </td>
                     <td className="py-1.5 text-right figures">{l.direction === "debit" ? formatPkr(l.amount) : ""}</td>
                     <td className="py-1.5 text-right figures">{l.direction === "credit" ? formatPkr(l.amount) : ""}</td>
                     <td className="py-1.5 text-right figures font-medium">{formatPkr(l.running_balance)}</td>

@@ -29,6 +29,8 @@ const NAV_SECTIONS = [
       { href: "/chart-of-accounts", label: "Chart of accounts" },
       { href: "/journal", label: "Journal entries" },
       { href: "/trial-balance", label: "Trial balance" },
+      { href: "/profit-and-loss", label: "Profit & loss" },
+      { href: "/balance-sheet", label: "Balance sheet" },
       { href: "/reports", label: "Reports" },
     ],
   },
