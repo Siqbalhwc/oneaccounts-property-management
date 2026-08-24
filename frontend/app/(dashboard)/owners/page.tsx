@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Pencil, ScrollText, Archive, ArchiveRestore } from "lucide-react";
 import { Card, DataTable } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -18,28 +19,12 @@ type Owner = {
 };
 
 type Account = { id: string; code: string; name: string };
-type LedgerRow = {
-  entry_date: string;
-  description?: string;
-  direction: "debit" | "credit";
-  amount: number;
-  building_name?: string;
-  room_number?: string;
-  running_balance: number;
-};
-
-function formatPkr(n: number) {
-  return `Rs ${Number(n || 0).toLocaleString("en-PK")}`;
-}
 
 export default function OwnersPage() {
+  const router = useRouter();
   const [owners, setOwners] = useState<Owner[] | null>(null);
   const [dueToOwnersAccountId, setDueToOwnersAccountId] = useState<string | null>(null);
 
-  const [ledgerOpen, setLedgerOpen] = useState(false);
-  const [ledgerOwner, setLedgerOwner] = useState<Owner | null>(null);
-  const [ledgerRows, setLedgerRows] = useState<LedgerRow[] | null>(null);
-  const [ledgerError, setLedgerError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
 
@@ -65,23 +50,9 @@ export default function OwnersPage() {
     });
   }, []);
 
-  async function openLedger(owner: Owner) {
-    setLedgerOwner(owner);
-    setLedgerError(null);
-    setLedgerRows(null);
-    setLedgerOpen(true);
-    if (!dueToOwnersAccountId) {
-      setLedgerError("Couldn't find the Due to Owners account.");
-      return;
-    }
-    try {
-      const result = await api.get<LedgerRow[]>(
-        `/financials/general-ledger/${dueToOwnersAccountId}?owner_id=${owner.id}`
-      );
-      setLedgerRows(result);
-    } catch (err: any) {
-      setLedgerError(err.message);
-    }
+  function openLedger(owner: Owner) {
+    if (!dueToOwnersAccountId) return;
+    router.push(`/ledger?account_id=${dueToOwnersAccountId}&owner_id=${owner.id}`);
   }
 
   function openAddModal() {
@@ -223,39 +194,6 @@ export default function OwnersPage() {
             </Button>
           </div>
         </form>
-      </Modal>
-
-      <Modal open={ledgerOpen} onClose={() => setLedgerOpen(false)} title={ledgerOwner ? `Ledger — ${ledgerOwner.name}` : "Ledger"}>
-        <div className="space-y-3 max-h-[60vh] overflow-y-auto">
-          <p className="text-xs text-ink/50">What&apos;s owed to this owner and what&apos;s been paid out, in order.</p>
-          {ledgerError && <p className="text-sm text-stamp-red">{ledgerError}</p>}
-          {!ledgerError && ledgerRows === null && <p className="text-sm text-ink/40">Loading…</p>}
-          {ledgerRows && ledgerRows.length === 0 && <p className="text-sm text-ink/40">No activity yet.</p>}
-          {ledgerRows && ledgerRows.length > 0 && (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-ink/50 text-xs">
-                  <th className="pb-1">Date</th>
-                  <th className="pb-1">Description</th>
-                  <th className="pb-1 text-right">Dr</th>
-                  <th className="pb-1 text-right">Cr</th>
-                  <th className="pb-1 text-right">Balance</th>
-                </tr>
-              </thead>
-              <tbody>
-                {ledgerRows.map((l, i) => (
-                  <tr key={i} className="border-t border-border">
-                    <td className="py-1.5 whitespace-nowrap">{l.entry_date}</td>
-                    <td className="py-1.5">{l.description ?? "—"}</td>
-                    <td className="py-1.5 text-right figures">{l.direction === "debit" ? formatPkr(l.amount) : ""}</td>
-                    <td className="py-1.5 text-right figures">{l.direction === "credit" ? formatPkr(l.amount) : ""}</td>
-                    <td className="py-1.5 text-right figures font-medium">{formatPkr(l.running_balance)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
       </Modal>
     </div>
   );

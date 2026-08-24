@@ -324,43 +324,43 @@ export default function BuildingsPage() {
             Every unit, its current status, and its maintenance history.
           </p>
         </div>
-        <Button onClick={openAddBuildingModal}>Add building</Button>
-      </div>
-
-      {buildings && buildings.length > 0 && (
-        <div className="flex items-center justify-between gap-3 border-b border-border">
-          <div className="flex gap-2 overflow-x-auto min-w-0 [scrollbar-width:thin]">
-            {buildings.map((b) => (
-              <button
-                key={b.id}
-                onClick={() => setSelected(b.id)}
-                className={`px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors whitespace-nowrap shrink-0 ${
-                  selected === b.id
-                    ? "border-brass-dark text-ink"
-                    : "border-transparent text-ink/50 hover:text-ink"
-                }`}
-              >
-                {b.name}
-              </button>
-            ))}
-          </div>
-          <div className="flex gap-2 mb-2 no-print shrink-0">
-            {selectedBuilding && (
-              <>
-                <Button variant="ghost" onClick={() => openEditBuildingModal(selectedBuilding)}>
-                  Edit building
+        <div className="flex gap-2 flex-wrap no-print">
+          {selectedBuilding && (
+            <>
+              <Button variant="ghost" onClick={() => openEditBuildingModal(selectedBuilding)}>
+                Edit building
+              </Button>
+              {canManage && (
+                <Button variant="ghost" onClick={() => setArchiveBuildingTarget(selectedBuilding)}>
+                  Archive building
                 </Button>
-                {canManage && (
-                  <Button variant="ghost" onClick={() => setArchiveBuildingTarget(selectedBuilding)}>
-                    Archive building
-                  </Button>
-                )}
-              </>
-            )}
+              )}
+            </>
+          )}
+          {buildings && buildings.length > 0 && (
             <Button variant="secondary" onClick={openAddRoomModal}>
               Add room
             </Button>
-          </div>
+          )}
+          <Button onClick={openAddBuildingModal}>Add building</Button>
+        </div>
+      </div>
+
+      {buildings && buildings.length > 0 && (
+        <div className="flex flex-wrap gap-x-1 gap-y-0 border-b border-border">
+          {buildings.map((b) => (
+            <button
+              key={b.id}
+              onClick={() => setSelected(b.id)}
+              className={`px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors whitespace-nowrap ${
+                selected === b.id
+                  ? "border-brass-dark text-ink"
+                  : "border-transparent text-ink/50 hover:text-ink"
+              }`}
+            >
+              {b.name}
+            </button>
+          ))}
         </div>
       )}
 
@@ -373,15 +373,15 @@ export default function BuildingsPage() {
       {buildings && buildings.length > 0 && (
         <>
           <div className="flex flex-col sm:flex-row gap-3">
-            <div className="flex-1 min-w-0">
+            <div className="w-full sm:w-64">
               <Input
-                placeholder="Search rooms by number or type…"
+                placeholder="Search rooms…"
                 value={roomSearch}
                 onChange={(e) => setRoomSearch(e.target.value)}
                 className="w-full"
               />
             </div>
-            <div className="sm:w-56 shrink-0">
+            <div className="w-full sm:w-44">
               <Select value={roomStatusFilter} onChange={(e) => setRoomStatusFilter(e.target.value)} className="w-full">
                 <option value="">All statuses</option>
                 {ROOM_STATUSES.map((s) => (
