@@ -125,6 +125,7 @@ function LedgerPageInner() {
           columns={[
             { header: "Date", accessor: (r) => r.entry_date },
             { header: "Description", accessor: (r) => r.description ?? "—" },
+            { header: "Tags", accessor: (r) => [r.building_name, r.room_number, r.owner_name, r.tenant_name].filter(Boolean).join(" · ") || "—" },
             { header: "Dr", accessor: (r) => (r.direction === "debit" ? <span className="figures">{formatPkr(r.amount)}</span> : ""), align: "right" },
             { header: "Cr", accessor: (r) => (r.direction === "credit" ? <span className="figures">{formatPkr(r.amount)}</span> : ""), align: "right" },
             { header: "Balance", accessor: (r) => <span className="figures font-medium">{formatPkr(r.running_balance)}</span>, align: "right" },

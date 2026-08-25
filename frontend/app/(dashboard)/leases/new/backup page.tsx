@@ -14,18 +14,11 @@ type LeaseSummary = { tenant_id: string; status: string; room_id: string };
 
 const STEPS = ["Tenant & room", "Rent structure", "Security deposit", "Review"] as const;
 
-// These are just a convenient starting point, not fixed/locked fields --
-// every row (label, amount, recurrence, account) is editable, and any row
-// (including these) can be removed. Add more via "+ Add another fee".
 const DEFAULT_CHARGES: Charge[] = [
   { label: "Rent", amount: "", recurrence: "recurring", account_id: "" },
-  { label: "Electricity", amount: "", recurrence: "recurring", account_id: "" },
-  { label: "Water", amount: "", recurrence: "recurring", account_id: "" },
-  { label: "Gas", amount: "", recurrence: "recurring", account_id: "" },
-  { label: "Parking", amount: "", recurrence: "recurring", account_id: "" },
-  { label: "Internet", amount: "", recurrence: "recurring", account_id: "" },
-  { label: "Service", amount: "", recurrence: "recurring", account_id: "" },
-  { label: "Other", amount: "", recurrence: "recurring", account_id: "" },
+  { label: "Internet fee", amount: "", recurrence: "recurring", account_id: "" },
+  { label: "Parking fee", amount: "", recurrence: "recurring", account_id: "" },
+  { label: "Water bill", amount: "", recurrence: "recurring", account_id: "" },
 ];
 
 function formatPkr(n: number) {
@@ -307,12 +300,16 @@ export default function NewLeasePage() {
                 <div key={i} className="border border-border rounded-card p-3">
                   <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-start">
                     <div className="lg:col-span-3">
-                      <Field label="Fee name">
-                        <Input
-                          placeholder="e.g. Generator charges"
-                          value={c.label}
-                          onChange={(e) => updateCharge(i, "label", e.target.value)}
-                        />
+                      <Field label={i < 4 ? c.label : "Fee name"}>
+                        {i < 4 ? (
+                          <Input value={c.label} disabled />
+                        ) : (
+                          <Input
+                            placeholder="e.g. Generator charges"
+                            value={c.label}
+                            onChange={(e) => updateCharge(i, "label", e.target.value)}
+                          />
+                        )}
                       </Field>
                     </div>
                     <div className="lg:col-span-2">
@@ -334,7 +331,7 @@ export default function NewLeasePage() {
                         </Select>
                       </Field>
                     </div>
-                    <div className="lg:col-span-4">
+                    <div className={i >= 4 ? "lg:col-span-4" : "lg:col-span-5"}>
                       <Field
                         label="Posts to account"
                         hint={
@@ -357,11 +354,13 @@ export default function NewLeasePage() {
                         </Select>
                       </Field>
                     </div>
-                    <div className="lg:col-span-1 flex lg:justify-end lg:pt-6">
-                      <Button variant="ghost" onClick={() => removeCharge(i)}>
-                        Remove
-                      </Button>
-                    </div>
+                    {i >= 4 && (
+                      <div className="lg:col-span-1 flex lg:justify-end lg:pt-6">
+                        <Button variant="ghost" onClick={() => removeCharge(i)}>
+                          Remove
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 </div>
               );

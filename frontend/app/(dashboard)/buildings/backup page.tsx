@@ -479,218 +479,151 @@ export default function BuildingsPage() {
       </Modal>
 
       {/* Add / Edit room modal */}
-      <Modal
-        open={roomModalOpen}
-        onClose={() => setRoomModalOpen(false)}
-        title={editingRoomId ? "Edit room" : "Add room"}
-        size="full"
-      >
-        <form onSubmit={handleSaveRoom} className="space-y-6">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-10 gap-y-6">
-            {/* ---- Left column: room info ---- */}
-            <div className="space-y-4">
-              <p className="text-xs uppercase tracking-wider text-ink/45 font-medium">Room info</p>
+      <Modal open={roomModalOpen} onClose={() => setRoomModalOpen(false)} title={editingRoomId ? "Edit room" : "Add room"}>
+        <form onSubmit={handleSaveRoom} className="space-y-4">
+          {!editingRoomId && (
+            <Field label="Floor">
+              <Select value={roomForm.floor_id} onChange={(e) => handleFloorChange(e.target.value)}>
+                {floorsForSelected.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.name || `Floor ${f.floor_number}`}
+                  </option>
+                ))}
+                <option value={NEW_FLOOR_VALUE}>+ Add a new floor…</option>
+              </Select>
+            </Field>
+          )}
 
-              {!editingRoomId && (
-                <Field label="Floor">
-                  <Select value={roomForm.floor_id} onChange={(e) => handleFloorChange(e.target.value)}>
-                    {floorsForSelected.map((f) => (
-                      <option key={f.id} value={f.id}>
-                        {f.name || `Floor ${f.floor_number}`}
-                      </option>
-                    ))}
-                    <option value={NEW_FLOOR_VALUE}>+ Add a new floor…</option>
-                  </Select>
-                </Field>
-              )}
-
-              {!editingRoomId && roomForm.floor_id === NEW_FLOOR_VALUE && (
-                <div className="grid grid-cols-2 gap-3 pl-3 border-l-2 border-border">
-                  <Field label="Floor number">
-                    <Input
-                      type="number"
-                      required
-                      value={roomForm.new_floor_number}
-                      onChange={(e) => setRoomForm({ ...roomForm, new_floor_number: e.target.value })}
-                    />
-                  </Field>
-                  <Field label="Floor name (optional)">
-                    <Input
-                      placeholder="e.g. Ground Floor"
-                      value={roomForm.new_floor_name}
-                      onChange={(e) => setRoomForm({ ...roomForm, new_floor_name: e.target.value })}
-                    />
-                  </Field>
-                </div>
-              )}
-
-              <Field
-                label="Room number"
-                hint={
-                  isDuplicateRoomNumber(roomForm.room_number, editingRoomId ?? undefined)
-                    ? undefined
-                    : !editingRoomId
-                    ? "Suggested automatically based on this floor's existing rooms — edit freely."
-                    : undefined
-                }
-              >
-                <Input
-                  required
-                  placeholder="e.g. A-101"
-                  value={roomForm.room_number}
-                  onChange={(e) => setRoomForm({ ...roomForm, room_number: e.target.value })}
-                  className={isDuplicateRoomNumber(roomForm.room_number, editingRoomId ?? undefined) ? "border-stamp-red" : ""}
-                />
-                {isDuplicateRoomNumber(roomForm.room_number, editingRoomId ?? undefined) && (
-                  <p className="text-xs text-stamp-red mt-1">
-                    A room with this number already exists in this building.
-                  </p>
-                )}
-              </Field>
-
-              <Field label="Room type" hint="Pick an existing type to keep naming consistent, or add a new one.">
-                <Select
-                  value={roomForm.room_type_select}
-                  onChange={(e) => setRoomForm({ ...roomForm, room_type_select: e.target.value })}
-                >
-                  {existingRoomTypes.map((t) => (
-                    <option key={t} value={t}>
-                      {t}
-                    </option>
-                  ))}
-                  <option value={NEW_TYPE_VALUE}>+ Add a new type…</option>
-                </Select>
-              </Field>
-
-              {roomForm.room_type_select === NEW_TYPE_VALUE && (
-                <Field label="New room type name">
-                  <Input
-                    required
-                    placeholder="e.g. 2-bed apartment, studio, shop"
-                    value={roomForm.room_type_custom}
-                    onChange={(e) => setRoomForm({ ...roomForm, room_type_custom: e.target.value })}
-                  />
-                </Field>
-              )}
-
-              <Field label="Base rent (optional)" hint="A reference amount — the real rent is set per-lease.">
+          {!editingRoomId && roomForm.floor_id === NEW_FLOOR_VALUE && (
+            <div className="grid grid-cols-2 gap-3 pl-3 border-l-2 border-border">
+              <Field label="Floor number">
                 <Input
                   type="number"
-                  value={roomForm.base_rent}
-                  onChange={(e) => setRoomForm({ ...roomForm, base_rent: e.target.value })}
+                  required
+                  value={roomForm.new_floor_number}
+                  onChange={(e) => setRoomForm({ ...roomForm, new_floor_number: e.target.value })}
                 />
               </Field>
-
-              {editingRoomId && (
-                <Field label="Status">
-                  <Select
-                    value={roomForm.status}
-                    onChange={(e) => setRoomForm({ ...roomForm, status: e.target.value })}
-                  >
-                    {ROOM_STATUSES.map((s) => (
-                      <option key={s} value={s}>
-                        {s.replace("_", " ")}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-              )}
-            </div>
-
-            {/* ---- Right column: owner + summary ---- */}
-            <div className="space-y-4">
-              <p className="text-xs uppercase tracking-wider text-ink/45 font-medium">Owner</p>
-
-              <Field
-                label="Owner"
-                hint="Leave as 'Inherit from building' unless this specific room belongs to a different owner than the rest of the building — e.g. one room sold separately."
-              >
-                <Select
-                  value={roomForm.owner_id}
-                  onChange={(e) => setRoomForm({ ...roomForm, owner_id: e.target.value })}
-                >
-                  <option value="">Inherit from building</option>
-                  {owners?.map((o) => (
-                    <option key={o.id} value={o.id}>
-                      {o.name}
-                    </option>
-                  ))}
-                  <option value={NEW_OWNER_VALUE}>+ Add a new owner…</option>
-                </Select>
+              <Field label="Floor name (optional)">
+                <Input
+                  placeholder="e.g. Ground Floor"
+                  value={roomForm.new_floor_name}
+                  onChange={(e) => setRoomForm({ ...roomForm, new_floor_name: e.target.value })}
+                />
               </Field>
-
-              {roomForm.owner_id === NEW_OWNER_VALUE && (
-                <div className="grid grid-cols-2 gap-3 pl-3 border-l-2 border-border">
-                  <Field label="Owner name">
-                    <Input
-                      required
-                      value={roomForm.new_owner_name}
-                      onChange={(e) => setRoomForm({ ...roomForm, new_owner_name: e.target.value })}
-                    />
-                  </Field>
-                  <Field label="Owner phone (optional)">
-                    <Input
-                      value={roomForm.new_owner_phone}
-                      onChange={(e) => setRoomForm({ ...roomForm, new_owner_phone: e.target.value })}
-                    />
-                  </Field>
-                </div>
-              )}
-
-              {/* Live summary — a quick "does this look right" recap before saving */}
-              <div className="pt-2">
-                <p className="text-xs uppercase tracking-wider text-ink/45 font-medium mb-2">Summary</p>
-                <div className="rounded-card border border-border bg-paper-card/60 px-4 py-3.5 space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-ink/50">Building</span>
-                    <span className="font-medium">{selectedBuilding?.name ?? "—"}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-ink/50">Floor</span>
-                    <span className="font-medium">
-                      {roomForm.floor_id === NEW_FLOOR_VALUE
-                        ? roomForm.new_floor_name || `Floor ${roomForm.new_floor_number || "—"}`
-                        : floorsForSelected.find((f) => f.id === roomForm.floor_id)?.name ||
-                          (floorsForSelected.find((f) => f.id === roomForm.floor_id)
-                            ? `Floor ${floorsForSelected.find((f) => f.id === roomForm.floor_id)?.floor_number}`
-                            : "—")}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-ink/50">Room number</span>
-                    <span className="font-medium">{roomForm.room_number || "—"}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-ink/50">Type</span>
-                    <span className="font-medium">
-                      {roomForm.room_type_select === NEW_TYPE_VALUE
-                        ? roomForm.room_type_custom || "—"
-                        : roomForm.room_type_select || "—"}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-ink/50">Base rent</span>
-                    <span className="figures font-medium">
-                      {roomForm.base_rent ? `Rs ${Number(roomForm.base_rent).toLocaleString("en-PK")}` : "—"}
-                    </span>
-                  </div>
-                  <div className="flex justify-between border-t border-border pt-2">
-                    <span className="text-ink/50">Owner</span>
-                    <span className="font-medium">
-                      {roomForm.owner_id === NEW_OWNER_VALUE
-                        ? roomForm.new_owner_name || "—"
-                        : roomForm.owner_id
-                        ? owners?.find((o) => o.id === roomForm.owner_id)?.name ?? "—"
-                        : "Inherits from building"}
-                    </span>
-                  </div>
-                </div>
-              </div>
             </div>
-          </div>
+          )}
+
+          <Field
+            label="Room number"
+            hint={
+              isDuplicateRoomNumber(roomForm.room_number, editingRoomId ?? undefined)
+                ? undefined
+                : !editingRoomId
+                ? "Suggested automatically based on this floor's existing rooms — edit freely."
+                : undefined
+            }
+          >
+            <Input
+              required
+              placeholder="e.g. A-101"
+              value={roomForm.room_number}
+              onChange={(e) => setRoomForm({ ...roomForm, room_number: e.target.value })}
+              className={isDuplicateRoomNumber(roomForm.room_number, editingRoomId ?? undefined) ? "border-stamp-red" : ""}
+            />
+            {isDuplicateRoomNumber(roomForm.room_number, editingRoomId ?? undefined) && (
+              <p className="text-xs text-stamp-red mt-1">
+                A room with this number already exists in this building.
+              </p>
+            )}
+          </Field>
+
+          <Field label="Room type" hint="Pick an existing type to keep naming consistent, or add a new one.">
+            <Select
+              value={roomForm.room_type_select}
+              onChange={(e) => setRoomForm({ ...roomForm, room_type_select: e.target.value })}
+            >
+              {existingRoomTypes.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+              <option value={NEW_TYPE_VALUE}>+ Add a new type…</option>
+            </Select>
+          </Field>
+
+          {roomForm.room_type_select === NEW_TYPE_VALUE && (
+            <Field label="New room type name">
+              <Input
+                required
+                placeholder="e.g. 2-bed apartment, studio, shop"
+                value={roomForm.room_type_custom}
+                onChange={(e) => setRoomForm({ ...roomForm, room_type_custom: e.target.value })}
+              />
+            </Field>
+          )}
+
+          <Field label="Base rent (optional)" hint="A reference amount — the real rent is set per-lease.">
+            <Input
+              type="number"
+              value={roomForm.base_rent}
+              onChange={(e) => setRoomForm({ ...roomForm, base_rent: e.target.value })}
+            />
+          </Field>
+
+          <Field
+            label="Owner"
+            hint="Leave as 'Inherit from building' unless this specific room belongs to a different owner than the rest of the building — e.g. one room sold separately."
+          >
+            <Select
+              value={roomForm.owner_id}
+              onChange={(e) => setRoomForm({ ...roomForm, owner_id: e.target.value })}
+            >
+              <option value="">Inherit from building</option>
+              {owners?.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.name}
+                </option>
+              ))}
+              <option value={NEW_OWNER_VALUE}>+ Add a new owner…</option>
+            </Select>
+          </Field>
+
+          {roomForm.owner_id === NEW_OWNER_VALUE && (
+            <div className="grid grid-cols-2 gap-3 pl-3 border-l-2 border-border">
+              <Field label="Owner name">
+                <Input
+                  required
+                  value={roomForm.new_owner_name}
+                  onChange={(e) => setRoomForm({ ...roomForm, new_owner_name: e.target.value })}
+                />
+              </Field>
+              <Field label="Owner phone (optional)">
+                <Input
+                  value={roomForm.new_owner_phone}
+                  onChange={(e) => setRoomForm({ ...roomForm, new_owner_phone: e.target.value })}
+                />
+              </Field>
+            </div>
+          )}
+
+          {editingRoomId && (
+            <Field label="Status">
+              <Select
+                value={roomForm.status}
+                onChange={(e) => setRoomForm({ ...roomForm, status: e.target.value })}
+              >
+                {ROOM_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {s.replace("_", " ")}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
 
           {roomError && <p className="text-sm text-stamp-red">{roomError}</p>}
-          <div className="flex justify-between items-center pt-2 border-t border-border">
+          <div className="flex justify-between items-center pt-2">
             <div>
               {editingRoomId && canManage && (
                 <Button

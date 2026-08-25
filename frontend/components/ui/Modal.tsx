@@ -7,11 +7,13 @@ export function Modal({
   onClose,
   title,
   children,
+  size = "default",
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   children: React.ReactNode;
+  size?: "default" | "full";
 }) {
   useEffect(() => {
     function handleEscape(e: KeyboardEvent) {
@@ -23,6 +25,8 @@ export function Modal({
 
   if (!open) return null;
 
+  const widthClass = size === "full" ? "max-w-6xl" : "max-w-md";
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
       <div
@@ -30,7 +34,7 @@ export function Modal({
         onClick={onClose}
         aria-hidden="true"
       />
-      <div className="relative card w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
+      <div className={`relative card w-full ${widthClass} p-6 sm:p-8 max-h-[92vh] overflow-y-auto`}>
         <div className="flex items-center justify-between mb-5">
           <h3 className="font-display text-lg font-semibold">{title}</h3>
           <button
