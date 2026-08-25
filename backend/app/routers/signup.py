@@ -70,6 +70,15 @@ def signup(payload: SignupRequest, service_client=Depends(get_service_client)):
             [{"company_id": company["id"], "name": name} for name in DEFAULT_EXPENSE_CATEGORIES]
         ).execute()
 
+        # 5. Seed the default Chart of Accounts + charge-label mappings.
+        # Without this, the very first lease/invoice/payment for this
+        # company fails: the ledger posting engine looks up required system
+        # accounts (Bank, Accounts Receivable, Due to Owners, etc.) by code
+        # and finds nothing. See schema_patch_018.
+        service_client.rpc(
+            "seed_default_chart_of_accounts", {"p_company_id": company["id"]}
+        ).execute()
+
     except Exception as e:
         # Best-effort rollback of the auth user if company/profile setup fails,
         # so a failed signup doesn't leave an orphaned login with no company.
