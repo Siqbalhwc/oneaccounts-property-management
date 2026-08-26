@@ -32,6 +32,7 @@ export default function TenantsPage() {
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
   const [myRole, setMyRole] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -53,6 +54,13 @@ export default function TenantsPage() {
   }, []);
 
   const canManage = myRole === "owner" || myRole === "admin";
+
+  const normalizedSearch = searchTerm.trim().toLowerCase();
+  const filteredTenants = (tenants ?? []).filter((t) => {
+    if (!normalizedSearch) return true;
+    const haystacks = [t.full_name, t.cnic, t.address ?? ""];
+    return haystacks.some((field) => field.toLowerCase().includes(normalizedSearch));
+  });
 
   const cnicError = touched.cnic ? validateCnic(form.cnic) : null;
   const phoneError = touched.phone ? validatePhone(form.phone) : null;
@@ -128,7 +136,13 @@ export default function TenantsPage() {
       </div>
 
       <Card>
-        <div className="flex items-center justify-between mb-4 no-print">
+        <div className="flex items-center justify-between mb-4 no-print gap-3 flex-wrap">
+          <Input
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            placeholder="Search by name, CNIC, or address…"
+            className="max-w-xs"
+          />
           <label className="flex items-center gap-2 text-xs text-ink/50">
             <input
               type="checkbox"
@@ -140,8 +154,8 @@ export default function TenantsPage() {
         </div>
         <DataTable
           keyField="id"
-          rows={tenants ?? []}
-          emptyMessage="No tenants added yet."
+          rows={filteredTenants}
+          emptyMessage={searchTerm ? "No tenants match your search." : "No tenants added yet."}
           columns={[
             {
               header: "Name",
