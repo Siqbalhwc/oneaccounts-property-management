@@ -140,6 +140,7 @@ export type Tenant = {
   full_name: string;
   phone: string;
   email?: string;
+  address?: string;
   is_archived?: boolean;
 };
 

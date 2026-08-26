@@ -26,7 +26,7 @@ function validatePhone(value: string): string | null {
   return null;
 }
 
-const emptyForm = { full_name: "", cnic: "", phone: "", email: "" };
+const emptyForm = { full_name: "", cnic: "", phone: "", email: "", address: "" };
 
 export default function TenantsPage() {
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
@@ -75,6 +75,7 @@ export default function TenantsPage() {
       cnic: tenant.cnic,
       phone: tenant.phone,
       email: tenant.email ?? "",
+      address: tenant.address ?? "",
     });
     setTouched({ cnic: true, phone: true });
     setModalOpen(true);
@@ -153,6 +154,7 @@ export default function TenantsPage() {
             { header: "CNIC", accessor: (t) => <span className="figures text-ink/70">{t.cnic}</span> },
             { header: "Phone", accessor: (t) => <span className="figures text-ink/70">{t.phone}</span> },
             { header: "Email", accessor: (t) => t.email ?? "—" },
+            { header: "Address", accessor: (t) => t.address ?? "—" },
             {
               header: "",
               accessor: (t) => (
@@ -207,6 +209,12 @@ export default function TenantsPage() {
               type="email"
               value={form.email}
               onChange={(e) => setForm({ ...form, email: e.target.value })}
+            />
+          </Field>
+          <Field label="Address (optional)">
+            <Input
+              value={form.address}
+              onChange={(e) => setForm({ ...form, address: e.target.value })}
             />
           </Field>
           {error && <p className="text-sm text-stamp-red">{error}</p>}
