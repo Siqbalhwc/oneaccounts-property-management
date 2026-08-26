@@ -52,6 +52,22 @@ def invite_teammate(
     if len(payload.password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
 
+    # Enforce the platform-admin-set seat limit, if any. Checked via the
+    # service client because a plain company session can't read companies
+    # rows beyond what auth_company_id() exposes for other purposes, and
+    # this needs the raw max_users value, not just RLS pass/fail.
+    company = service_client.table("companies").select("max_users").eq("id", company_id).single().execute()
+    max_users = (company.data or {}).get("max_users")
+    if max_users is not None:
+        current_count = (
+            service_client.table("profiles").select("id", count="exact").eq("company_id", company_id).execute()
+        )
+        if (current_count.count or 0) >= max_users:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Your plan allows up to {max_users} team members. Contact support to increase this limit.",
+            )
+
     try:
         auth_result = service_client.auth.admin.create_user(
             {"email": payload.email, "password": payload.password, "email_confirm": True}

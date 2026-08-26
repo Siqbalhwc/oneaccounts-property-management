@@ -7,7 +7,13 @@ import { supabase } from "@/lib/supabaseClient";
 import { Sidebar } from "@/components/ui/Sidebar";
 import { Company } from "@/lib/api";
 
-type ProfileInfo = { full_name: string; role: string; company_id: string; is_platform_admin?: boolean };
+type ProfileInfo = {
+  full_name: string;
+  role: string;
+  company_id: string;
+  is_platform_admin?: boolean;
+  is_suspended?: boolean;
+};
 
 function greeting() {
   const hour = new Date().getHours();
@@ -22,6 +28,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [company, setCompany] = useState<Company | null>(null);
   const [checking, setChecking] = useState(true);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [companyBlocked, setCompanyBlocked] = useState(false);
 
   useEffect(() => {
     async function checkSessionAndLoadProfile() {
@@ -35,7 +42,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
       const { data: profileRow } = await supabase
         .from("profiles")
-        .select("full_name, role, company_id, is_platform_admin")
+        .select("full_name, role, company_id, is_platform_admin, is_suspended")
         .eq("id", session.user.id)
         .single();
 
@@ -46,7 +53,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           .select("id, name, address, phone, logo_url")
           .eq("id", (profileRow as ProfileInfo).company_id)
           .single();
-        if (companyRow) setCompany(companyRow as Company);
+        if (companyRow) {
+          setCompany(companyRow as Company);
+        } else if (!(profileRow as ProfileInfo).is_suspended) {
+          // Profile loaded fine (so the user isn't individually suspended),
+          // but the company row itself is unreadable -- Row Level Security
+          // blocks it once a platform admin suspends the whole company.
+          // This is the ONLY signal the frontend has for that case (RLS
+          // fails closed with no error detail, by design), so we treat a
+          // missing company row as "company suspended".
+          setCompanyBlocked(true);
+        }
       }
       setChecking(false);
     }
@@ -68,6 +85,27 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     return (
       <div className="min-h-screen flex items-center justify-center bg-paper">
         <p className="text-sm text-ink/50">Checking your session…</p>
+      </div>
+    );
+  }
+
+  if (profile?.is_suspended || companyBlocked) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-paper px-4">
+        <div className="card p-8 max-w-md text-center space-y-3">
+          <h2 className="font-display text-lg font-semibold text-stamp-red">Access suspended</h2>
+          <p className="text-sm text-ink/60">
+            {profile?.is_suspended
+              ? "Your account has been suspended. Contact your company owner for help."
+              : "Your company's access has been suspended. Contact support for help."}
+          </p>
+          <button
+            onClick={handleSignOut}
+            className="text-xs text-ink/50 hover:text-stamp-red transition-colors"
+          >
+            Sign out
+          </button>
+        </div>
       </div>
     );
   }

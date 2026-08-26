@@ -52,19 +52,49 @@ def get_current_user(token: str = Depends(get_token)) -> dict:
 
 
 def get_current_company_id(
-    supabase: Client = Depends(get_supabase),
     user: dict = Depends(get_current_user),
 ) -> str:
-    """Looks up the caller's company_id from their own profile row."""
-    res = (
-        supabase.table("profiles")
-        .select("company_id")
-        .eq("id", user["user_id"])
-        .single()
-        .execute()
-    )
+    """
+    Looks up the caller's company_id from their own profile row, and gives a
+    clear, friendly error if they or their company have been suspended.
+
+    This deliberately uses the SERVICE-ROLE client, not the caller's own
+    RLS-scoped one -- reading the companies row via the caller's own session
+    would itself be blocked by RLS once suspended (auth_company_id() returns
+    NULL for a suspended user/company), which is exactly the case we need to
+    detect and explain. This is still safe: it only ever reveals the CALLER's
+    own company_id and suspension status -- the same information they're
+    already entitled to see about themselves via profiles_self, regardless of
+    suspension. It grants no access to any other company's data, and it is
+    NOT the real security boundary -- that boundary is auth_company_id() in
+    Postgres, which independently blocks every actual data query below this
+    point no matter what this function decides.
+    """
+    service_client = get_service_client()
+    try:
+        res = (
+            service_client.table("profiles")
+            .select("company_id, is_suspended, companies(status, suspended_reason)")
+            .eq("id", user["user_id"])
+            .single()
+            .execute()
+        )
+    except Exception:
+        raise HTTPException(status_code=403, detail="No profile found for this user")
     if not res.data:
         raise HTTPException(status_code=403, detail="No profile found for this user")
+
+    if res.data.get("is_suspended"):
+        raise HTTPException(status_code=403, detail="Your account has been suspended. Contact your company owner.")
+
+    company = res.data.get("companies") or {}
+    if company.get("status") == "suspended":
+        reason = company.get("suspended_reason")
+        detail = "Your company's access has been suspended."
+        if reason:
+            detail += f" Reason: {reason}"
+        raise HTTPException(status_code=403, detail=detail)
+
     return res.data["company_id"]
 
 
@@ -78,6 +108,40 @@ def require_owner_or_admin(
     )
     if not profile.data or profile.data["role"] not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="Only an owner or admin can do this.")
+
+
+def require_feature(feature_key: str):
+    """
+    Returns a dependency that blocks the request unless this company has
+    `feature_key` enabled in company_feature_flags. A company with NO row
+    for a given key is treated as enabled=True by default -- flags are an
+    opt-OUT mechanism (platform admin disables a feature for a specific
+    company), not an opt-in one, so existing/new companies aren't silently
+    cut off from a feature nobody's explicitly toggled for them yet.
+
+    Usage: add `_feature: None = Depends(require_feature("data_export"))`
+    to any endpoint that should be toggleable per-company from Tower.
+    """
+
+    def _check(
+        supabase: Client = Depends(get_supabase),
+        company_id: str = Depends(get_current_company_id),
+    ) -> None:
+        row = (
+            supabase.table("company_feature_flags")
+            .select("enabled")
+            .eq("company_id", company_id)
+            .eq("feature_key", feature_key)
+            .execute()
+            .data
+        )
+        if row and not row[0]["enabled"]:
+            raise HTTPException(
+                status_code=403,
+                detail=f"This feature ('{feature_key}') isn't enabled for your company. Contact support.",
+            )
+
+    return _check
 
 
 def get_service_client() -> Client:
