@@ -21,7 +21,7 @@ class GenerateRequest(BaseModel):
 
 @router.get("")
 def list_invoices(supabase: Client = Depends(get_supabase)):
-    return supabase.table("invoices").select("*").order("invoice_month", desc=True).execute().data
+    return supabase.table("invoices").select("*").order("created_at", desc=True).execute().data
 
 
 @router.get("/{invoice_id}")
@@ -36,6 +36,33 @@ def get_invoice(invoice_id: str, supabase: Client = Depends(get_supabase)):
         .execute()
     )
     return {**inv.data, "line_items": items.data}
+
+
+def generate_invoice_number(supabase: Client, company_id: str, entry_date: date) -> str:
+    """
+    Builds the next sequential invoice number for this company, in the
+    filing format IN/YYYYMMDD/001 -- the exact date is always shown, but
+    the 001/002/... sequence resets each CALENDAR MONTH (not each day), so
+    numbers stay in one continuous run across every day of a given month
+    and only reset back to 001 on the 1st of the next month.
+    Counts by prefix rather than a separate counter table -- consistent
+    with the rest of this codebase's non-transactional, "good enough for
+    this scale" approach (see known open item #1 in the reference doc);
+    since invoices are generated one at a time in a synchronous loop
+    (never in parallel), each count reflects everything inserted just
+    before it.
+    """
+    month_prefix = f"IN/{entry_date.strftime('%Y%m')}"  # e.g. "IN/202608" -- matches any day in that month
+    existing = (
+        supabase.table("invoices")
+        .select("invoice_number")
+        .eq("company_id", company_id)
+        .like("invoice_number", f"{month_prefix}%")
+        .execute()
+        .data
+    )
+    next_seq = len(existing) + 1
+    return f"IN/{entry_date.strftime('%Y%m%d')}/{next_seq:03d}"
 
 
 def generate_invoice_for_lease(
@@ -109,6 +136,7 @@ def generate_invoice_for_lease(
 
     total = sum(c["amount"] for c in prorated_charges)
     ar_account_id = get_account_id(supabase, company_id, "1100")
+    invoice_number = generate_invoice_number(supabase, company_id, date.today())
 
     inv = (
         supabase.table("invoices")
@@ -116,6 +144,7 @@ def generate_invoice_for_lease(
             {
                 "company_id": company_id,
                 "lease_id": lease["id"],
+                "invoice_number": invoice_number,
                 "invoice_month": str(invoice_month),
                 "due_date": str(due_date),
                 "total_amount": total,
@@ -322,7 +351,8 @@ def get_whatsapp_link(invoice_id: str, supabase: Client = Depends(get_supabase))
     pdf_url = f"{settings.backend_public_url}/api/invoices/{invoice_id}/view"
 
     message = (
-        f"Hi {tenant.get('full_name') or ''}, your rent invoice for "
+        f"Hi {tenant.get('full_name') or ''}, your rent invoice "
+        f"({invoice.get('invoice_number') or invoice['invoice_month']}) for "
         f"{invoice['invoice_month']} ({building.get('name') or ''} - Room "
         f"{room.get('room_number') or ''}) is Rs {float(invoice['total_amount']):,.0f}, "
         f"due on {invoice['due_date']}.\n\nView/download invoice: {pdf_url}\n\n"

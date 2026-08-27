@@ -21,6 +21,7 @@ export default function InvoicesPage() {
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [sendingWhatsappId, setSendingWhatsappId] = useState<string | null>(null);
   const [monthFilter, setMonthFilter] = useState<string>("");
+  const [searchTerm, setSearchTerm] = useState("");
 
   const [generateModalOpen, setGenerateModalOpen] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -165,9 +166,13 @@ export default function InvoicesPage() {
   const availableMonths = Array.from(new Set((invoices ?? []).map((i) => i.invoice_month.slice(0, 7)))).sort(
     (a, b) => b.localeCompare(a)
   );
-  const filteredInvoices = (invoices ?? []).filter(
-    (i) => !monthFilter || i.invoice_month.startsWith(monthFilter)
-  );
+  const normalizedSearch = searchTerm.trim().toLowerCase();
+  const filteredInvoices = (invoices ?? []).filter((i) => {
+    if (monthFilter && !i.invoice_month.startsWith(monthFilter)) return false;
+    if (!normalizedSearch) return true;
+    const haystacks = [i.invoice_number ?? "", tenantName(i.lease_id), propertyAndRoom(i.lease_id)];
+    return haystacks.some((field) => field.toLowerCase().includes(normalizedSearch));
+  });
 
   return (
     <div className="space-y-6">
@@ -182,7 +187,13 @@ export default function InvoicesPage() {
       </div>
 
       <Card>
-        <div className="flex items-center justify-between mb-4 no-print">
+        <div className="flex items-center justify-between mb-4 no-print gap-3 flex-wrap">
+          <Input
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            placeholder="Search by invoice #, tenant, or property…"
+            className="max-w-xs"
+          />
           <div className="w-48">
             <Select value={monthFilter} onChange={(e) => setMonthFilter(e.target.value)}>
               <option value="">All months</option>
@@ -197,8 +208,9 @@ export default function InvoicesPage() {
         <DataTable
           keyField="id"
           rows={filteredInvoices}
-          emptyMessage="No invoices generated yet."
+          emptyMessage={searchTerm || monthFilter ? "No invoices match your search." : "No invoices generated yet."}
           columns={[
+            { header: "Invoice #", accessor: (i) => <span className="figures text-xs">{i.invoice_number ?? "—"}</span> },
             { header: "Month", accessor: (i) => i.invoice_month },
             { header: "Tenant", accessor: (i) => tenantName(i.lease_id) },
             { header: "Property / Room", accessor: (i) => propertyAndRoom(i.lease_id) },

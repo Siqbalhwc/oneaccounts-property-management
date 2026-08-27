@@ -156,10 +156,12 @@ export type Lease = {
 export type Invoice = {
   id: string;
   lease_id: string;
+  invoice_number?: string;
   invoice_month: string;
   due_date: string;
   total_amount: number;
   status: "draft" | "sent" | "paid" | "partial" | "overdue" | "cancelled";
+  created_at?: string;
 };
 
 export type Account = {
