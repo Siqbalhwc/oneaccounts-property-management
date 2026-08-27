@@ -31,6 +31,15 @@ class LeaseCreate(BaseModel):
     charges: List[LeaseCharge]  # e.g. [{"label": "Rent", "amount": 20000}, ...]
     security_deposit_amount: float
     security_deposit_date_received: date
+    # Whether the deposit was actually collected at signing. When False,
+    # no journal entry is posted here -- use POST
+    # /security-deposits/{id}/receive later, once it's actually collected.
+    security_deposit_is_received: bool = True
+    # Which asset account (Bank, Cash, etc.) the deposit was received into --
+    # required only when security_deposit_is_received is True and the
+    # deposit amount is > 0. Different companies use different account
+    # codes, so this is never assumed/hardcoded.
+    security_deposit_received_account_id: str | None = None
 
 
 class ChargeUpdate(BaseModel):
@@ -161,6 +170,12 @@ def create_lease(
         ]
         supabase.table("lease_charges").insert(charge_rows).execute()
 
+        if payload.security_deposit_amount > 0 and payload.security_deposit_is_received and not payload.security_deposit_received_account_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Select which account the security deposit was received into, or mark it as not yet collected.",
+            )
+
         supabase.table("security_deposits").insert(
             {
                 "company_id": company_id,
@@ -168,6 +183,10 @@ def create_lease(
                 "amount_received": payload.security_deposit_amount,
                 "date_received": str(payload.security_deposit_date_received),
                 "status": "held",
+                "is_received": payload.security_deposit_is_received,
+                "received_account_id": payload.security_deposit_received_account_id
+                if payload.security_deposit_is_received
+                else None,
             }
         ).execute()
 
@@ -175,11 +194,13 @@ def create_lease(
             "id", payload.room_id
         ).execute()
 
-        # Dr Bank / Cr Security Deposits Held -- cash received, held as a
-        # liability until it's refunded (or partially retained) later via
-        # security_deposits.py's /refund endpoint.
-        if payload.security_deposit_amount > 0:
-            bank_id = get_account_id(supabase, company_id, "1000")
+        # Dr [account tenant actually paid into] / Cr Security Deposits Held --
+        # cash received, held as a liability until it's refunded (or partially
+        # retained) later via security_deposits.py's /refund endpoint.
+        # Only posts when the deposit was actually collected at signing --
+        # if not, this is deferred to POST /security-deposits/{id}/receive.
+        if payload.security_deposit_amount > 0 and payload.security_deposit_is_received:
+            received_account_id = payload.security_deposit_received_account_id
             deposits_held_id = get_account_id(supabase, company_id, "2100")
             owner_id = resolve_room_owner(supabase, payload.room_id)
             room = supabase.table("rooms").select("room_number, building_id").eq("id", payload.room_id).single().execute().data
@@ -197,7 +218,7 @@ def create_lease(
                 description=f"Security deposit — {tenant_name}, Room {room_label}",
                 lines=[
                     {
-                        "account_id": bank_id, "direction": "debit", "amount": payload.security_deposit_amount,
+                        "account_id": received_account_id, "direction": "debit", "amount": payload.security_deposit_amount,
                         "building_id": building_id, "room_id": payload.room_id, "owner_id": owner_id,
                         "tenant_id": payload.tenant_id, "lease_id": lease_id,
                     },

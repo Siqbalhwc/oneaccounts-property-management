@@ -161,3 +161,23 @@ export type Invoice = {
   total_amount: number;
   status: "draft" | "sent" | "paid" | "partial" | "overdue" | "cancelled";
 };
+
+export type Account = {
+  id: string;
+  code: string;
+  name: string;
+  account_type: string;
+  transfers_to_owner: boolean;
+};
+
+export type SecurityDeposit = {
+  id: string;
+  lease_id: string;
+  amount_received: number;
+  date_received: string;
+  status: "held" | "partially_refunded" | "refunded";
+  amount_refunded?: number;
+  date_refunded?: string;
+  is_received: boolean;
+  received_account_id?: string | null;
+};

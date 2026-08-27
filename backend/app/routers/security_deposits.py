@@ -21,6 +21,11 @@ class RefundRequest(BaseModel):
     refund_date: date | None = None
 
 
+class ReceiveRequest(BaseModel):
+    account_id: str  # which asset account (Bank, Cash, ...) actually received the money
+    received_date: date | None = None
+
+
 @router.get("")
 def list_deposits(supabase: Client = Depends(get_supabase)):
     return supabase.table("security_deposits").select("*").execute().data
@@ -38,6 +43,122 @@ def get_deposit(deposit_id: str, supabase: Client = Depends(get_supabase)):
     if not res.data:
         raise HTTPException(status_code=404, detail="Deposit not found")
     return res.data
+
+
+@router.post("/{deposit_id}/receive")
+def receive_deposit(
+    deposit_id: str,
+    payload: ReceiveRequest,
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+):
+    """
+    Records that a security deposit -- which wasn't collected at lease
+    signing -- has now actually been received, and posts the corresponding
+    journal entry (Dr [chosen account] / Cr Security Deposits Held). This is
+    the counterpart to leases.py's at-signing posting: exactly one of the
+    two ever fires for a given deposit, so it's never posted twice.
+    """
+    deposit = (
+        supabase.table("security_deposits")
+        .select("*")
+        .eq("id", deposit_id)
+        .single()
+        .execute()
+    )
+    if not deposit.data:
+        raise HTTPException(status_code=404, detail="Deposit not found")
+    if deposit.data["is_received"]:
+        raise HTTPException(status_code=400, detail="This deposit is already marked as received.")
+    amount = float(deposit.data["amount_received"])
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="This deposit has no amount to receive.")
+
+    account = (
+        supabase.table("chart_of_accounts")
+        .select("id")
+        .eq("id", payload.account_id)
+        .eq("company_id", company_id)
+        .single()
+        .execute()
+    )
+    if not account.data:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    received_date = payload.received_date or date.today()
+
+    lease_id = deposit.data["lease_id"]
+    lease = (
+        supabase.table("leases")
+        .select("tenant_id, room_id")
+        .eq("id", lease_id)
+        .single()
+        .execute()
+        .data
+    )
+    building_id, room_id, owner_id, tenant_id, tenant_name, room_label = None, None, None, None, "Tenant", "room"
+    if lease:
+        tenant_id, room_id = lease["tenant_id"], lease["room_id"]
+        room = supabase.table("rooms").select("room_number, building_id").eq("id", room_id).single().execute().data
+        building_id = room["building_id"] if room else None
+        room_label = room.get("room_number", "room") if room else "room"
+        owner_id = resolve_room_owner(supabase, room_id)
+        tenant = supabase.table("tenants").select("full_name").eq("id", tenant_id).single().execute().data
+        tenant_name = tenant["full_name"] if tenant else "Tenant"
+
+    deposits_held_id = get_account_id(supabase, company_id, "2100")
+    tags = {"building_id": building_id, "room_id": room_id, "owner_id": owner_id, "tenant_id": tenant_id, "lease_id": lease_id}
+
+    post_journal_entry(
+        supabase,
+        company_id=company_id,
+        entry_date=str(received_date),
+        source_type="security_deposit",
+        source_id=lease_id,
+        description=f"Security deposit — {tenant_name}, Room {room_label}",
+        lines=[
+            {"account_id": payload.account_id, "direction": "debit", "amount": amount, **tags},
+            {"account_id": deposits_held_id, "direction": "credit", "amount": amount, **tags},
+        ],
+    )
+
+    updated = (
+        supabase.table("security_deposits")
+        .update(
+            {
+                "is_received": True,
+                "received_account_id": payload.account_id,
+                "date_received": str(received_date),
+            }
+        )
+        .eq("id", deposit_id)
+        .execute()
+    )
+    return updated.data[0]
+
+
+@router.get("/{deposit_id}/receipt-pdf")
+def deposit_receipt_pdf(deposit_id: str, supabase: Client = Depends(get_supabase)):
+    """
+    Printable acknowledgement-of-receipt PDF for a security deposit -- only
+    available once the deposit is actually marked as received (there's
+    nothing to acknowledge receiving otherwise).
+    """
+    from fastapi.responses import StreamingResponse
+    import io
+
+    from app.services.deposit_receipt_pdf import fetch_deposit_context, render_deposit_receipt_pdf
+
+    ctx = fetch_deposit_context(supabase, deposit_id)
+    if not ctx["deposit"]["is_received"]:
+        raise HTTPException(status_code=400, detail="This deposit hasn't been marked as received yet.")
+    pdf_bytes = render_deposit_receipt_pdf(ctx)
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="security_deposit_receipt_{deposit_id}.pdf"'},
+    )
 
 
 @router.post("/{deposit_id}/refund")

@@ -18,7 +18,14 @@ from supabase import Client
 
 def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
     """Fetches everything needed to render an invoice: the invoice itself,
-    its line items, and the tenant/room/building/company it belongs to."""
+    its line items, and the tenant/room/building/company it belongs to.
+    Also fetches the lease's security deposit (if any) and whether this is
+    the lease's first invoice -- the first invoice shows the deposit as an
+    informational line (amount + received/pending status), matching what
+    the lease creation screen already showed at signing. The deposit stays
+    outside invoice_line_items/total_amount on purpose: it's tracked and
+    settled through its own separate flow (security_deposits.py), not
+    through invoice payments."""
     invoice = supabase.table("invoices").select("*").eq("id", invoice_id).single().execute()
     if not invoice.data:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -37,6 +44,21 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
         supabase.table("companies").select("*").eq("id", invoice["company_id"]).single().execute().data
     )
 
+    deposit_rows = (
+        supabase.table("security_deposits").select("*").eq("lease_id", lease["id"]).execute().data
+    )
+    deposit = deposit_rows[0] if deposit_rows else None
+
+    lease_invoices = (
+        supabase.table("invoices")
+        .select("id, created_at")
+        .eq("lease_id", lease["id"])
+        .order("created_at")
+        .execute()
+        .data
+    )
+    is_first_invoice = bool(lease_invoices) and lease_invoices[0]["id"] == invoice["id"]
+
     return {
         "invoice": invoice,
         "line_items": line_items,
@@ -45,6 +67,8 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
         "room": room,
         "building": building,
         "company": company,
+        "deposit": deposit,
+        "is_first_invoice": is_first_invoice,
     }
 
 
@@ -53,6 +77,7 @@ def render_invoice_pdf(ctx: dict) -> bytes:
     fetch_invoice_context(). Pure function -- no I/O beyond the logo fetch."""
     invoice, line_items = ctx["invoice"], ctx["line_items"]
     tenant, room, building, company = ctx["tenant"], ctx["room"], ctx["building"], ctx["company"]
+    deposit, is_first_invoice = ctx.get("deposit"), ctx.get("is_first_invoice")
 
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -176,6 +201,38 @@ def render_invoice_pdf(ctx: dict) -> bytes:
     c.setFont("Helvetica-Bold", 12)
     c.drawString(24 * mm, y, "Total")
     c.drawRightString(width - 24 * mm, y, f"Rs {float(invoice['total_amount']):,.0f}")
+
+    # Security deposit -- shown for information only on the first invoice.
+    # It is NOT part of the invoice total above and is not settled by
+    # paying this invoice: it's tracked and receipted through its own
+    # separate flow, so a tenant/owner always knows its true status.
+    if is_first_invoice and deposit and float(deposit.get("amount_received") or 0) > 0:
+        received = bool(deposit.get("is_received"))
+        y -= 12 * mm
+        c.setStrokeColorRGB(0.86, 0.84, 0.77)
+        c.setLineWidth(0.75)
+        c.line(20 * mm, y, width - 20 * mm, y)
+        y -= 7 * mm
+        c.setFillColorRGB(*INK)
+        c.setFont("Helvetica", 10)
+        c.drawString(20 * mm, y, "Security deposit (refundable, held separately)")
+        c.drawRightString(width - 20 * mm, y, f"Rs {float(deposit['amount_received']):,.0f}")
+
+        y -= 6 * mm
+        status_text = "RECEIVED" if received else "PENDING"
+        status_color = LEDGER if received else (0.722, 0.525, 0.180)
+        c.setFont("Helvetica-Bold", 8)
+        badge_width = c.stringWidth(status_text, "Helvetica-Bold", 8) + 8 * mm
+        c.setFillColorRGB(*status_color)
+        c.roundRect(20 * mm, y - 2.5 * mm, badge_width, 6.5 * mm, 1.2 * mm, fill=1, stroke=0)
+        c.setFillColorRGB(1, 1, 1)
+        c.drawCentredString(20 * mm + badge_width / 2, y - 0.2 * mm, status_text)
+
+        c.setFillColorRGB(0.4, 0.43, 0.41)
+        c.setFont("Helvetica", 9)
+        combined = float(invoice["total_amount"]) + float(deposit["amount_received"])
+        note = f"Total due at signing (bill + deposit): Rs {combined:,.0f}" if not received else "Deposit already collected — see your security deposit receipt."
+        c.drawString(20 * mm + badge_width + 4 * mm, y, note)
 
     y -= 20 * mm
     c.setFillColorRGB(0.4, 0.43, 0.41)
