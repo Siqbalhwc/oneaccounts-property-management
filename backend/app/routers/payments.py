@@ -1,7 +1,7 @@
 from datetime import date
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase import Client
 
 from app.core.deps import get_current_company_id, get_supabase
@@ -11,8 +11,24 @@ router = APIRouter(prefix="/payments", tags=["Payments"])
 
 
 @router.get("")
-def list_payments(supabase: Client = Depends(get_supabase)):
-    return supabase.table("payments").select("*").order("payment_date", desc=True).execute().data
+def list_payments(
+    date_from: Optional[date] = Query(None, description="Only payments on/after this date"),
+    date_to: Optional[date] = Query(None, description="Only payments on/before this date"),
+    supabase: Client = Depends(get_supabase),
+):
+    """
+    Optional date_from/date_to narrow the result by payment_date -- purely
+    additive: omitting both returns exactly what this endpoint always
+    returned (every payment), so existing callers (Reports page, etc.) are
+    unaffected. Added so the Dashboard can request a recent window instead
+    of the company's entire payment history every time it loads.
+    """
+    query = supabase.table("payments").select("*")
+    if date_from:
+        query = query.gte("payment_date", str(date_from))
+    if date_to:
+        query = query.lte("payment_date", str(date_to))
+    return query.order("payment_date", desc=True).execute().data
 
 
 @router.post("", status_code=201)

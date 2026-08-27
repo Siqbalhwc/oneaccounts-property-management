@@ -40,22 +40,36 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         return;
       }
 
+      // Combined into ONE query via PostgREST's embedded-resource syntax
+      // (profiles.company_id -> companies.id) instead of two sequential
+      // round trips (fetch profile, THEN fetch company). This is purely a
+      // network-shape change -- RLS still applies independently to both
+      // `profiles` and `companies` exactly as before, so a user still only
+      // ever sees their own profile and their own company's row. If RLS
+      // blocks the embedded companies row (company suspended), PostgREST
+      // simply returns `companies: null` here, which is the same signal
+      // the old two-query version relied on -- the detection logic below
+      // is unchanged.
       const { data: profileRow } = await supabase
         .from("profiles")
-        .select("full_name, role, company_id, is_platform_admin, is_suspended")
+        .select("full_name, role, company_id, is_platform_admin, is_suspended, companies(id, name, address, phone, logo_url)")
         .eq("id", session.user.id)
         .single();
 
       if (profileRow) {
-        setProfile(profileRow as ProfileInfo);
-        const { data: companyRow } = await supabase
-          .from("companies")
-          .select("id, name, address, phone, logo_url")
-          .eq("id", (profileRow as ProfileInfo).company_id)
-          .single();
+        const raw = profileRow as unknown as ProfileInfo & { companies: Company | Company[] | null };
+        const { companies: companiesRaw, ...profileFields } = raw;
+        // Supabase's TS types this embed as an array regardless of
+        // cardinality, but a to-one FK relationship (profiles.company_id ->
+        // companies.id) actually returns a single object (or null) at
+        // runtime. Normalize defensively so this works correctly either way.
+        const companyRow: Company | null = Array.isArray(companiesRaw)
+          ? companiesRaw[0] ?? null
+          : companiesRaw;
+        setProfile(profileFields);
         if (companyRow) {
-          setCompany(companyRow as Company);
-        } else if (!(profileRow as ProfileInfo).is_suspended) {
+          setCompany(companyRow);
+        } else if (!(profileFields as ProfileInfo).is_suspended) {
           // Profile loaded fine (so the user isn't individually suspended),
           // but the company row itself is unreadable -- Row Level Security
           // blocks it once a platform admin suspends the whole company.

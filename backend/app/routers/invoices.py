@@ -20,8 +20,29 @@ class GenerateRequest(BaseModel):
 
 
 @router.get("")
-def list_invoices(supabase: Client = Depends(get_supabase)):
-    return supabase.table("invoices").select("*").order("created_at", desc=True).execute().data
+def list_invoices(
+    date_from: Optional[date] = Query(None, description="Only invoices with invoice_month on/after this date"),
+    date_to: Optional[date] = Query(None, description="Only invoices with invoice_month on/before this date"),
+    exclude_paid: Optional[bool] = Query(
+        None, description="If true, only returns invoices not yet fully settled (excludes 'paid' and 'cancelled')"
+    ),
+    supabase: Client = Depends(get_supabase),
+):
+    """
+    All three filters are purely additive -- omitting them returns exactly
+    what this endpoint always returned (every invoice), so existing callers
+    (Invoices page, Reports page) are unaffected. Added so the Dashboard can
+    ask for a recent window PLUS any still-unpaid invoice regardless of age,
+    instead of pulling the company's entire invoice history every load.
+    """
+    query = supabase.table("invoices").select("*")
+    if date_from:
+        query = query.gte("invoice_month", str(date_from))
+    if date_to:
+        query = query.lte("invoice_month", str(date_to))
+    if exclude_paid:
+        query = query.not_.in_("status", ["paid", "cancelled"])
+    return query.order("created_at", desc=True).execute().data
 
 
 @router.get("/{invoice_id}")

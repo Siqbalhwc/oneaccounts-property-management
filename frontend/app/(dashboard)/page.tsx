@@ -114,33 +114,80 @@ export default function DashboardHome() {
   const [sendingReminderId, setSendingReminderId] = useState<string | null>(null);
   const [reminderError, setReminderError] = useState<string | null>(null);
 
+  // Trailing-12-months window (matches the month dropdown above, and comfortably
+  // covers the 6-month trend chart). Used to scope the transaction-heavy
+  // requests below so this page doesn't pull a growing company's entire
+  // history on every load. Computed once, from the same monthOptions the UI
+  // itself is bounded by.
+  const windowStartDate = `${monthOptions[monthOptions.length - 1]}-01`;
+
+  // Each dataset is fetched and rendered independently -- previously this
+  // page used Promise.all(), which meant EVERY card stayed blank/zeroed
+  // until the single slowest of 9 requests finished. Now each card can
+  // light up as soon as its own data is back. Same endpoints, same data,
+  // same company-scoped RLS on every call -- only the loading order changed.
   useEffect(() => {
-    Promise.all([
-      api.get<Building[]>("/buildings"),
-      api.get<Room[]>("/rooms"),
-      api.get<Lease[]>("/leases"),
-      api.get<Tenant[]>("/tenants"),
-      api.get<Invoice[]>("/invoices"),
-      api.get<Payment[]>("/payments"),
-      api.get<Expense[]>("/expenses"),
-      api.get<ExpenseCategory[]>("/expense_categories"),
-      api.get<SalaryPayment[]>("/salary_payments"),
-    ])
-      .then(([b, r, l, t, i, p, e, ec, sp]) => {
-        setBuildings(b);
-        setRooms(r);
-        setLeases(l);
-        setTenants(t);
-        setInvoices(i);
-        setPayments(p);
-        setExpenses(e);
-        setExpenseCategories(ec);
-        setSalaryPayments(sp);
-      })
-      .catch((err) => setError(err.message));
+    api.get<Building[]>("/buildings").then(setBuildings).catch((err) => setError(err.message));
   }, []);
 
-  const loaded = buildings && rooms && leases && tenants && invoices && payments && expenses;
+  useEffect(() => {
+    api.get<Room[]>("/rooms").then(setRooms).catch((err) => setError(err.message));
+  }, []);
+
+  useEffect(() => {
+    api.get<Lease[]>("/leases").then(setLeases).catch((err) => setError(err.message));
+  }, []);
+
+  useEffect(() => {
+    api.get<Tenant[]>("/tenants").then(setTenants).catch((err) => setError(err.message));
+  }, []);
+
+  useEffect(() => {
+    api.get<ExpenseCategory[]>("/expense_categories").then(setExpenseCategories).catch((err) => setError(err.message));
+  }, []);
+
+  // Invoices: merge a recent window (covers the dropdown + trend chart)
+  // with an all-time "still unpaid" set, so an overdue invoice from further
+  // back is never dropped just because it's outside the recent window.
+  // Both new filters are optional/additive on the backend -- every other
+  // page calling GET /invoices with no params is completely unaffected.
+  useEffect(() => {
+    Promise.all([
+      api.get<Invoice[]>(`/invoices?date_from=${windowStartDate}`),
+      api.get<Invoice[]>(`/invoices?exclude_paid=true`),
+    ])
+      .then(([windowInvoices, unpaidInvoices]) => {
+        const merged = new Map<string, Invoice>();
+        [...windowInvoices, ...unpaidInvoices].forEach((i) => merged.set(i.id, i));
+        setInvoices(Array.from(merged.values()));
+      })
+      .catch((err) => setError(err.message));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    api
+      .get<Payment[]>(`/payments?date_from=${windowStartDate}`)
+      .then(setPayments)
+      .catch((err) => setError(err.message));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    api
+      .get<Expense[]>(`/expenses?date_from=${windowStartDate}`)
+      .then(setExpenses)
+      .catch((err) => setError(err.message));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    api
+      .get<SalaryPayment[]>(`/salary_payments?date_from=${windowStartDate}`)
+      .then(setSalaryPayments)
+      .catch((err) => setError(err.message));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ---------- Monthly metrics (driven by the month dropdown) ----------
   function metricsFor(monthKeyStr: string) {
@@ -206,85 +253,105 @@ export default function DashboardHome() {
   const overdueTotal = overdueInvoicesThisMonth.reduce((s, i) => s + Number(i.total_amount || 0), 0);
   const collectionRate = totalRent > 0 ? (current.collected / totalRent) * 100 : 0;
 
-  // ---------- Invoices awaiting payment (all-time, soonest due first) ----------
-  const roomOf = (roomId?: string) => rooms?.find((r) => r.id === roomId);
-  const buildingOf = (buildingId?: string) => buildings?.find((b) => b.id === buildingId);
-  const leaseOf = (leaseId: string) => leases?.find((l) => l.id === leaseId);
-  const tenantOf = (tenantId?: string) => tenants?.find((t) => t.id === tenantId);
+  // ---------- Lookup maps (built once per data change, O(1) lookups below --
+  // ---------- previously these were .find() scans repeated for every row) ----------
+  const roomsById = useMemo(() => new Map((rooms ?? []).map((r) => [r.id, r])), [rooms]);
+  const buildingsById = useMemo(() => new Map((buildings ?? []).map((b) => [b.id, b])), [buildings]);
+  const leasesById = useMemo(() => new Map((leases ?? []).map((l) => [l.id, l])), [leases]);
+  const tenantsById = useMemo(() => new Map((tenants ?? []).map((t) => [t.id, t])), [tenants]);
+  const expenseCategoriesById = useMemo(
+    () => new Map((expenseCategories ?? []).map((c) => [c.id, c])),
+    [expenseCategories]
+  );
 
-  const awaitingPayment = (invoices ?? [])
-    .filter((i) => i.status !== "paid" && i.status !== "cancelled")
-    .map((i) => {
-      const lease = leaseOf(i.lease_id);
-      const tenant = tenantOf(lease?.tenant_id);
-      const room = roomOf(lease?.room_id);
-      const building = buildingOf(room?.building_id);
-      const dueDate = new Date(i.due_date);
-      const daysOverdue = Math.floor((today.getTime() - dueDate.getTime()) / 86400000);
-      return {
-        ...i,
-        tenantName: tenant?.full_name ?? "—",
-        roomLabel: room ? `${building?.name ?? "—"} - ${room.room_number}` : "—",
-        daysOverdue,
-      };
-    })
-    .sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime())
-    .slice(0, 6);
+  const roomOf = (roomId?: string) => (roomId ? roomsById.get(roomId) : undefined);
+  const buildingOf = (buildingId?: string) => (buildingId ? buildingsById.get(buildingId) : undefined);
+  const leaseOf = (leaseId: string) => leasesById.get(leaseId);
+  const tenantOf = (tenantId?: string) => (tenantId ? tenantsById.get(tenantId) : undefined);
+
+  // ---------- Invoices awaiting payment (all-time, soonest due first) ----------
+  const awaitingPayment = useMemo(() => {
+    return (invoices ?? [])
+      .filter((i) => i.status !== "paid" && i.status !== "cancelled")
+      .map((i) => {
+        const lease = leaseOf(i.lease_id);
+        const tenant = tenantOf(lease?.tenant_id);
+        const room = roomOf(lease?.room_id);
+        const building = buildingOf(room?.building_id);
+        const dueDate = new Date(i.due_date);
+        const daysOverdue = Math.floor((today.getTime() - dueDate.getTime()) / 86400000);
+        return {
+          ...i,
+          tenantName: tenant?.full_name ?? "—",
+          roomLabel: room ? `${building?.name ?? "—"} - ${room.room_number}` : "—",
+          daysOverdue,
+        };
+      })
+      .sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime())
+      .slice(0, 6);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [invoices, leasesById, tenantsById, roomsById, buildingsById]);
 
   // ---------- Top performing buildings (collected this month) ----------
-  const invoiceToBuilding = new Map<string, string>();
-  (invoices ?? []).forEach((i) => {
-    const lease = leaseOf(i.lease_id);
-    const room = roomOf(lease?.room_id);
-    if (room) invoiceToBuilding.set(i.id, room.building_id);
-  });
-  const collectedByBuilding = new Map<string, number>();
-  (payments ?? [])
-    .filter((p) => p.payment_date?.startsWith(selectedMonth))
-    .forEach((p) => {
-      if (!p.invoice_id) return;
-      const buildingId = invoiceToBuilding.get(p.invoice_id);
-      if (!buildingId) return;
-      collectedByBuilding.set(buildingId, (collectedByBuilding.get(buildingId) ?? 0) + Number(p.amount || 0));
+  const topBuildings = useMemo(() => {
+    const invoiceToBuilding = new Map<string, string>();
+    (invoices ?? []).forEach((i) => {
+      const lease = leaseOf(i.lease_id);
+      const room = roomOf(lease?.room_id);
+      if (room) invoiceToBuilding.set(i.id, room.building_id);
     });
-  const topBuildings = (buildings ?? [])
-    .map((b) => ({ name: b.name, amount: collectedByBuilding.get(b.id) ?? 0 }))
-    .sort((a, b) => b.amount - a.amount)
-    .filter((b) => b.amount > 0)
-    .slice(0, 4);
+    const collectedByBuilding = new Map<string, number>();
+    (payments ?? [])
+      .filter((p) => p.payment_date?.startsWith(selectedMonth))
+      .forEach((p) => {
+        if (!p.invoice_id) return;
+        const buildingId = invoiceToBuilding.get(p.invoice_id);
+        if (!buildingId) return;
+        collectedByBuilding.set(buildingId, (collectedByBuilding.get(buildingId) ?? 0) + Number(p.amount || 0));
+      });
+    return (buildings ?? [])
+      .map((b) => ({ name: b.name, amount: collectedByBuilding.get(b.id) ?? 0 }))
+      .sort((a, b) => b.amount - a.amount)
+      .filter((b) => b.amount > 0)
+      .slice(0, 4);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [invoices, payments, buildings, selectedMonth, leasesById, roomsById]);
   const maxBuildingAmount = Math.max(1, ...topBuildings.map((b) => b.amount));
 
   // ---------- Recent activity feed (from real data, not fabricated) ----------
   type Activity = { icon: React.ReactNode; title: string; subtitle: string; amount?: string; at: string };
-  const activities: Activity[] = [
-    ...(payments ?? []).map((p) => ({
-      icon: <CreditCard size={15} />,
-      title: `Payment received from ${tenantOf(p.tenant_id)?.full_name ?? "tenant"}`,
-      subtitle: p.invoice_id ? "Invoice payment" : "Payment",
-      amount: pkr(p.amount),
-      at: p.created_at ?? p.payment_date,
-    })),
-    ...(leases ?? []).map((l) => {
-      const room = roomOf(l.room_id);
-      const building = buildingOf(room?.building_id);
-      return {
-        icon: <PlusCircle size={15} />,
-        title: "New lease created",
-        subtitle: room ? `${room.room_number}, ${building?.name ?? ""}` : "",
-        at: (l as any).created_at ?? l.start_date,
-      };
-    }),
-    ...(expenses ?? []).map((e) => ({
-      icon: <FileText size={15} />,
-      title: "Expense added",
-      subtitle: expenseCategories?.find((c) => c.id === e.category_id)?.name ?? "Expense",
-      amount: pkr(e.amount),
-      at: e.created_at ?? e.expense_date,
-    })),
-  ]
-    .filter((a) => a.at)
-    .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
-    .slice(0, 6);
+  const activities: Activity[] = useMemo(() => {
+    return [
+      ...(payments ?? []).map((p) => ({
+        icon: <CreditCard size={15} />,
+        title: `Payment received from ${tenantOf(p.tenant_id)?.full_name ?? "tenant"}`,
+        subtitle: p.invoice_id ? "Invoice payment" : "Payment",
+        amount: pkr(p.amount),
+        at: p.created_at ?? p.payment_date,
+      })),
+      ...(leases ?? []).map((l) => {
+        const room = roomOf(l.room_id);
+        const building = buildingOf(room?.building_id);
+        return {
+          icon: <PlusCircle size={15} />,
+          title: "New lease created",
+          subtitle: room ? `${room.room_number}, ${building?.name ?? ""}` : "",
+          at: (l as any).created_at ?? l.start_date,
+        };
+      }),
+      ...(expenses ?? []).map((e) => ({
+        icon: <FileText size={15} />,
+        title: "Expense added",
+        subtitle: expenseCategoriesById.get(e.category_id)?.name ?? "Expense",
+        amount: pkr(e.amount),
+        at: e.created_at ?? e.expense_date,
+      })),
+    ]
+      .filter((a) => a.at)
+      .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
+      .slice(0, 6);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [payments, leases, expenses, tenantsById, roomsById, buildingsById, expenseCategoriesById]);
 
   async function sendReminder(invoiceId: string) {
     setSendingReminderId(invoiceId);
@@ -427,7 +494,9 @@ export default function DashboardHome() {
               </div>
             </div>
           ) : (
-            <p className="text-sm text-ink/45 py-6 text-center">No rooms recorded yet.</p>
+            <p className="text-sm text-ink/45 py-6 text-center">
+              {rooms === null ? "Loading…" : "No rooms recorded yet."}
+            </p>
           )}
         </Card>
 
@@ -462,7 +531,7 @@ export default function DashboardHome() {
         <DataTable
           keyField="id"
           rows={awaitingPayment}
-          emptyMessage="No outstanding invoices right now."
+          emptyMessage={invoices === null ? "Loading…" : "No outstanding invoices right now."}
           columns={[
             { header: "Tenant", accessor: (r) => r.tenantName },
             { header: "Building / Room", accessor: (r) => r.roomLabel },
@@ -546,7 +615,9 @@ export default function DashboardHome() {
             </div>
           ) : (
             <p className="text-sm text-ink/45 py-6 text-center">
-              No payments recorded for this month yet.
+              {payments === null || buildings === null
+                ? "Loading…"
+                : "No payments recorded for this month yet."}
             </p>
           )}
         </Card>
@@ -572,7 +643,7 @@ export default function DashboardHome() {
             </div>
           ) : (
             <p className="text-sm text-ink/45 py-6 text-center">
-              Nothing recorded yet.
+              {payments === null && leases === null && expenses === null ? "Loading…" : "Nothing recorded yet."}
             </p>
           )}
         </Card>

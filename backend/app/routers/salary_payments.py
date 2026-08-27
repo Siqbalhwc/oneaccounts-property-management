@@ -1,7 +1,7 @@
 from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from supabase import Client
 from postgrest.exceptions import APIError
@@ -21,8 +21,22 @@ class SalaryPaymentCreate(BaseModel):
 
 
 @router.get("")
-def list_salary_payments(supabase: Client = Depends(get_supabase)):
-    return supabase.table("salary_payments").select("*").order("salary_month", desc=True).execute().data
+def list_salary_payments(
+    date_from: Optional[date] = Query(None, description="Only payments for salary_month on/after this date"),
+    date_to: Optional[date] = Query(None, description="Only payments for salary_month on/before this date"),
+    supabase: Client = Depends(get_supabase),
+):
+    """
+    date_from/date_to are purely additive -- omitting both returns exactly
+    what this endpoint always returned. Added so the Dashboard can request
+    a recent window instead of the company's entire salary history.
+    """
+    query = supabase.table("salary_payments").select("*")
+    if date_from:
+        query = query.gte("salary_month", str(date_from))
+    if date_to:
+        query = query.lte("salary_month", str(date_to))
+    return query.order("salary_month", desc=True).execute().data
 
 
 @router.post("", status_code=201)

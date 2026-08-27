@@ -85,11 +85,23 @@ def _post_expense_journal(supabase: Client, company_id: str, expense: dict):
 @router.get("")
 def list_expenses(
     building_id: Optional[str] = Query(None),
+    date_from: Optional[date] = Query(None, description="Only expenses on/after this date"),
+    date_to: Optional[date] = Query(None, description="Only expenses on/before this date"),
     supabase: Client = Depends(get_supabase),
 ):
+    """
+    date_from/date_to are purely additive on top of the existing building_id
+    filter -- omitting them returns exactly what this endpoint always
+    returned. Added so the Dashboard can request a recent window instead of
+    the company's entire expense history every time it loads.
+    """
     query = supabase.table("expenses").select("*")
     if building_id:
         query = query.eq("building_id", building_id)
+    if date_from:
+        query = query.gte("expense_date", str(date_from))
+    if date_to:
+        query = query.lte("expense_date", str(date_to))
     return query.order("expense_date", desc=True).execute().data
 
 
