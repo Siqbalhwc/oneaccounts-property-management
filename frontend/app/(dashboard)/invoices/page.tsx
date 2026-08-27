@@ -7,6 +7,7 @@ import { StampBadge } from "@/components/ui/StampBadge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Field, Input, AmountInput, Select } from "@/components/ui/Field";
+import { Banknote, MessageCircle, Printer } from "lucide-react";
 
 function formatPkr(n: number) {
   return `Rs ${n.toLocaleString("en-PK")}`;
@@ -223,26 +224,32 @@ export default function InvoicesPage() {
             {
               header: "",
               accessor: (i) => (
-                <div className="flex items-center justify-end gap-1 no-print">
+                <div className="flex gap-1 justify-end no-print">
                   {i.status !== "paid" && (
-                    <Button variant="secondary" onClick={() => openPaymentModal(i)}>
-                      Record payment
-                    </Button>
+                    <button
+                      onClick={() => openPaymentModal(i)}
+                      title="Record payment"
+                      className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink"
+                    >
+                      <Banknote size={16} />
+                    </button>
                   )}
-                  <Button
-                    variant="ghost"
+                  <button
                     onClick={() => handleSendWhatsapp(i.id)}
                     disabled={sendingWhatsappId === i.id}
+                    title="Send via WhatsApp"
+                    className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink disabled:opacity-50"
                   >
-                    {sendingWhatsappId === i.id ? "Preparing…" : "Send via WhatsApp"}
-                  </Button>
-                  <Button
-                    variant="ghost"
+                    <MessageCircle size={16} />
+                  </button>
+                  <button
                     onClick={() => handleViewPdf(i.id)}
                     disabled={downloadingId === i.id}
+                    title="View / print PDF"
+                    className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink disabled:opacity-50"
                   >
-                    {downloadingId === i.id ? "Opening…" : "View / print PDF"}
-                  </Button>
+                    <Printer size={16} />
+                  </button>
                 </div>
               ),
               align: "right",

@@ -135,11 +135,6 @@ def render_invoice_pdf(ctx: dict) -> bytes:
     c.setFillColorRGB(*INK)
     c.setFont("Helvetica-Bold", 15)
     c.drawString(20 * mm, y, "INVOICE")
-    if invoice.get("invoice_number"):
-        c.setFont("Helvetica", 9)
-        c.setFillColorRGB(0.4, 0.43, 0.41)
-        c.drawString(20 * mm + c.stringWidth("INVOICE ", "Helvetica-Bold", 15) + 3 * mm, y - 0.5 * mm, invoice["invoice_number"])
-        c.setFillColorRGB(*INK)
 
     status = invoice["status"]
     status_color = STATUS_COLORS.get(status, (0.34, 0.37, 0.35))
@@ -163,6 +158,9 @@ def render_invoice_pdf(ctx: dict) -> bytes:
     y -= 8 * mm
     c.setFillColorRGB(*INK)
     c.setFont("Helvetica", 10)
+    if invoice.get("invoice_number"):
+        c.drawString(20 * mm, y, f"Invoice #: {invoice['invoice_number']}")
+        y -= 6 * mm
     c.drawString(20 * mm, y, f"Invoice month: {invoice['invoice_month']}")
     c.drawRightString(width - 20 * mm, y, f"Due date: {invoice['due_date']}")
 
