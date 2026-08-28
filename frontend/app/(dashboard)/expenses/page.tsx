@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { Card, DataTable } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -34,6 +35,7 @@ export default function ExpensesPage() {
   const [accounts, setAccounts] = useState<Account[] | null>(null);
   const [allocationsSummary, setAllocationsSummary] = useState<AllocationSummaryRow[]>([]);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -83,12 +85,22 @@ export default function ExpensesPage() {
   }, []);
 
   useEffect(() => {
-    function handleClickOutside() {
+    function closeMenu() {
       setOpenMenuId(null);
+      setMenuPos(null);
     }
     if (openMenuId) {
-      document.addEventListener("click", handleClickOutside);
-      return () => document.removeEventListener("click", handleClickOutside);
+      document.addEventListener("click", closeMenu);
+      // The menu is portaled to <body> with a fixed position computed at
+      // open-time, so if the table scrolls/resizes without a re-open, just
+      // close it rather than let it drift away from its row.
+      window.addEventListener("scroll", closeMenu, true);
+      window.addEventListener("resize", closeMenu);
+      return () => {
+        document.removeEventListener("click", closeMenu);
+        window.removeEventListener("scroll", closeMenu, true);
+        window.removeEventListener("resize", closeMenu);
+      };
     }
   }, [openMenuId]);
 
@@ -325,39 +337,58 @@ export default function ExpensesPage() {
               accessor: (e) => (
                 <div className="relative no-print">
                   <button
-                    onClick={(ev) => { ev.stopPropagation(); setOpenMenuId(openMenuId === e.id ? null : e.id); }}
+                    onClick={(ev) => {
+                      ev.stopPropagation();
+                      if (openMenuId === e.id) {
+                        setOpenMenuId(null);
+                        setMenuPos(null);
+                        return;
+                      }
+                      const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+                      // Fixed-position menu anchored to the button's own
+                      // screen coordinates, rendered via a portal straight
+                      // into <body> -- so it floats above the table instead
+                      // of being clipped by the table's horizontal-scroll
+                      // wrapper (that clipping is what caused the cramped
+                      // scrollbar look before).
+                      setMenuPos({ top: rect.bottom + 4, left: rect.right - 160 });
+                      setOpenMenuId(e.id);
+                    }}
                     className="w-6 h-6 flex items-center justify-center rounded hover:bg-ledger/5 text-ink/50"
                     title="Actions"
                   >
                     ›
                   </button>
-                  {openMenuId === e.id && (
-                    <div
-                      onClick={(ev) => ev.stopPropagation()}
-                      className="absolute right-0 top-7 z-10 bg-paper border border-border rounded-card shadow-md py-1 w-40"
-                    >
-                      <button
-                        onClick={() => { setOpenMenuId(null); openEditModal(e); }}
-                        className="block w-full text-left px-3 py-1.5 text-sm hover:bg-ledger/5"
+                  {openMenuId === e.id && menuPos && typeof document !== "undefined" &&
+                    createPortal(
+                      <div
+                        onClick={(ev) => ev.stopPropagation()}
+                        style={{ position: "fixed", top: menuPos.top, left: menuPos.left }}
+                        className="z-50 bg-paper border border-border rounded-card shadow-md py-1 w-40"
                       >
-                        Edit
-                      </button>
-                      {!e.building_id && (
                         <button
-                          onClick={() => { setOpenMenuId(null); openAllocationModal(e); }}
+                          onClick={() => { setOpenMenuId(null); setMenuPos(null); openEditModal(e); }}
                           className="block w-full text-left px-3 py-1.5 text-sm hover:bg-ledger/5"
                         >
-                          Manage split
+                          Edit
                         </button>
-                      )}
-                      <button
-                        onClick={() => openLedgerModal(e)}
-                        className="block w-full text-left px-3 py-1.5 text-sm hover:bg-ledger/5"
-                      >
-                        View ledger
-                      </button>
-                    </div>
-                  )}
+                        {!e.building_id && (
+                          <button
+                            onClick={() => { setOpenMenuId(null); setMenuPos(null); openAllocationModal(e); }}
+                            className="block w-full text-left px-3 py-1.5 text-sm hover:bg-ledger/5"
+                          >
+                            Manage split
+                          </button>
+                        )}
+                        <button
+                          onClick={() => { setOpenMenuId(null); setMenuPos(null); openLedgerModal(e); }}
+                          className="block w-full text-left px-3 py-1.5 text-sm hover:bg-ledger/5"
+                        >
+                          View ledger
+                        </button>
+                      </div>,
+                      document.body
+                    )}
                 </div>
               ),
               align: "right",

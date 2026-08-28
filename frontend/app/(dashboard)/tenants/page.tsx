@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, Tenant, Profile } from "@/lib/api";
+import { api, Tenant, Profile, Lease, Room, Building } from "@/lib/api";
 import { Card, DataTable } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -33,6 +33,9 @@ export default function TenantsPage() {
   const [myRole, setMyRole] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
+  const [leases, setLeases] = useState<Lease[]>([]);
+  const [rooms, setRooms] = useState<Room[]>([]);
+  const [buildings, setBuildings] = useState<Building[]>([]);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -51,9 +54,23 @@ export default function TenantsPage() {
   useEffect(load, [showArchived]);
   useEffect(() => {
     api.get<Profile>("/profile/me").then((p) => setMyRole(p.role));
+    api.get<Lease[]>("/leases").then(setLeases);
+    api.get<Room[]>("/rooms").then(setRooms);
+    api.get<Building[]>("/buildings").then(setBuildings);
   }, []);
 
   const canManage = myRole === "owner" || myRole === "admin";
+
+  // Property the tenant currently lives in, via their active lease. A
+  // tenant can only have one active lease at a time (enforced at lease
+  // creation), so the first active match is the right one.
+  function propertyFor(tenantId: string): string {
+    const activeLease = leases.find((l) => l.tenant_id === tenantId && l.status === "active");
+    if (!activeLease) return "Not assigned";
+    const room = rooms.find((r) => r.id === activeLease.room_id);
+    const building = buildings.find((b) => b.id === room?.building_id);
+    return room ? `${building?.name ?? "—"} — Room ${room.room_number}` : "Not assigned";
+  }
 
   const normalizedSearch = searchTerm.trim().toLowerCase();
   const filteredTenants = (tenants ?? []).filter((t) => {
@@ -167,6 +184,17 @@ export default function TenantsPage() {
             },
             { header: "CNIC", accessor: (t) => <span className="figures text-ink/70">{t.cnic}</span> },
             { header: "Phone", accessor: (t) => <span className="figures text-ink/70">{t.phone}</span> },
+            {
+              header: "Property",
+              accessor: (t) => {
+                const label = propertyFor(t.id);
+                return (
+                  <span className={`text-xs ${label === "Not assigned" ? "text-ink/40" : "text-ink/70"}`}>
+                    {label}
+                  </span>
+                );
+              },
+            },
             { header: "Email", accessor: (t) => t.email ?? "—" },
             { header: "Address", accessor: (t) => t.address ?? "—" },
             {

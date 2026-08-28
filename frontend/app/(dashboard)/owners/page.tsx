@@ -19,11 +19,15 @@ type Owner = {
 };
 
 type Account = { id: string; code: string; name: string };
+type BuildingRow = { id: string; name: string; owner_id?: string };
+type RoomRow = { id: string; building_id: string; room_number: string; owner_id?: string };
 
 export default function OwnersPage() {
   const router = useRouter();
   const [owners, setOwners] = useState<Owner[] | null>(null);
   const [dueToOwnersAccountId, setDueToOwnersAccountId] = useState<string | null>(null);
+  const [buildings, setBuildings] = useState<BuildingRow[]>([]);
+  const [rooms, setRooms] = useState<RoomRow[]>([]);
 
   const [search, setSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -48,7 +52,29 @@ export default function OwnersPage() {
       const dueToOwners = accounts.find((a) => a.code === "2200");
       if (dueToOwners) setDueToOwnersAccountId(dueToOwners.id);
     });
+    api.get<BuildingRow[]>("/buildings").then(setBuildings);
+    api.get<RoomRow[]>("/rooms").then(setRooms);
   }, []);
+
+  // A building's default owner, plus any room whose owner_id overrides that
+  // default (rooms.owner_id wins over buildings.owner_id -- same rule the
+  // ledger's resolve_room_owner() uses). Returns a short readable summary
+  // like "Sunrise Plaza, Green Heights" or "Sunrise Plaza — Room 12".
+  function propertiesFor(ownerId: string): string {
+    const ownedBuildings = buildings.filter((b) => b.owner_id === ownerId);
+    const ownedBuildingIds = new Set(ownedBuildings.map((b) => b.id));
+    const ownedRooms = rooms.filter(
+      (r) => r.owner_id === ownerId && !ownedBuildingIds.has(r.building_id)
+    );
+    const parts = [
+      ...ownedBuildings.map((b) => b.name),
+      ...ownedRooms.map((r) => {
+        const building = buildings.find((b) => b.id === r.building_id);
+        return `${building?.name ?? "—"} — Room ${r.room_number}`;
+      }),
+    ];
+    return parts.length ? parts.join(", ") : "—";
+  }
 
   function openLedger(owner: Owner) {
     if (!dueToOwnersAccountId) return;
@@ -128,15 +154,19 @@ export default function OwnersPage() {
       </div>
 
       <Card>
-        <div className="flex flex-col sm:flex-row gap-3 mb-4">
+        <div className="flex items-center justify-between mb-4 no-print gap-3 flex-wrap">
           <Input
-            placeholder="Search by name, phone, or CNIC…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="flex-1"
+            placeholder="Search by name, phone, or CNIC…"
+            className="max-w-xs"
           />
-          <label className="flex items-center gap-2 text-sm text-ink/60 whitespace-nowrap">
-            <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+          <label className="flex items-center gap-2 text-xs text-ink/50">
+            <input
+              type="checkbox"
+              checked={showArchived}
+              onChange={(e) => setShowArchived(e.target.checked)}
+            />
             Show archived
           </label>
         </div>
@@ -146,6 +176,7 @@ export default function OwnersPage() {
           emptyMessage={search ? "No owners match that search." : "No owners yet."}
           columns={[
             { header: "Name", accessor: (o) => o.name },
+            { header: "Property", accessor: (o) => <span className="text-xs text-ink/70">{propertiesFor(o.id)}</span> },
             { header: "Phone", accessor: (o) => o.phone ?? "—" },
             { header: "CNIC", accessor: (o) => o.cnic ?? "—" },
             { header: "Address", accessor: (o) => o.address ?? "—" },
