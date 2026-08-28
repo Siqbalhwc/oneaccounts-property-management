@@ -43,6 +43,24 @@ def record_payment(
     Expected payload: {invoice_id, tenant_id, amount, payment_date, payment_method, notes}
     """
     payload["company_id"] = company_id
+
+    account_id = payload.get("account_id")
+    if not account_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Select which account this payment was received into (Bank, Cash, etc.).",
+        )
+    account = (
+        supabase.table("chart_of_accounts")
+        .select("id")
+        .eq("id", account_id)
+        .eq("company_id", company_id)
+        .single()
+        .execute()
+    )
+    if not account.data:
+        raise HTTPException(status_code=404, detail="Account not found")
+
     payment = supabase.table("payments").insert(payload).execute().data[0]
 
     invoice_id = payload.get("invoice_id")
@@ -108,11 +126,12 @@ def record_payment(
             building_id = room["building_id"] if room else None
             owner_id = resolve_room_owner(supabase, room_id)
 
-    # Dr Bank / Cr Accounts Receivable -- the actual cash coming in. This
-    # does NOT touch Rent Income or Due to Owners again -- that was already
-    # credited when the invoice was generated. This entry just clears the
-    # receivable.
-    bank_id = get_account_id(supabase, company_id, "1000")
+    # Dr [account tenant actually paid into] / Cr Accounts Receivable -- the
+    # actual cash coming in. This does NOT touch Rent Income or Due to
+    # Owners again -- that was already credited when the invoice was
+    # generated. This entry just clears the receivable. Never assumes a
+    # fixed account: different companies use different Bank/Cash accounts,
+    # so the caller always picks the real one the money landed in.
     ar_id = get_account_id(supabase, company_id, "1100")
     tenant_name = "Tenant"
     if tenant_id:
@@ -127,7 +146,7 @@ def record_payment(
         description=f"Payment received — {tenant_name}",
         lines=[
             {
-                "account_id": bank_id, "direction": "debit", "amount": float(payload["amount"]),
+                "account_id": account_id, "direction": "debit", "amount": float(payload["amount"]),
                 "building_id": building_id, "room_id": room_id, "owner_id": owner_id,
                 "tenant_id": tenant_id, "lease_id": lease_id,
             },

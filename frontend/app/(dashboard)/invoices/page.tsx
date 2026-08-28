@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, Invoice, Lease, Building, Tenant, Room, fetchPdfBlob } from "@/lib/api";
+import { api, Invoice, Lease, Building, Tenant, Room, Account, fetchPdfBlob } from "@/lib/api";
 import { Card, DataTable } from "@/components/ui/Card";
 import { StampBadge } from "@/components/ui/StampBadge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Field, Input, AmountInput, Select } from "@/components/ui/Field";
-import { Banknote, MessageCircle, Printer } from "lucide-react";
+import { WhatsAppIcon } from "@/components/ui/WhatsAppIcon";
+import { Banknote, Printer } from "lucide-react";
 
 function formatPkr(n: number) {
   return `Rs ${n.toLocaleString("en-PK")}`;
@@ -19,6 +20,7 @@ export default function InvoicesPage() {
   const [leases, setLeases] = useState<Lease[] | null>(null);
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
   const [rooms, setRooms] = useState<Room[] | null>(null);
+  const [accounts, setAccounts] = useState<Account[]>([]);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [sendingWhatsappId, setSendingWhatsappId] = useState<string | null>(null);
   const [monthFilter, setMonthFilter] = useState<string>("");
@@ -42,6 +44,7 @@ export default function InvoicesPage() {
     amount: "",
     payment_date: new Date().toISOString().slice(0, 10),
     payment_method: "cash",
+    account_id: "",
     notes: "",
   });
 
@@ -55,6 +58,7 @@ export default function InvoicesPage() {
     api.get<Lease[]>("/leases").then(setLeases);
     api.get<Tenant[]>("/tenants").then(setTenants);
     api.get<Room[]>("/rooms").then(setRooms);
+    api.get<Account[]>("/chart-of-accounts").then(setAccounts);
   }, []);
 
   async function handleGenerate(e: React.FormEvent) {
@@ -123,6 +127,7 @@ export default function InvoicesPage() {
       amount: String(invoice.total_amount),
       payment_date: new Date().toISOString().slice(0, 10),
       payment_method: "cash",
+      account_id: "",
       notes: "",
     });
     setPaymentModalOpen(true);
@@ -141,6 +146,7 @@ export default function InvoicesPage() {
         amount: parseFloat(paymentForm.amount),
         payment_date: paymentForm.payment_date,
         payment_method: paymentForm.payment_method,
+        account_id: paymentForm.account_id,
         notes: paymentForm.notes || undefined,
       });
       setPaymentModalOpen(false);
@@ -240,7 +246,7 @@ export default function InvoicesPage() {
                     title="Send via WhatsApp"
                     className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink disabled:opacity-50"
                   >
-                    <MessageCircle size={16} />
+                    <WhatsAppIcon size={16} />
                   </button>
                   <button
                     onClick={() => handleViewPdf(i.id)}
@@ -344,6 +350,22 @@ export default function InvoicesPage() {
               <option value="other">Other</option>
             </Select>
           </Field>
+          <Field label="Received into which account?">
+            <Select
+              required
+              value={paymentForm.account_id}
+              onChange={(e) => setPaymentForm({ ...paymentForm, account_id: e.target.value })}
+            >
+              <option value="">Select account…</option>
+              {accounts
+                .filter((a) => a.account_type === "asset")
+                .map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.code} · {a.name}
+                  </option>
+                ))}
+            </Select>
+          </Field>
           <Field label="Notes (optional)">
             <Input
               value={paymentForm.notes}
@@ -355,7 +377,7 @@ export default function InvoicesPage() {
             <Button type="button" variant="ghost" onClick={() => setPaymentModalOpen(false)}>
               Cancel
             </Button>
-            <Button type="submit" disabled={paymentSaving}>
+            <Button type="submit" disabled={paymentSaving || !paymentForm.account_id}>
               {paymentSaving ? "Saving…" : "Record payment"}
             </Button>
           </div>
