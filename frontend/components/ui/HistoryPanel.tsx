@@ -35,7 +35,7 @@ export function HistoryPanel({ tableName, recordId }: { tableName: string; recor
   }
 
   return (
-    <div className="space-y-2.5 max-h-48 overflow-y-auto">
+    <div className="space-y-2.5 max-h-48 overflow-y-auto scrollbar-thin">
       {entries.map((entry) => (
         <div key={entry.id} className="text-xs border-l-2 border-border pl-3">
           <p className="text-ink/60">

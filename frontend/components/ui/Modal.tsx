@@ -34,7 +34,7 @@ export function Modal({
         onClick={onClose}
         aria-hidden="true"
       />
-      <div className={`relative card w-full ${widthClass} p-6 sm:p-8 max-h-[92vh] overflow-y-auto`}>
+      <div className={`relative card w-full ${widthClass} p-6 sm:p-8 max-h-[92vh] overflow-y-auto scrollbar-thin`}>
         <div className="flex items-center justify-between mb-5">
           <h3 className="font-display text-lg font-semibold">{title}</h3>
           <button

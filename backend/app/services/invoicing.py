@@ -32,8 +32,9 @@ def compute_prorated_charges(
     first invoice) dropping one_time charges since those only ever bill
     once, at signing.
 
-    Returns a list of dicts: {charge_id, label, amount, show_on_invoice}
-    -- ready to become invoice_line_items rows.
+    Returns a list of dicts: {label, amount, show_on_invoice} -- one per
+    distinct charge label, ready to become invoice_line_items rows. Same
+    labels are merged into a single summed line (see grouping note below).
     """
     next_month = (
         date(invoice_month.year + 1, 1, 1)
@@ -79,7 +80,24 @@ def compute_prorated_charges(
             "amount": final_amount,
             "show_on_invoice": c.get("show_on_invoice", True),
         })
-    return result
+
+    # Group same-label entries into ONE invoice line, summing their
+    # amounts. Without this, editing an amount mid-month (which closes
+    # the old charge row and opens a new one, both dated within the same
+    # month) produces two separate rows with the same label -- correct in
+    # total, but confusing to read as "Internet" appearing twice. If
+    # either half of the pair was marked to print, the combined line
+    # prints too (hiding a real charged amount is worse than showing one
+    # extra visible line).
+    grouped: dict[str, dict] = {}
+    for r in result:
+        if r["label"] not in grouped:
+            grouped[r["label"]] = {"label": r["label"], "amount": 0.0, "show_on_invoice": False}
+        grouped[r["label"]]["amount"] += r["amount"]
+        grouped[r["label"]]["show_on_invoice"] = grouped[r["label"]]["show_on_invoice"] or r["show_on_invoice"]
+    for label, g in grouped.items():
+        g["amount"] = round(g["amount"], 2)
+    return list(grouped.values())
 
 
 def post_invoice_journal(supabase: Client, company_id: str, invoice: dict, lease: dict, prorated_charges: list[dict], entry_date: date):

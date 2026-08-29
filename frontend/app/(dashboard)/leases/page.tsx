@@ -196,14 +196,20 @@ export default function LeasesPage() {
     }
   }
 
-  async function handleEndCharge(charge: LeaseCharge) {
-    if (!editingLease) return;
-    if (!confirm(`End "${charge.label}" today? It will no longer appear on future invoices, but every invoice that already billed it stays exactly as it was.`)) return;
+  const [chargeToEnd, setChargeToEnd] = useState<LeaseCharge | null>(null);
+
+  function askEndCharge(charge: LeaseCharge) {
+    setChargeToEnd(charge);
+  }
+
+  async function confirmEndCharge() {
+    if (!editingLease || !chargeToEnd) return;
     setChargeActionBusy(true);
     setChargeError(null);
     try {
-      const res = await api.post<{ impact_message: string }>(`/leases/${editingLease.id}/charges/${charge.id}/end`, {});
+      const res = await api.post<{ impact_message: string }>(`/leases/${editingLease.id}/charges/${chargeToEnd.id}/end`, {});
       setChargeImpactMessage(res.impact_message);
+      setChargeToEnd(null);
       loadCharges(editingLease.id);
     } catch (err: any) {
       setChargeError(err.message);
@@ -320,7 +326,7 @@ export default function LeasesPage() {
         />
       </Card>
 
-      <Modal open={editModalOpen} onClose={() => setEditModalOpen(false)} title="Edit lease">
+      <Modal open={editModalOpen} onClose={() => setEditModalOpen(false)} title="Edit lease" size="full">
         <div className="space-y-6">
           <p className="text-xs text-ink/50">
             {editingLease && tenantName(editingLease.tenant_id)} — {editingLease && roomAndBuilding(editingLease.room_id)}
@@ -492,7 +498,7 @@ export default function LeasesPage() {
                       <Button type="button" variant="ghost" onClick={() => openEditCharge(c)}>
                         Edit
                       </Button>
-                      <Button type="button" variant="ghost" onClick={() => handleEndCharge(c)} disabled={chargeActionBusy}>
+                      <Button type="button" variant="ghost" onClick={() => askEndCharge(c)} disabled={chargeActionBusy}>
                         End
                       </Button>
                     </div>
@@ -504,7 +510,7 @@ export default function LeasesPage() {
             {chargeHistory && chargeHistory.length > (activeCharges?.length ?? 0) && (
               <details className="text-xs text-ink/50">
                 <summary className="cursor-pointer select-none">Full charge history (including ended charges)</summary>
-                <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto">
+                <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto scrollbar-thin">
                   {chargeHistory.map((c) => (
                     <div key={c.id} className="border-l-2 border-border pl-2">
                       {c.label} — Rs {Number(c.amount).toLocaleString("en-PK")} — {c.effective_from} to {c.effective_to ?? "present"}
@@ -525,6 +531,23 @@ export default function LeasesPage() {
           <div className="flex justify-end pt-2 border-t border-border">
             <Button type="button" variant="ghost" onClick={() => setEditModalOpen(false)}>
               Close
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal open={!!chargeToEnd} onClose={() => setChargeToEnd(null)} title="End this charge?">
+        <div className="space-y-4">
+          <p className="text-sm text-ink/70">
+            End <span className="font-medium">&quot;{chargeToEnd?.label}&quot;</span> today? It will no longer
+            appear on future invoices, but every invoice that already billed it stays exactly as it was.
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" onClick={() => setChargeToEnd(null)}>
+              Cancel
+            </Button>
+            <Button type="button" onClick={confirmEndCharge} disabled={chargeActionBusy}>
+              {chargeActionBusy ? "Ending…" : "End charge"}
             </Button>
           </div>
         </div>

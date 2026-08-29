@@ -1,0 +1,181 @@
+diff --git a/backend/app/services/invoicing.py b/backend/app/services/invoicing.py
+index 479d806..2d93052 100644
+--- a/backend/app/services/invoicing.py
++++ b/backend/app/services/invoicing.py
+@@ -32,8 +32,9 @@ def compute_prorated_charges(
+     first invoice) dropping one_time charges since those only ever bill
+     once, at signing.
+ 
+-    Returns a list of dicts: {charge_id, label, amount, show_on_invoice}
+-    -- ready to become invoice_line_items rows.
++    Returns a list of dicts: {label, amount, show_on_invoice} -- one per
++    distinct charge label, ready to become invoice_line_items rows. Same
++    labels are merged into a single summed line (see grouping note below).
+     """
+     next_month = (
+         date(invoice_month.year + 1, 1, 1)
+@@ -79,7 +80,24 @@ def compute_prorated_charges(
+             "amount": final_amount,
+             "show_on_invoice": c.get("show_on_invoice", True),
+         })
+-    return result
++
++    # Group same-label entries into ONE invoice line, summing their
++    # amounts. Without this, editing an amount mid-month (which closes
++    # the old charge row and opens a new one, both dated within the same
++    # month) produces two separate rows with the same label -- correct in
++    # total, but confusing to read as "Internet" appearing twice. If
++    # either half of the pair was marked to print, the combined line
++    # prints too (hiding a real charged amount is worse than showing one
++    # extra visible line).
++    grouped: dict[str, dict] = {}
++    for r in result:
++        if r["label"] not in grouped:
++            grouped[r["label"]] = {"label": r["label"], "amount": 0.0, "show_on_invoice": False}
++        grouped[r["label"]]["amount"] += r["amount"]
++        grouped[r["label"]]["show_on_invoice"] = grouped[r["label"]]["show_on_invoice"] or r["show_on_invoice"]
++    for label, g in grouped.items():
++        g["amount"] = round(g["amount"], 2)
++    return list(grouped.values())
+ 
+ 
+ def post_invoice_journal(supabase: Client, company_id: str, invoice: dict, lease: dict, prorated_charges: list[dict], entry_date: date):
+diff --git a/frontend/app/(dashboard)/leases/page.tsx b/frontend/app/(dashboard)/leases/page.tsx
+index 24426ee..f0514e8 100644
+--- a/frontend/app/(dashboard)/leases/page.tsx
++++ b/frontend/app/(dashboard)/leases/page.tsx
+@@ -196,14 +196,20 @@ export default function LeasesPage() {
+     }
+   }
+ 
+-  async function handleEndCharge(charge: LeaseCharge) {
+-    if (!editingLease) return;
+-    if (!confirm(`End "${charge.label}" today? It will no longer appear on future invoices, but every invoice that already billed it stays exactly as it was.`)) return;
++  const [chargeToEnd, setChargeToEnd] = useState<LeaseCharge | null>(null);
++
++  function askEndCharge(charge: LeaseCharge) {
++    setChargeToEnd(charge);
++  }
++
++  async function confirmEndCharge() {
++    if (!editingLease || !chargeToEnd) return;
+     setChargeActionBusy(true);
+     setChargeError(null);
+     try {
+-      const res = await api.post<{ impact_message: string }>(`/leases/${editingLease.id}/charges/${charge.id}/end`, {});
++      const res = await api.post<{ impact_message: string }>(`/leases/${editingLease.id}/charges/${chargeToEnd.id}/end`, {});
+       setChargeImpactMessage(res.impact_message);
++      setChargeToEnd(null);
+       loadCharges(editingLease.id);
+     } catch (err: any) {
+       setChargeError(err.message);
+@@ -320,7 +326,7 @@ export default function LeasesPage() {
+         />
+       </Card>
+ 
+-      <Modal open={editModalOpen} onClose={() => setEditModalOpen(false)} title="Edit lease">
++      <Modal open={editModalOpen} onClose={() => setEditModalOpen(false)} title="Edit lease" size="full">
+         <div className="space-y-6">
+           <p className="text-xs text-ink/50">
+             {editingLease && tenantName(editingLease.tenant_id)} — {editingLease && roomAndBuilding(editingLease.room_id)}
+@@ -492,7 +498,7 @@ export default function LeasesPage() {
+                       <Button type="button" variant="ghost" onClick={() => openEditCharge(c)}>
+                         Edit
+                       </Button>
+-                      <Button type="button" variant="ghost" onClick={() => handleEndCharge(c)} disabled={chargeActionBusy}>
++                      <Button type="button" variant="ghost" onClick={() => askEndCharge(c)} disabled={chargeActionBusy}>
+                         End
+                       </Button>
+                     </div>
+@@ -504,7 +510,7 @@ export default function LeasesPage() {
+             {chargeHistory && chargeHistory.length > (activeCharges?.length ?? 0) && (
+               <details className="text-xs text-ink/50">
+                 <summary className="cursor-pointer select-none">Full charge history (including ended charges)</summary>
+-                <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto">
++                <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto scrollbar-thin">
+                   {chargeHistory.map((c) => (
+                     <div key={c.id} className="border-l-2 border-border pl-2">
+                       {c.label} — Rs {Number(c.amount).toLocaleString("en-PK")} — {c.effective_from} to {c.effective_to ?? "present"}
+@@ -530,6 +536,23 @@ export default function LeasesPage() {
+         </div>
+       </Modal>
+ 
++      <Modal open={!!chargeToEnd} onClose={() => setChargeToEnd(null)} title="End this charge?">
++        <div className="space-y-4">
++          <p className="text-sm text-ink/70">
++            End <span className="font-medium">&quot;{chargeToEnd?.label}&quot;</span> today? It will no longer
++            appear on future invoices, but every invoice that already billed it stays exactly as it was.
++          </p>
++          <div className="flex justify-end gap-2">
++            <Button type="button" variant="ghost" onClick={() => setChargeToEnd(null)}>
++              Cancel
++            </Button>
++            <Button type="button" onClick={confirmEndCharge} disabled={chargeActionBusy}>
++              {chargeActionBusy ? "Ending…" : "End charge"}
++            </Button>
++          </div>
++        </div>
++      </Modal>
++
+       <Modal open={receiveModalOpen} onClose={() => setReceiveModalOpen(false)} title="Record security deposit receipt">
+         <form onSubmit={handleReceiveSubmit} className="space-y-4">
+           {receivingDeposit && (
+diff --git a/frontend/app/globals.css b/frontend/app/globals.css
+index 11ecbc7..5922c11 100644
+--- a/frontend/app/globals.css
++++ b/frontend/app/globals.css
+@@ -73,6 +73,28 @@
+   .scrollbar-hide::-webkit-scrollbar {
+     display: none;
+   }
++
++  /* A slim, muted scrollbar for tall in-app panels (modals, history lists)
++     so a long list scrolls cleanly instead of showing the browser's
++     default thick scrollbar. */
++  .scrollbar-thin {
++    scrollbar-width: thin;
++    scrollbar-color: color-mix(in srgb, currentColor 25%, transparent) transparent;
++  }
++  .scrollbar-thin::-webkit-scrollbar {
++    width: 6px;
++    height: 6px;
++  }
++  .scrollbar-thin::-webkit-scrollbar-track {
++    background: transparent;
++  }
++  .scrollbar-thin::-webkit-scrollbar-thumb {
++    background: color-mix(in srgb, currentColor 20%, transparent);
++    border-radius: 999px;
++  }
++  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
++    background: color-mix(in srgb, currentColor 35%, transparent);
++  }
+ }
+ 
+ /* Printing: hide navigation chrome and let the current report/page fill
+diff --git a/frontend/components/ui/HistoryPanel.tsx b/frontend/components/ui/HistoryPanel.tsx
+index 073a280..1ad93ee 100644
+--- a/frontend/components/ui/HistoryPanel.tsx
++++ b/frontend/components/ui/HistoryPanel.tsx
+@@ -35,7 +35,7 @@ export function HistoryPanel({ tableName, recordId }: { tableName: string; recor
+   }
+ 
+   return (
+-    <div className="space-y-2.5 max-h-48 overflow-y-auto">
++    <div className="space-y-2.5 max-h-48 overflow-y-auto scrollbar-thin">
+       {entries.map((entry) => (
+         <div key={entry.id} className="text-xs border-l-2 border-border pl-3">
+           <p className="text-ink/60">
+diff --git a/frontend/components/ui/Modal.tsx b/frontend/components/ui/Modal.tsx
+index 8dc309d..e985250 100644
+--- a/frontend/components/ui/Modal.tsx
++++ b/frontend/components/ui/Modal.tsx
+@@ -34,7 +34,7 @@ export function Modal({
+         onClick={onClose}
+         aria-hidden="true"
+       />
+-      <div className={`relative card w-full ${widthClass} p-6 sm:p-8 max-h-[92vh] overflow-y-auto`}>
++      <div className={`relative card w-full ${widthClass} p-6 sm:p-8 max-h-[92vh] overflow-y-auto scrollbar-thin`}>
+         <div className="flex items-center justify-between mb-5">
+           <h3 className="font-display text-lg font-semibold">{title}</h3>
+           <button
