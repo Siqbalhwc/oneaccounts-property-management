@@ -6,10 +6,9 @@ import { Card, DataTable } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Field, Input, AmountInput, Select } from "@/components/ui/Field";
-import { api, Building } from "@/lib/api";
+import { api, Building, Account } from "@/lib/api";
 
 type ExpenseCategory = { id: string; name: string; account_id?: string };
-type Account = { id: string; code: string; name: string };
 type Expense = {
   id: string;
   category_id: string;
@@ -19,6 +18,7 @@ type Expense = {
   description?: string;
   vendor_name?: string;
   recurrence?: "one_time" | "monthly";
+  paid_from_account_id?: string;
 };
 type Allocation = { id?: string; building_id: string; allocation_type: "percentage" | "fixed"; value: string };
 type AllocationSummaryRow = { source_id: string; building_id: string; allocation_type: string; value: number };
@@ -49,6 +49,7 @@ export default function ExpensesPage() {
     expense_date: new Date().toISOString().slice(0, 10),
     description: "",
     recurrence: "one_time" as "one_time" | "monthly",
+    paid_from_account_id: "",
   });
 
   // --- Allocation split (for company-wide/shared expenses) ---
@@ -115,6 +116,7 @@ export default function ExpensesPage() {
       expense_date: new Date().toISOString().slice(0, 10),
       description: "",
       recurrence: "one_time",
+      paid_from_account_id: accounts?.find((a) => a.code === "1000")?.id ?? "",
     });
     setModalOpen(true);
   }
@@ -130,6 +132,7 @@ export default function ExpensesPage() {
       expense_date: expense.expense_date,
       description: expense.description ?? "",
       recurrence: expense.recurrence ?? "one_time",
+      paid_from_account_id: expense.paid_from_account_id ?? "",
     });
     setModalOpen(true);
   }
@@ -148,6 +151,11 @@ export default function ExpensesPage() {
           description: form.description || undefined,
         });
       } else {
+        if (!form.paid_from_account_id) {
+          setError("Please select which account this was paid from.");
+          setSaving(false);
+          return;
+        }
         await api.post("/expenses", {
           category_id: form.category_id,
           building_id: form.building_id || undefined,
@@ -156,6 +164,7 @@ export default function ExpensesPage() {
           expense_date: form.expense_date,
           description: form.description || undefined,
           recurrence: form.recurrence,
+          paid_from_account_id: form.paid_from_account_id,
         });
       }
       setModalOpen(false);
@@ -177,7 +186,17 @@ export default function ExpensesPage() {
   const splitSummary = (expenseId: string) => {
     const rows = allocationsSummary.filter((r) => r.source_id === expenseId);
     if (rows.length === 0) return null;
-    return rows.map((r) => `${buildingName(r.building_id)} ${r.value}${r.allocation_type === "percentage" ? "%" : " Rs"}`).join(", ");
+    const expenseAmount = expenses?.find((e) => e.id === expenseId)?.amount ?? 0;
+    return rows
+      .map((r) => {
+        // Show the actual rupee amount landing on each building, not just
+        // the raw percentage/fixed value used to calculate it -- e.g. "20%"
+        // on its own doesn't confirm Rs 1,000 is really what each building
+        // gets out of a Rs 5,000 expense split five ways.
+        const rupees = r.allocation_type === "percentage" ? (expenseAmount * r.value) / 100 : r.value;
+        return `${buildingName(r.building_id)}: ${formatPkr(rupees)}`;
+      })
+      .join(", ");
   };
 
   async function openLedgerModal(expense: Expense) {
@@ -306,6 +325,13 @@ export default function ExpensesPage() {
             { header: "Date", accessor: (e) => e.expense_date },
             { header: "Category", accessor: (e) => categoryName(e.category_id) },
             { header: "GL account", accessor: (e) => <span className="text-xs text-ink/50">{accountLabel(e.category_id)}</span> },
+            {
+              header: "Paid from",
+              accessor: (e) => {
+                const acct = accounts?.find((a) => a.id === e.paid_from_account_id);
+                return <span className="text-xs text-ink/50">{acct ? `${acct.code} · ${acct.name}` : "—"}</span>;
+              },
+            },
             { header: "Vendor", accessor: (e) => e.vendor_name ?? "—" },
             {
               header: "Recurs",
@@ -407,9 +433,10 @@ export default function ExpensesPage() {
           )}
           {editingId && (
             <p className="text-xs text-ink/50 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2">
-              Category, building, and amount are locked once an expense is
-              logged, since they&apos;ve already posted to the ledger. Delete
-              and re-log the expense if any of those need to change.
+              Category, building, amount, and paid-from account are locked
+              once an expense is logged, since they&apos;ve already posted to
+              the ledger. Delete and re-log the expense if any of those need
+              to change.
             </p>
           )}
           <Field label="Category">
@@ -464,6 +491,20 @@ export default function ExpensesPage() {
               value={form.amount}
               onChange={(e) => setForm({ ...form, amount: e.target.value })}
             />
+          </Field>
+          <Field label="Paid from" hint="Which account this actually came out of.">
+            <Select
+              value={form.paid_from_account_id}
+              disabled={!!editingId}
+              onChange={(e) => setForm({ ...form, paid_from_account_id: e.target.value })}
+            >
+              <option value="">Select an account…</option>
+              {accounts?.filter((a) => a.account_type === "asset").map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.code} · {a.name}
+                </option>
+              ))}
+            </Select>
           </Field>
           <Field label="Date paid">
             <Input

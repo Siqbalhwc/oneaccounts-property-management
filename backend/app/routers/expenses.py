@@ -31,6 +31,10 @@ class ExpenseCreate(BaseModel):
     description: Optional[str] = None
     receipt_url: Optional[str] = None
     recurrence: str = "one_time"  # 'one_time' | 'monthly'
+    # Which asset account (Bank, Cash, etc.) this expense was actually paid
+    # from. Required -- every expense reduces a real account, and different
+    # companies use different account codes, so this is never assumed.
+    paid_from_account_id: str
 
 
 class ExpenseEdit(BaseModel):
@@ -46,7 +50,9 @@ class GenerateRecurringRequest(BaseModel):
 
 
 def _post_expense_journal(supabase: Client, company_id: str, expense: dict):
-    """Dr the category's mapped expense account / Cr Bank. Only tagged to a
+    """Dr the category's mapped expense account / Cr whichever account it was
+    actually paid from (expense["paid_from_account_id"] -- selected by the
+    user at logging time, e.g. Bank or Cash). Only tagged to a
     building when the expense has one directly -- a company-wide expense
     meant to be split across buildings (via cost_allocations) posts
     untagged here; the split only affects owner_ledger's calculation, not
@@ -60,7 +66,9 @@ def _post_expense_journal(supabase: Client, company_id: str, expense: dict):
         .data
     )
     account_id = category["account_id"] if category and category.get("account_id") else get_account_id(supabase, company_id, "5900")
-    bank_id = get_account_id(supabase, company_id, "1000")
+    # Falls back to Bank (1000) only for old rows that predate this field --
+    # every expense logged going forward always carries its own choice.
+    paid_from_id = expense.get("paid_from_account_id") or get_account_id(supabase, company_id, "1000")
 
     fallback_label = "Expense"
     if not expense.get("description"):
@@ -77,7 +85,7 @@ def _post_expense_journal(supabase: Client, company_id: str, expense: dict):
         description=expense.get("description") or fallback_label,
         lines=[
             {"account_id": account_id, "direction": "debit", "amount": float(expense["amount"]), "building_id": expense.get("building_id")},
-            {"account_id": bank_id, "direction": "credit", "amount": float(expense["amount"]), "building_id": expense.get("building_id")},
+            {"account_id": paid_from_id, "direction": "credit", "amount": float(expense["amount"]), "building_id": expense.get("building_id")},
         ],
     )
 
@@ -240,6 +248,7 @@ def generate_recurring_expenses(
             "description": template.get("description"),
             "recurrence": "monthly",
             "recurring_source_id": template["id"],
+            "paid_from_account_id": template.get("paid_from_account_id"),
         }
         expense = supabase.table("expenses").insert(new_row).execute().data[0]
         _post_expense_journal(supabase, company_id, expense)

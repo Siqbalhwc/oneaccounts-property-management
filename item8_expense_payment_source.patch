@@ -1,0 +1,241 @@
+diff --git a/005_schema_patch_020_expense_paid_from_account.sql b/005_schema_patch_020_expense_paid_from_account.sql
+new file mode 100644
+index 0000000..c03c479
+--- /dev/null
++++ b/005_schema_patch_020_expense_paid_from_account.sql
+@@ -0,0 +1,45 @@
++-- ============================================================================
++-- PATCH 020 — expenses: record which account (Bank, Cash, etc.) each expense
++-- was actually paid from, instead of always assuming Bank.
++-- Run this AFTER 004_schema_patch_019_suspension_and_feature_flags.sql.
++-- Run this SQL step BEFORE applying the matching code patch (the code will
++-- expect this column to exist).
++-- ============================================================================
++-- What this adds:
++--   1. expenses.paid_from_account_id -- which chart-of-accounts row (Bank,
++--      Cash, etc.) the expense was paid from. The backend previously always
++--      credited a hardcoded "1000" (Bank) account no matter what the user
++--      actually paid with.
++--   2. Backfills every EXISTING expense row to whichever account has code
++--      '1000' in that company's own chart of accounts -- this matches what
++--      actually happened in the past (the old code always used that
++--      account), so this backfill is just making the historical record
++--      match reality, not changing it.
++--   3. Left NULLABLE on purpose: the application layer requires this field
++--      going forward (enforced in the API, not the database), but we don't
++--      want a hard NOT NULL constraint here in case any company's chart of
++--      accounts is missing a '1000' code for some historical reason -- that
++--      should never silently break other, unrelated database writes.
++-- ============================================================================
++
++alter table expenses
++  add column if not exists paid_from_account_id uuid references chart_of_accounts(id);
++
++-- Backfill: match each expense to the Bank (code '1000') account belonging
++-- to THAT SAME expense's own company (never across companies).
++update expenses e
++set paid_from_account_id = coa.id
++from chart_of_accounts coa
++where coa.company_id = e.company_id
++  and coa.code = '1000'
++  and e.paid_from_account_id is null;
++
++-- Confirm: this should return 0 once everything with a matching '1000'
++-- account has been backfilled. Any rows still showing here belong to a
++-- company whose chart of accounts has no '1000' code -- worth a manual
++-- look, but harmless (new expenses will still require a choice going
++-- forward regardless).
++select company_id, count(*) as expenses_still_missing_paid_from_account
++from expenses
++where paid_from_account_id is null
++group by company_id;
+diff --git a/backend/app/routers/expenses.py b/backend/app/routers/expenses.py
+index 8f52987..0f97d28 100644
+--- a/backend/app/routers/expenses.py
++++ b/backend/app/routers/expenses.py
+@@ -31,6 +31,10 @@ class ExpenseCreate(BaseModel):
+     description: Optional[str] = None
+     receipt_url: Optional[str] = None
+     recurrence: str = "one_time"  # 'one_time' | 'monthly'
++    # Which asset account (Bank, Cash, etc.) this expense was actually paid
++    # from. Required -- every expense reduces a real account, and different
++    # companies use different account codes, so this is never assumed.
++    paid_from_account_id: str
+ 
+ 
+ class ExpenseEdit(BaseModel):
+@@ -46,7 +50,9 @@ class GenerateRecurringRequest(BaseModel):
+ 
+ 
+ def _post_expense_journal(supabase: Client, company_id: str, expense: dict):
+-    """Dr the category's mapped expense account / Cr Bank. Only tagged to a
++    """Dr the category's mapped expense account / Cr whichever account it was
++    actually paid from (expense["paid_from_account_id"] -- selected by the
++    user at logging time, e.g. Bank or Cash). Only tagged to a
+     building when the expense has one directly -- a company-wide expense
+     meant to be split across buildings (via cost_allocations) posts
+     untagged here; the split only affects owner_ledger's calculation, not
+@@ -60,7 +66,9 @@ def _post_expense_journal(supabase: Client, company_id: str, expense: dict):
+         .data
+     )
+     account_id = category["account_id"] if category and category.get("account_id") else get_account_id(supabase, company_id, "5900")
+-    bank_id = get_account_id(supabase, company_id, "1000")
++    # Falls back to Bank (1000) only for old rows that predate this field --
++    # every expense logged going forward always carries its own choice.
++    paid_from_id = expense.get("paid_from_account_id") or get_account_id(supabase, company_id, "1000")
+ 
+     fallback_label = "Expense"
+     if not expense.get("description"):
+@@ -77,7 +85,7 @@ def _post_expense_journal(supabase: Client, company_id: str, expense: dict):
+         description=expense.get("description") or fallback_label,
+         lines=[
+             {"account_id": account_id, "direction": "debit", "amount": float(expense["amount"]), "building_id": expense.get("building_id")},
+-            {"account_id": bank_id, "direction": "credit", "amount": float(expense["amount"]), "building_id": expense.get("building_id")},
++            {"account_id": paid_from_id, "direction": "credit", "amount": float(expense["amount"]), "building_id": expense.get("building_id")},
+         ],
+     )
+ 
+@@ -240,6 +248,7 @@ def generate_recurring_expenses(
+             "description": template.get("description"),
+             "recurrence": "monthly",
+             "recurring_source_id": template["id"],
++            "paid_from_account_id": template.get("paid_from_account_id"),
+         }
+         expense = supabase.table("expenses").insert(new_row).execute().data[0]
+         _post_expense_journal(supabase, company_id, expense)
+diff --git a/frontend/app/(dashboard)/expenses/page.tsx b/frontend/app/(dashboard)/expenses/page.tsx
+index f8b493b..8d11788 100644
+--- a/frontend/app/(dashboard)/expenses/page.tsx
++++ b/frontend/app/(dashboard)/expenses/page.tsx
+@@ -6,10 +6,9 @@ import { Card, DataTable } from "@/components/ui/Card";
+ import { Button } from "@/components/ui/Button";
+ import { Modal } from "@/components/ui/Modal";
+ import { Field, Input, AmountInput, Select } from "@/components/ui/Field";
+-import { api, Building } from "@/lib/api";
++import { api, Building, Account } from "@/lib/api";
+ 
+ type ExpenseCategory = { id: string; name: string; account_id?: string };
+-type Account = { id: string; code: string; name: string };
+ type Expense = {
+   id: string;
+   category_id: string;
+@@ -19,6 +18,7 @@ type Expense = {
+   description?: string;
+   vendor_name?: string;
+   recurrence?: "one_time" | "monthly";
++  paid_from_account_id?: string;
+ };
+ type Allocation = { id?: string; building_id: string; allocation_type: "percentage" | "fixed"; value: string };
+ type AllocationSummaryRow = { source_id: string; building_id: string; allocation_type: string; value: number };
+@@ -49,6 +49,7 @@ export default function ExpensesPage() {
+     expense_date: new Date().toISOString().slice(0, 10),
+     description: "",
+     recurrence: "one_time" as "one_time" | "monthly",
++    paid_from_account_id: "",
+   });
+ 
+   // --- Allocation split (for company-wide/shared expenses) ---
+@@ -115,6 +116,7 @@ export default function ExpensesPage() {
+       expense_date: new Date().toISOString().slice(0, 10),
+       description: "",
+       recurrence: "one_time",
++      paid_from_account_id: accounts?.find((a) => a.code === "1000")?.id ?? "",
+     });
+     setModalOpen(true);
+   }
+@@ -130,6 +132,7 @@ export default function ExpensesPage() {
+       expense_date: expense.expense_date,
+       description: expense.description ?? "",
+       recurrence: expense.recurrence ?? "one_time",
++      paid_from_account_id: expense.paid_from_account_id ?? "",
+     });
+     setModalOpen(true);
+   }
+@@ -148,6 +151,11 @@ export default function ExpensesPage() {
+           description: form.description || undefined,
+         });
+       } else {
++        if (!form.paid_from_account_id) {
++          setError("Please select which account this was paid from.");
++          setSaving(false);
++          return;
++        }
+         await api.post("/expenses", {
+           category_id: form.category_id,
+           building_id: form.building_id || undefined,
+@@ -156,6 +164,7 @@ export default function ExpensesPage() {
+           expense_date: form.expense_date,
+           description: form.description || undefined,
+           recurrence: form.recurrence,
++          paid_from_account_id: form.paid_from_account_id,
+         });
+       }
+       setModalOpen(false);
+@@ -177,7 +186,17 @@ export default function ExpensesPage() {
+   const splitSummary = (expenseId: string) => {
+     const rows = allocationsSummary.filter((r) => r.source_id === expenseId);
+     if (rows.length === 0) return null;
+-    return rows.map((r) => `${buildingName(r.building_id)} ${r.value}${r.allocation_type === "percentage" ? "%" : " Rs"}`).join(", ");
++    const expenseAmount = expenses?.find((e) => e.id === expenseId)?.amount ?? 0;
++    return rows
++      .map((r) => {
++        // Show the actual rupee amount landing on each building, not just
++        // the raw percentage/fixed value used to calculate it -- e.g. "20%"
++        // on its own doesn't confirm Rs 1,000 is really what each building
++        // gets out of a Rs 5,000 expense split five ways.
++        const rupees = r.allocation_type === "percentage" ? (expenseAmount * r.value) / 100 : r.value;
++        return `${buildingName(r.building_id)}: ${formatPkr(rupees)}`;
++      })
++      .join(", ");
+   };
+ 
+   async function openLedgerModal(expense: Expense) {
+@@ -306,6 +325,13 @@ export default function ExpensesPage() {
+             { header: "Date", accessor: (e) => e.expense_date },
+             { header: "Category", accessor: (e) => categoryName(e.category_id) },
+             { header: "GL account", accessor: (e) => <span className="text-xs text-ink/50">{accountLabel(e.category_id)}</span> },
++            {
++              header: "Paid from",
++              accessor: (e) => {
++                const acct = accounts?.find((a) => a.id === e.paid_from_account_id);
++                return <span className="text-xs text-ink/50">{acct ? `${acct.code} · ${acct.name}` : "—"}</span>;
++              },
++            },
+             { header: "Vendor", accessor: (e) => e.vendor_name ?? "—" },
+             {
+               header: "Recurs",
+@@ -407,9 +433,10 @@ export default function ExpensesPage() {
+           )}
+           {editingId && (
+             <p className="text-xs text-ink/50 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2">
+-              Category, building, and amount are locked once an expense is
+-              logged, since they&apos;ve already posted to the ledger. Delete
+-              and re-log the expense if any of those need to change.
++              Category, building, amount, and paid-from account are locked
++              once an expense is logged, since they&apos;ve already posted to
++              the ledger. Delete and re-log the expense if any of those need
++              to change.
+             </p>
+           )}
+           <Field label="Category">
+@@ -465,6 +492,20 @@ export default function ExpensesPage() {
+               onChange={(e) => setForm({ ...form, amount: e.target.value })}
+             />
+           </Field>
++          <Field label="Paid from" hint="Which account this actually came out of.">
++            <Select
++              value={form.paid_from_account_id}
++              disabled={!!editingId}
++              onChange={(e) => setForm({ ...form, paid_from_account_id: e.target.value })}
++            >
++              <option value="">Select an account…</option>
++              {accounts?.filter((a) => a.account_type === "asset").map((a) => (
++                <option key={a.id} value={a.id}>
++                  {a.code} · {a.name}
++                </option>
++              ))}
++            </Select>
++          </Field>
+           <Field label="Date paid">
+             <Input
+               type="date"
