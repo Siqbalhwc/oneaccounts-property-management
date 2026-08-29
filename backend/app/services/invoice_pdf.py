@@ -188,6 +188,11 @@ def render_invoice_pdf(ctx: dict) -> bytes:
 
     c.setFont("Helvetica", 10)
     for item in line_items:
+        # A charge can be unchecked from "print on PDF" (e.g. a facility
+        # rolled quietly into the headline rent) -- it still counts fully
+        # toward the total below, only its own printed row is skipped.
+        if item.get("show_on_invoice", True) is False:
+            continue
         amount = float(item["amount"])
         y -= 7 * mm
         c.drawString(20 * mm, y, item["label"])

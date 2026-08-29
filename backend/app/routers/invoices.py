@@ -7,7 +7,7 @@ from supabase import Client
 
 from app.core.config import settings
 from app.core.deps import get_current_company_id, get_service_client, get_supabase
-from app.services.ledger import get_account_for_charge_label, get_account_id, post_journal_entry, resolve_room_owner
+from app.services.invoicing import compute_prorated_charges, post_invoice_journal
 from app.services.phone import normalize_to_whatsapp
 
 router = APIRouter(prefix="/invoices", tags=["Invoices"])
@@ -99,13 +99,13 @@ def generate_invoice_for_lease(
     the very first invoice immediately at signing). Returns the created
     invoice dict, or None if skipped (already invoiced this month, no active
     charges, or the lease doesn't actually overlap this month at all).
-    """
-    next_month = (
-        date(invoice_month.year + 1, 1, 1)
-        if invoice_month.month == 12
-        else date(invoice_month.year, invoice_month.month + 1, 1)
-    )
 
+    Proration and journal-posting math live in services/invoicing.py,
+    shared with leases.py's charge add/edit/end endpoints (see
+    resync_current_month_invoice there) -- so a lease's bill is always
+    computed the exact same way, whether it's this month's fresh invoice
+    or a running one being patched after a mid-month charge change.
+    """
     existing = (
         supabase.table("invoices")
         .select("id")
@@ -129,34 +129,14 @@ def generate_invoice_for_lease(
 
     prior_invoices = supabase.table("invoices").select("id").eq("lease_id", lease["id"]).execute().data
     is_first_invoice = len(prior_invoices) == 0
-    active_charges = charges if is_first_invoice else [c for c in charges if c.get("recurrence", "recurring") != "one_time"]
-    if not active_charges:
-        return None
 
     lease_start = date.fromisoformat(str(lease["start_date"]))
     lease_end = date.fromisoformat(str(lease["end_date"]))
-    month_last_day = next_month - timedelta(days=1)
-    overlap_start = max(lease_start, invoice_month)
-    overlap_end = min(lease_end, month_last_day)
-    if overlap_end < overlap_start:
+    prorated_charges = compute_prorated_charges(charges, lease_start, lease_end, invoice_month, is_first_invoice)
+    if not prorated_charges:
         return None
 
-    days_in_month = (next_month - invoice_month).days
-    days_active = (overlap_end - overlap_start).days + 1
-    is_full_month = days_active >= days_in_month
-    factor = days_active / days_in_month
-
-    prorated_charges = []
-    for c in active_charges:
-        amount = float(c["amount"])
-        if c.get("recurrence", "recurring") == "one_time" or is_full_month:
-            final_amount = amount
-        else:
-            final_amount = round(amount * factor, 2)
-        prorated_charges.append({"label": c["label"], "amount": final_amount})
-
     total = sum(c["amount"] for c in prorated_charges)
-    ar_account_id = get_account_id(supabase, company_id, "1100")
     invoice_number = generate_invoice_number(supabase, company_id, date.today())
 
     inv = (
@@ -177,54 +157,18 @@ def generate_invoice_for_lease(
     )
 
     line_items = [
-        {"company_id": company_id, "invoice_id": inv["id"], "label": c["label"], "amount": c["amount"]}
+        {
+            "company_id": company_id,
+            "invoice_id": inv["id"],
+            "label": c["label"],
+            "amount": c["amount"],
+            "show_on_invoice": c["show_on_invoice"],
+        }
         for c in prorated_charges
     ]
     supabase.table("invoice_line_items").insert(line_items).execute()
 
-    room = supabase.table("rooms").select("id, room_number, building_id, owner_id").eq("id", lease["room_id"]).single().execute().data
-    building_id = room["building_id"] if room else None
-    room_owner_id = resolve_room_owner(supabase, lease["room_id"]) if room else None
-    tenant = supabase.table("tenants").select("full_name").eq("id", lease["tenant_id"]).single().execute().data
-    tenant_name = tenant["full_name"] if tenant else "Tenant"
-    room_label = room.get("room_number", "room") if room else "room"
-
-    credit_by_account: dict[str, dict] = {}
-    for c in prorated_charges:
-        account = get_account_for_charge_label(supabase, company_id, c["label"])
-        acct_id = account["id"]
-        if acct_id not in credit_by_account:
-            credit_by_account[acct_id] = {"amount": 0.0, "transfers_to_owner": account["transfers_to_owner"]}
-        credit_by_account[acct_id]["amount"] += float(c["amount"])
-
-    journal_lines = [
-        {
-            "account_id": ar_account_id, "direction": "debit", "amount": total,
-            "building_id": building_id, "room_id": lease["room_id"], "owner_id": room_owner_id,
-            "tenant_id": lease["tenant_id"], "lease_id": lease["id"],
-        }
-    ]
-    for acct_id, info in credit_by_account.items():
-        journal_lines.append(
-            {
-                "account_id": acct_id, "direction": "credit", "amount": info["amount"],
-                "building_id": building_id, "room_id": lease["room_id"],
-                # owner_id here means "this happened at this owner's property" --
-                # a REPORTING tag, always set. It's a separate question from
-                # whether the money is actually OWED to the owner, which is
-                # determined by which account this credits (Due to Owners vs
-                # a company income account), not by this tag's presence.
-                "owner_id": room_owner_id,
-                "tenant_id": lease["tenant_id"], "lease_id": lease["id"],
-            }
-        )
-
-    post_journal_entry(
-        supabase, company_id=company_id, entry_date=str(invoice_month), source_type="invoice",
-        source_id=inv["id"],
-        description=f"Rent invoice — {tenant_name}, Room {room_label} — {invoice_month.strftime('%B %Y')}",
-        lines=journal_lines,
-    )
+    post_invoice_journal(supabase, company_id, inv, lease, prorated_charges, entry_date=invoice_month)
 
     return inv
 

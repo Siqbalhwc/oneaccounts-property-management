@@ -8,6 +8,7 @@ from supabase import Client
 from app.core.deps import get_current_company_id, get_current_user, get_supabase
 from app.crud.generic import write_audit_log
 from app.services.ledger import get_account_id, post_journal_entry, resolve_room_owner
+from app.services.invoicing import resync_current_month_invoice
 from app.routers.invoices import generate_invoice_for_lease
 
 router = APIRouter(prefix="/leases", tags=["Leases"])
@@ -20,6 +21,11 @@ class LeaseCharge(BaseModel):
     label: str
     amount: float
     recurrence: str = "recurring"  # 'recurring' | 'one_time' -- e.g. Rent vs a one-off Commission fee
+    # Whether this line prints on the invoice PDF. Checked by default --
+    # unchecking still counts the amount fully toward the total and the
+    # ledger, it only hides that one printed row (e.g. folding a facility
+    # quietly into the headline rent shown to the tenant).
+    show_on_invoice: bool = True
 
 
 class LeaseCreate(BaseModel):
@@ -45,6 +51,20 @@ class LeaseCreate(BaseModel):
 class ChargeUpdate(BaseModel):
     new_amount: float
     effective_from: date | None = None  # defaults to today
+    show_on_invoice: bool | None = None  # if omitted, keeps the charge's current setting
+
+
+class ChargeAdd(BaseModel):
+    label: str
+    amount: float
+    recurrence: str = "recurring"  # 'recurring' | 'one_time'
+    effective_from: date | None = None  # defaults to today
+    show_on_invoice: bool = True
+
+
+class ChargeEnd(BaseModel):
+    effective_to: date | None = None  # defaults to today -- last day this charge still applies
+    reason: str | None = None
 
 
 class TerminateRequest(BaseModel):
@@ -165,6 +185,7 @@ def create_lease(
                 "amount": c.amount,
                 "recurrence": c.recurrence,
                 "effective_from": str(payload.start_date),
+                "show_on_invoice": c.show_on_invoice,
             }
             for c in payload.charges
         ]
@@ -267,6 +288,93 @@ def get_active_charges(lease_id: str, supabase: Client = Depends(get_supabase)):
     return res.data
 
 
+@router.get("/{lease_id}/charges/history")
+def get_charge_history(lease_id: str, supabase: Client = Depends(get_supabase)):
+    """Every charge row that has ever existed on this lease, including
+    closed-out ones -- powers the "History" panel on the edit-lease screen
+    so every past add/amount-change/removal is visible, not just what's
+    active right now."""
+    res = (
+        supabase.table("lease_charges")
+        .select("*")
+        .eq("lease_id", lease_id)
+        .order("effective_from")
+        .execute()
+    )
+    return res.data
+
+
+def _lease_or_404(supabase: Client, lease_id: str) -> dict:
+    lease = supabase.table("leases").select("*").eq("id", lease_id).single().execute()
+    if not lease.data:
+        raise HTTPException(status_code=404, detail="Lease not found")
+    return lease.data
+
+
+def _resync_result(supabase: Client, company_id: str, lease: dict) -> dict:
+    """Runs resync_current_month_invoice and turns the result into a plain
+    message the frontend can show directly -- "this month's invoice was
+    updated" vs "nothing to update yet"."""
+    updated_invoice = resync_current_month_invoice(supabase, company_id, lease)
+    if updated_invoice:
+        return {
+            "current_invoice_updated": True,
+            "current_invoice_id": updated_invoice["id"],
+            "current_invoice_new_total": updated_invoice["total_amount"],
+            "impact_message": (
+                f"This month's invoice was updated — new total Rs {updated_invoice['total_amount']:,.0f}. "
+                "No past invoice was changed."
+            ),
+        }
+    return {
+        "current_invoice_updated": False,
+        "current_invoice_id": None,
+        "current_invoice_new_total": None,
+        "impact_message": (
+            "This will apply starting with the next invoice generated for this lease. "
+            "No past invoice was changed. (If a current-month invoice already has a "
+            "payment recorded against it, it's left as-is on purpose.)"
+        ),
+    }
+
+
+@router.post("/{lease_id}/charges", status_code=201)
+def add_charge(
+    lease_id: str,
+    payload: ChargeAdd,
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+    user: dict = Depends(get_current_user),
+):
+    """
+    Adds a new charge to a lease at any point during its term -- e.g. a
+    tenant asks for parking starting today. Never touches past invoices;
+    if this month's invoice already exists and has no payment recorded
+    against it yet, it's recalculated to include this charge (prorated
+    for the days remaining in the month); otherwise it simply becomes
+    part of the lease's normal charge set from now on.
+    """
+    lease = _lease_or_404(supabase, lease_id)
+    if payload.recurrence not in ("recurring", "one_time"):
+        raise HTTPException(status_code=400, detail="recurrence must be 'recurring' or 'one_time'")
+
+    effective_from = payload.effective_from or date.today()
+    row = {
+        "company_id": company_id,
+        "lease_id": lease_id,
+        "label": payload.label,
+        "amount": payload.amount,
+        "recurrence": payload.recurrence,
+        "effective_from": str(effective_from),
+        "show_on_invoice": payload.show_on_invoice,
+    }
+    new_charge = supabase.table("lease_charges").insert(row).execute().data[0]
+    write_audit_log(supabase, company_id, user["user_id"], "create", "lease_charges", new_charge["id"], None, new_charge)
+
+    result = _resync_result(supabase, company_id, lease)
+    return {"charge": new_charge, **result}
+
+
 @router.patch("/{lease_id}/charges/{charge_id}")
 def update_charge_amount(
     lease_id: str,
@@ -274,12 +382,16 @@ def update_charge_amount(
     payload: ChargeUpdate,
     supabase: Client = Depends(get_supabase),
     company_id: str = Depends(get_current_company_id),
+    user: dict = Depends(get_current_user),
 ):
     """
     Edits a rent-component amount (e.g. water fee 1000 -> 1200) WITHOUT
     overwriting history. Closes the old charge row and inserts a new one,
-    so past invoices remain accurate.
+    so past invoices remain accurate. Also patches this month's invoice
+    (if it exists and has no payment against it yet) to reflect the new
+    amount going forward.
     """
+    lease = _lease_or_404(supabase, lease_id)
     effective_date = payload.effective_from or date.today()
 
     old = (
@@ -304,12 +416,59 @@ def update_charge_amount(
                 "lease_id": lease_id,
                 "label": old.data["label"],
                 "amount": payload.new_amount,
+                "recurrence": old.data.get("recurrence", "recurring"),
                 "effective_from": str(effective_date),
+                "show_on_invoice": payload.show_on_invoice if payload.show_on_invoice is not None else old.data.get("show_on_invoice", True),
             }
         )
         .execute()
+        .data[0]
     )
-    return new_row.data[0]
+    write_audit_log(supabase, company_id, user["user_id"], "update", "lease_charges", charge_id, old.data, new_row)
+
+    result = _resync_result(supabase, company_id, lease)
+    return {"charge": new_row, **result}
+
+
+@router.post("/{lease_id}/charges/{charge_id}/end")
+def end_charge(
+    lease_id: str,
+    charge_id: str,
+    payload: ChargeEnd,
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+    user: dict = Depends(get_current_user),
+):
+    """
+    Stops a charge from a given date onward (e.g. parking no longer
+    needed) -- WITHOUT deleting its history, so past invoices that already
+    billed it stay accurate. Also patches this month's invoice (if it
+    exists and has no payment against it yet) to drop or prorate-down
+    that charge.
+    """
+    lease = _lease_or_404(supabase, lease_id)
+    effective_to = payload.effective_to or date.today()
+
+    old = supabase.table("lease_charges").select("*").eq("id", charge_id).single().execute()
+    if not old.data:
+        raise HTTPException(status_code=404, detail="Charge not found")
+    if old.data.get("effective_to") is not None:
+        raise HTTPException(status_code=400, detail="This charge has already been ended")
+
+    updated = (
+        supabase.table("lease_charges")
+        .update({"effective_to": str(effective_to)})
+        .eq("id", charge_id)
+        .execute()
+        .data[0]
+    )
+    write_audit_log(
+        supabase, company_id, user["user_id"], "update", "lease_charges", charge_id,
+        old.data, {**updated, "_reason": payload.reason} if payload.reason else updated,
+    )
+
+    result = _resync_result(supabase, company_id, lease)
+    return {"charge": updated, **result}
 
 
 @router.post("/{lease_id}/terminate")

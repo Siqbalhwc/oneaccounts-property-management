@@ -1,0 +1,1165 @@
+diff --git a/006_schema_patch_021_charge_print_visibility.sql b/006_schema_patch_021_charge_print_visibility.sql
+new file mode 100644
+index 0000000..28cab8a
+--- /dev/null
++++ b/006_schema_patch_021_charge_print_visibility.sql
+@@ -0,0 +1,31 @@
++-- ============================================================================
++-- PATCH 021 — lease_charges: which charges print on the invoice PDF
++-- Run this AFTER 005_schema_patch_020_expense_paid_from_account.sql.
++-- Run this SQL step BEFORE applying the matching code patch.
++-- ============================================================================
++-- What this adds:
++--   1. lease_charges.show_on_invoice -- a checkbox at the charge level.
++--      Defaults to TRUE (every existing charge keeps printing exactly as
++--      it always has). When unchecked, the charge's amount still counts
++--      fully toward the invoice total and the ledger -- ONLY its own
++--      printed line on the PDF is hidden. Nothing about the accounting
++--      changes; this is a print-layout choice only.
++--   2. invoice_line_items.show_on_invoice -- a SNAPSHOT of that same flag,
++--      copied onto each invoice line at the moment it's generated. This
++--      matches how this schema already treats charge AMOUNTS (versioned,
++--      never retroactively rewritten) -- so if you later flip a charge's
++--      print visibility, invoices already generated keep printing exactly
++--      as they did when they were made.
++-- ============================================================================
++
++alter table lease_charges
++  add column if not exists show_on_invoice boolean not null default true;
++
++alter table invoice_line_items
++  add column if not exists show_on_invoice boolean not null default true;
++
++-- Confirm: both should show 0 rows missing a value (the "not null default
++-- true" above already backfills every existing row automatically).
++select
++  (select count(*) from lease_charges where show_on_invoice is null) as lease_charges_missing,
++  (select count(*) from invoice_line_items where show_on_invoice is null) as invoice_line_items_missing;
+diff --git a/backend/app/routers/invoices.py b/backend/app/routers/invoices.py
+index 9c56025..d64d74c 100644
+--- a/backend/app/routers/invoices.py
++++ b/backend/app/routers/invoices.py
+@@ -7,7 +7,7 @@ from supabase import Client
+ 
+ from app.core.config import settings
+ from app.core.deps import get_current_company_id, get_service_client, get_supabase
+-from app.services.ledger import get_account_for_charge_label, get_account_id, post_journal_entry, resolve_room_owner
++from app.services.invoicing import compute_prorated_charges, post_invoice_journal
+ from app.services.phone import normalize_to_whatsapp
+ 
+ router = APIRouter(prefix="/invoices", tags=["Invoices"])
+@@ -99,13 +99,13 @@ def generate_invoice_for_lease(
+     the very first invoice immediately at signing). Returns the created
+     invoice dict, or None if skipped (already invoiced this month, no active
+     charges, or the lease doesn't actually overlap this month at all).
+-    """
+-    next_month = (
+-        date(invoice_month.year + 1, 1, 1)
+-        if invoice_month.month == 12
+-        else date(invoice_month.year, invoice_month.month + 1, 1)
+-    )
+ 
++    Proration and journal-posting math live in services/invoicing.py,
++    shared with leases.py's charge add/edit/end endpoints (see
++    resync_current_month_invoice there) -- so a lease's bill is always
++    computed the exact same way, whether it's this month's fresh invoice
++    or a running one being patched after a mid-month charge change.
++    """
+     existing = (
+         supabase.table("invoices")
+         .select("id")
+@@ -129,34 +129,14 @@ def generate_invoice_for_lease(
+ 
+     prior_invoices = supabase.table("invoices").select("id").eq("lease_id", lease["id"]).execute().data
+     is_first_invoice = len(prior_invoices) == 0
+-    active_charges = charges if is_first_invoice else [c for c in charges if c.get("recurrence", "recurring") != "one_time"]
+-    if not active_charges:
+-        return None
+ 
+     lease_start = date.fromisoformat(str(lease["start_date"]))
+     lease_end = date.fromisoformat(str(lease["end_date"]))
+-    month_last_day = next_month - timedelta(days=1)
+-    overlap_start = max(lease_start, invoice_month)
+-    overlap_end = min(lease_end, month_last_day)
+-    if overlap_end < overlap_start:
++    prorated_charges = compute_prorated_charges(charges, lease_start, lease_end, invoice_month, is_first_invoice)
++    if not prorated_charges:
+         return None
+ 
+-    days_in_month = (next_month - invoice_month).days
+-    days_active = (overlap_end - overlap_start).days + 1
+-    is_full_month = days_active >= days_in_month
+-    factor = days_active / days_in_month
+-
+-    prorated_charges = []
+-    for c in active_charges:
+-        amount = float(c["amount"])
+-        if c.get("recurrence", "recurring") == "one_time" or is_full_month:
+-            final_amount = amount
+-        else:
+-            final_amount = round(amount * factor, 2)
+-        prorated_charges.append({"label": c["label"], "amount": final_amount})
+-
+     total = sum(c["amount"] for c in prorated_charges)
+-    ar_account_id = get_account_id(supabase, company_id, "1100")
+     invoice_number = generate_invoice_number(supabase, company_id, date.today())
+ 
+     inv = (
+@@ -177,54 +157,18 @@ def generate_invoice_for_lease(
+     )
+ 
+     line_items = [
+-        {"company_id": company_id, "invoice_id": inv["id"], "label": c["label"], "amount": c["amount"]}
+-        for c in prorated_charges
+-    ]
+-    supabase.table("invoice_line_items").insert(line_items).execute()
+-
+-    room = supabase.table("rooms").select("id, room_number, building_id, owner_id").eq("id", lease["room_id"]).single().execute().data
+-    building_id = room["building_id"] if room else None
+-    room_owner_id = resolve_room_owner(supabase, lease["room_id"]) if room else None
+-    tenant = supabase.table("tenants").select("full_name").eq("id", lease["tenant_id"]).single().execute().data
+-    tenant_name = tenant["full_name"] if tenant else "Tenant"
+-    room_label = room.get("room_number", "room") if room else "room"
+-
+-    credit_by_account: dict[str, dict] = {}
+-    for c in prorated_charges:
+-        account = get_account_for_charge_label(supabase, company_id, c["label"])
+-        acct_id = account["id"]
+-        if acct_id not in credit_by_account:
+-            credit_by_account[acct_id] = {"amount": 0.0, "transfers_to_owner": account["transfers_to_owner"]}
+-        credit_by_account[acct_id]["amount"] += float(c["amount"])
+-
+-    journal_lines = [
+         {
+-            "account_id": ar_account_id, "direction": "debit", "amount": total,
+-            "building_id": building_id, "room_id": lease["room_id"], "owner_id": room_owner_id,
+-            "tenant_id": lease["tenant_id"], "lease_id": lease["id"],
++            "company_id": company_id,
++            "invoice_id": inv["id"],
++            "label": c["label"],
++            "amount": c["amount"],
++            "show_on_invoice": c["show_on_invoice"],
+         }
++        for c in prorated_charges
+     ]
+-    for acct_id, info in credit_by_account.items():
+-        journal_lines.append(
+-            {
+-                "account_id": acct_id, "direction": "credit", "amount": info["amount"],
+-                "building_id": building_id, "room_id": lease["room_id"],
+-                # owner_id here means "this happened at this owner's property" --
+-                # a REPORTING tag, always set. It's a separate question from
+-                # whether the money is actually OWED to the owner, which is
+-                # determined by which account this credits (Due to Owners vs
+-                # a company income account), not by this tag's presence.
+-                "owner_id": room_owner_id,
+-                "tenant_id": lease["tenant_id"], "lease_id": lease["id"],
+-            }
+-        )
++    supabase.table("invoice_line_items").insert(line_items).execute()
+ 
+-    post_journal_entry(
+-        supabase, company_id=company_id, entry_date=str(invoice_month), source_type="invoice",
+-        source_id=inv["id"],
+-        description=f"Rent invoice — {tenant_name}, Room {room_label} — {invoice_month.strftime('%B %Y')}",
+-        lines=journal_lines,
+-    )
++    post_invoice_journal(supabase, company_id, inv, lease, prorated_charges, entry_date=invoice_month)
+ 
+     return inv
+ 
+diff --git a/backend/app/routers/leases.py b/backend/app/routers/leases.py
+index 1a6cf51..24e882b 100644
+--- a/backend/app/routers/leases.py
++++ b/backend/app/routers/leases.py
+@@ -8,6 +8,7 @@ from supabase import Client
+ from app.core.deps import get_current_company_id, get_current_user, get_supabase
+ from app.crud.generic import write_audit_log
+ from app.services.ledger import get_account_id, post_journal_entry, resolve_room_owner
++from app.services.invoicing import resync_current_month_invoice
+ from app.routers.invoices import generate_invoice_for_lease
+ 
+ router = APIRouter(prefix="/leases", tags=["Leases"])
+@@ -20,6 +21,11 @@ class LeaseCharge(BaseModel):
+     label: str
+     amount: float
+     recurrence: str = "recurring"  # 'recurring' | 'one_time' -- e.g. Rent vs a one-off Commission fee
++    # Whether this line prints on the invoice PDF. Checked by default --
++    # unchecking still counts the amount fully toward the total and the
++    # ledger, it only hides that one printed row (e.g. folding a facility
++    # quietly into the headline rent shown to the tenant).
++    show_on_invoice: bool = True
+ 
+ 
+ class LeaseCreate(BaseModel):
+@@ -45,6 +51,20 @@ class LeaseCreate(BaseModel):
+ class ChargeUpdate(BaseModel):
+     new_amount: float
+     effective_from: date | None = None  # defaults to today
++    show_on_invoice: bool | None = None  # if omitted, keeps the charge's current setting
++
++
++class ChargeAdd(BaseModel):
++    label: str
++    amount: float
++    recurrence: str = "recurring"  # 'recurring' | 'one_time'
++    effective_from: date | None = None  # defaults to today
++    show_on_invoice: bool = True
++
++
++class ChargeEnd(BaseModel):
++    effective_to: date | None = None  # defaults to today -- last day this charge still applies
++    reason: str | None = None
+ 
+ 
+ class TerminateRequest(BaseModel):
+@@ -165,6 +185,7 @@ def create_lease(
+                 "amount": c.amount,
+                 "recurrence": c.recurrence,
+                 "effective_from": str(payload.start_date),
++                "show_on_invoice": c.show_on_invoice,
+             }
+             for c in payload.charges
+         ]
+@@ -267,6 +288,93 @@ def get_active_charges(lease_id: str, supabase: Client = Depends(get_supabase)):
+     return res.data
+ 
+ 
++@router.get("/{lease_id}/charges/history")
++def get_charge_history(lease_id: str, supabase: Client = Depends(get_supabase)):
++    """Every charge row that has ever existed on this lease, including
++    closed-out ones -- powers the "History" panel on the edit-lease screen
++    so every past add/amount-change/removal is visible, not just what's
++    active right now."""
++    res = (
++        supabase.table("lease_charges")
++        .select("*")
++        .eq("lease_id", lease_id)
++        .order("effective_from")
++        .execute()
++    )
++    return res.data
++
++
++def _lease_or_404(supabase: Client, lease_id: str) -> dict:
++    lease = supabase.table("leases").select("*").eq("id", lease_id).single().execute()
++    if not lease.data:
++        raise HTTPException(status_code=404, detail="Lease not found")
++    return lease.data
++
++
++def _resync_result(supabase: Client, company_id: str, lease: dict) -> dict:
++    """Runs resync_current_month_invoice and turns the result into a plain
++    message the frontend can show directly -- "this month's invoice was
++    updated" vs "nothing to update yet"."""
++    updated_invoice = resync_current_month_invoice(supabase, company_id, lease)
++    if updated_invoice:
++        return {
++            "current_invoice_updated": True,
++            "current_invoice_id": updated_invoice["id"],
++            "current_invoice_new_total": updated_invoice["total_amount"],
++            "impact_message": (
++                f"This month's invoice was updated — new total Rs {updated_invoice['total_amount']:,.0f}. "
++                "No past invoice was changed."
++            ),
++        }
++    return {
++        "current_invoice_updated": False,
++        "current_invoice_id": None,
++        "current_invoice_new_total": None,
++        "impact_message": (
++            "This will apply starting with the next invoice generated for this lease. "
++            "No past invoice was changed. (If a current-month invoice already has a "
++            "payment recorded against it, it's left as-is on purpose.)"
++        ),
++    }
++
++
++@router.post("/{lease_id}/charges", status_code=201)
++def add_charge(
++    lease_id: str,
++    payload: ChargeAdd,
++    supabase: Client = Depends(get_supabase),
++    company_id: str = Depends(get_current_company_id),
++    user: dict = Depends(get_current_user),
++):
++    """
++    Adds a new charge to a lease at any point during its term -- e.g. a
++    tenant asks for parking starting today. Never touches past invoices;
++    if this month's invoice already exists and has no payment recorded
++    against it yet, it's recalculated to include this charge (prorated
++    for the days remaining in the month); otherwise it simply becomes
++    part of the lease's normal charge set from now on.
++    """
++    lease = _lease_or_404(supabase, lease_id)
++    if payload.recurrence not in ("recurring", "one_time"):
++        raise HTTPException(status_code=400, detail="recurrence must be 'recurring' or 'one_time'")
++
++    effective_from = payload.effective_from or date.today()
++    row = {
++        "company_id": company_id,
++        "lease_id": lease_id,
++        "label": payload.label,
++        "amount": payload.amount,
++        "recurrence": payload.recurrence,
++        "effective_from": str(effective_from),
++        "show_on_invoice": payload.show_on_invoice,
++    }
++    new_charge = supabase.table("lease_charges").insert(row).execute().data[0]
++    write_audit_log(supabase, company_id, user["user_id"], "create", "lease_charges", new_charge["id"], None, new_charge)
++
++    result = _resync_result(supabase, company_id, lease)
++    return {"charge": new_charge, **result}
++
++
+ @router.patch("/{lease_id}/charges/{charge_id}")
+ def update_charge_amount(
+     lease_id: str,
+@@ -274,12 +382,16 @@ def update_charge_amount(
+     payload: ChargeUpdate,
+     supabase: Client = Depends(get_supabase),
+     company_id: str = Depends(get_current_company_id),
++    user: dict = Depends(get_current_user),
+ ):
+     """
+     Edits a rent-component amount (e.g. water fee 1000 -> 1200) WITHOUT
+     overwriting history. Closes the old charge row and inserts a new one,
+-    so past invoices remain accurate.
++    so past invoices remain accurate. Also patches this month's invoice
++    (if it exists and has no payment against it yet) to reflect the new
++    amount going forward.
+     """
++    lease = _lease_or_404(supabase, lease_id)
+     effective_date = payload.effective_from or date.today()
+ 
+     old = (
+@@ -304,12 +416,59 @@ def update_charge_amount(
+                 "lease_id": lease_id,
+                 "label": old.data["label"],
+                 "amount": payload.new_amount,
++                "recurrence": old.data.get("recurrence", "recurring"),
+                 "effective_from": str(effective_date),
++                "show_on_invoice": payload.show_on_invoice if payload.show_on_invoice is not None else old.data.get("show_on_invoice", True),
+             }
+         )
+         .execute()
++        .data[0]
++    )
++    write_audit_log(supabase, company_id, user["user_id"], "update", "lease_charges", charge_id, old.data, new_row)
++
++    result = _resync_result(supabase, company_id, lease)
++    return {"charge": new_row, **result}
++
++
++@router.post("/{lease_id}/charges/{charge_id}/end")
++def end_charge(
++    lease_id: str,
++    charge_id: str,
++    payload: ChargeEnd,
++    supabase: Client = Depends(get_supabase),
++    company_id: str = Depends(get_current_company_id),
++    user: dict = Depends(get_current_user),
++):
++    """
++    Stops a charge from a given date onward (e.g. parking no longer
++    needed) -- WITHOUT deleting its history, so past invoices that already
++    billed it stay accurate. Also patches this month's invoice (if it
++    exists and has no payment against it yet) to drop or prorate-down
++    that charge.
++    """
++    lease = _lease_or_404(supabase, lease_id)
++    effective_to = payload.effective_to or date.today()
++
++    old = supabase.table("lease_charges").select("*").eq("id", charge_id).single().execute()
++    if not old.data:
++        raise HTTPException(status_code=404, detail="Charge not found")
++    if old.data.get("effective_to") is not None:
++        raise HTTPException(status_code=400, detail="This charge has already been ended")
++
++    updated = (
++        supabase.table("lease_charges")
++        .update({"effective_to": str(effective_to)})
++        .eq("id", charge_id)
++        .execute()
++        .data[0]
++    )
++    write_audit_log(
++        supabase, company_id, user["user_id"], "update", "lease_charges", charge_id,
++        old.data, {**updated, "_reason": payload.reason} if payload.reason else updated,
+     )
+-    return new_row.data[0]
++
++    result = _resync_result(supabase, company_id, lease)
++    return {"charge": updated, **result}
+ 
+ 
+ @router.post("/{lease_id}/terminate")
+diff --git a/backend/app/services/invoice_pdf.py b/backend/app/services/invoice_pdf.py
+index 6b42788..84ddf5c 100644
+--- a/backend/app/services/invoice_pdf.py
++++ b/backend/app/services/invoice_pdf.py
+@@ -188,6 +188,11 @@ def render_invoice_pdf(ctx: dict) -> bytes:
+ 
+     c.setFont("Helvetica", 10)
+     for item in line_items:
++        # A charge can be unchecked from "print on PDF" (e.g. a facility
++        # rolled quietly into the headline rent) -- it still counts fully
++        # toward the total below, only its own printed row is skipped.
++        if item.get("show_on_invoice", True) is False:
++            continue
+         amount = float(item["amount"])
+         y -= 7 * mm
+         c.drawString(20 * mm, y, item["label"])
+diff --git a/backend/app/services/invoicing.py b/backend/app/services/invoicing.py
+new file mode 100644
+index 0000000..479d806
+--- /dev/null
++++ b/backend/app/services/invoicing.py
+@@ -0,0 +1,250 @@
++"""
++Shared invoice math, used by BOTH:
++  - invoices.py's monthly generation (creating a brand new invoice)
++  - leases.py's charge add/edit/end endpoints (patching an invoice that's
++    still a draft, i.e. no payment has been recorded against it yet)
++
++Pulling this into one place means both paths always prorate and total a
++month's charges the exact same way -- there's no risk of the "add a
++charge" path drifting out of sync with what monthly generation would have
++produced anyway.
++"""
++from datetime import date, timedelta
++from typing import Optional
++
++from supabase import Client
++
++from app.services.ledger import get_account_for_charge_label, get_account_id, post_journal_entry, reverse_journal_entry
++
++
++def compute_prorated_charges(
++    charges: list[dict],
++    lease_start: date,
++    lease_end: date,
++    invoice_month: date,
++    is_first_invoice: bool,
++) -> list[dict]:
++    """
++    Given a lease's charge rows (each with label/amount/recurrence, and
++    optionally show_on_invoice/id) plus the lease's own start/end dates,
++    works out what should actually be billed for invoice_month --
++    prorating any charge that doesn't cover the full month, and (after the
++    first invoice) dropping one_time charges since those only ever bill
++    once, at signing.
++
++    Returns a list of dicts: {charge_id, label, amount, show_on_invoice}
++    -- ready to become invoice_line_items rows.
++    """
++    next_month = (
++        date(invoice_month.year + 1, 1, 1)
++        if invoice_month.month == 12
++        else date(invoice_month.year, invoice_month.month + 1, 1)
++    )
++    month_last_day = next_month - timedelta(days=1)
++    overlap_start = max(lease_start, invoice_month)
++    overlap_end = min(lease_end, month_last_day)
++    if overlap_end < overlap_start:
++        return []
++
++    days_in_month = (next_month - invoice_month).days
++    days_active = (overlap_end - overlap_start).days + 1
++    is_full_month = days_active >= days_in_month
++    factor = days_active / days_in_month
++
++    active_charges = charges if is_first_invoice else [c for c in charges if c.get("recurrence", "recurring") != "one_time"]
++
++    result = []
++    for c in active_charges:
++        # A charge that started or ended partway through this same month
++        # (e.g. parking added on the 20th) gets its OWN, narrower overlap
++        # window layered on top of the lease-wide one, so it's only billed
++        # for the days it was actually in effect.
++        charge_start = date.fromisoformat(str(c["effective_from"])) if c.get("effective_from") else lease_start
++        charge_end = date.fromisoformat(str(c["effective_to"])) if c.get("effective_to") else lease_end
++        c_overlap_start = max(overlap_start, charge_start)
++        c_overlap_end = min(overlap_end, charge_end)
++        if c_overlap_end < c_overlap_start:
++            continue  # this charge wasn't in effect at all during the billed period
++
++        amount = float(c["amount"])
++        if c.get("recurrence", "recurring") == "one_time" or (is_full_month and c_overlap_start == overlap_start and c_overlap_end == overlap_end):
++            final_amount = amount
++        else:
++            c_days_active = (c_overlap_end - c_overlap_start).days + 1
++            final_amount = round(amount * (c_days_active / days_in_month), 2)
++
++        result.append({
++            "charge_id": c.get("id"),
++            "label": c["label"],
++            "amount": final_amount,
++            "show_on_invoice": c.get("show_on_invoice", True),
++        })
++    return result
++
++
++def post_invoice_journal(supabase: Client, company_id: str, invoice: dict, lease: dict, prorated_charges: list[dict], entry_date: date):
++    """Posts (or re-posts, after a resync) the Dr A/R / Cr income-accounts
++    journal entry for one invoice, tagged with building/room/owner/tenant/
++    lease exactly like every other journal entry in this system."""
++    total = sum(c["amount"] for c in prorated_charges)
++    ar_account_id = get_account_id(supabase, company_id, "1100")
++
++    room = supabase.table("rooms").select("id, room_number, building_id, owner_id").eq("id", lease["room_id"]).single().execute().data
++    building_id = room["building_id"] if room else None
++    room_owner_id = resolve_room_owner_safe(supabase, lease["room_id"])
++    tenant = supabase.table("tenants").select("full_name").eq("id", lease["tenant_id"]).single().execute().data
++    tenant_name = tenant["full_name"] if tenant else "Tenant"
++    room_label = room.get("room_number", "room") if room else "room"
++    invoice_month = date.fromisoformat(str(invoice["invoice_month"]))
++
++    credit_by_account: dict[str, dict] = {}
++    for c in prorated_charges:
++        account = get_account_for_charge_label(supabase, company_id, c["label"])
++        acct_id = account["id"]
++        if acct_id not in credit_by_account:
++            credit_by_account[acct_id] = {"amount": 0.0}
++        credit_by_account[acct_id]["amount"] += float(c["amount"])
++
++    journal_lines = [
++        {
++            "account_id": ar_account_id, "direction": "debit", "amount": total,
++            "building_id": building_id, "room_id": lease["room_id"], "owner_id": room_owner_id,
++            "tenant_id": lease["tenant_id"], "lease_id": lease["id"],
++        }
++    ]
++    for acct_id, info in credit_by_account.items():
++        journal_lines.append(
++            {
++                "account_id": acct_id, "direction": "credit", "amount": info["amount"],
++                "building_id": building_id, "room_id": lease["room_id"],
++                "owner_id": room_owner_id,
++                "tenant_id": lease["tenant_id"], "lease_id": lease["id"],
++            }
++        )
++
++    post_journal_entry(
++        supabase, company_id=company_id, entry_date=str(entry_date), source_type="invoice",
++        source_id=invoice["id"],
++        description=f"Rent invoice — {tenant_name}, Room {room_label} — {invoice_month.strftime('%B %Y')}",
++        lines=journal_lines,
++    )
++    return total
++
++
++def resolve_room_owner_safe(supabase: Client, room_id: str) -> Optional[str]:
++    from app.services.ledger import resolve_room_owner
++    return resolve_room_owner(supabase, room_id)
++
++
++def resync_current_month_invoice(supabase: Client, company_id: str, lease: dict) -> Optional[dict]:
++    """
++    Called right after a lease charge is added / ended / amount-changed.
++    If this lease already has an invoice for the CURRENT calendar month
++    and it's still a draft (i.e. nobody has paid anything against it yet),
++    fully recomputes that invoice from the lease's charges as they now
++    stand -- deletes and reinserts its line items, reverses its old
++    journal entry, and posts a fresh one for the corrected total.
++
++    Deliberately does NOT touch an invoice that already has a payment
++    recorded (status 'partial' or 'paid') -- reworking a bill someone has
++    already started paying against is a judgement call for a human, not
++    something to silently rewrite. In that case this returns None and the
++    change only takes effect starting with the next invoice generated.
++
++    Returns the updated invoice dict, or None if there was nothing to
++    resync (no current-month invoice yet, or it's not a draft anymore).
++    """
++    today = date.today()
++    month_start = today.replace(day=1)
++
++    invoice = (
++        supabase.table("invoices")
++        .select("*")
++        .eq("lease_id", lease["id"])
++        .eq("invoice_month", str(month_start))
++        .execute()
++        .data
++    )
++    if not invoice:
++        return None
++    invoice = invoice[0]
++    if invoice["status"] != "draft":
++        return None  # already has a payment recorded -- don't touch it
++
++    charges = (
++        supabase.table("lease_charges")
++        .select("*")
++        .eq("lease_id", lease["id"])
++        .execute()
++        .data
++    )
++    # "Currently relevant to this invoice's month" -- either still open
++    # (effective_to null) or was open at some point during this month.
++    relevant = [
++        c for c in charges
++        if date.fromisoformat(str(c["effective_from"])) <= (
++            date(month_start.year + 1, 1, 1) - timedelta(days=1) if month_start.month == 12
++            else date(month_start.year, month_start.month + 1, 1) - timedelta(days=1)
++        )
++        and (c.get("effective_to") is None or date.fromisoformat(str(c["effective_to"])) >= month_start)
++    ]
++
++    prior_invoices = (
++        supabase.table("invoices")
++        .select("id")
++        .eq("lease_id", lease["id"])
++        .lt("invoice_month", str(month_start))
++        .execute()
++        .data
++    )
++    is_first_invoice = len(prior_invoices) == 0
++
++    lease_start = date.fromisoformat(str(lease["start_date"]))
++    lease_end = date.fromisoformat(str(lease["end_date"]))
++    prorated = compute_prorated_charges(relevant, lease_start, lease_end, month_start, is_first_invoice)
++
++    # Reverse EVERY currently-live journal entry for this invoice before
++    # re-posting -- not just "the" entry, since a second resync would
++    # otherwise find both the correction from last time AND its own
++    # now-live reversal-of-the-original sitting there, and only cancel
++    # one of them. Reversing all live entries first guarantees a clean
++    # zero starting point every time, no matter how many times this runs.
++    # Entries are never edited in place anywhere in this system, only
++    # reversed with an equal-and-opposite entry (see reference doc).
++    live_entries = (
++        supabase.table("journal_entries")
++        .select("id")
++        .eq("source_type", "invoice")
++        .eq("source_id", invoice["id"])
++        .eq("status", "posted")
++        .execute()
++        .data
++    )
++    for entry in live_entries:
++        reverse_journal_entry(supabase, company_id, entry["id"], reason="Lease charges changed — invoice recalculated")
++
++    supabase.table("invoice_line_items").delete().eq("invoice_id", invoice["id"]).execute()
++    if prorated:
++        supabase.table("invoice_line_items").insert(
++            [
++                {
++                    "company_id": company_id,
++                    "invoice_id": invoice["id"],
++                    "label": c["label"],
++                    "amount": c["amount"],
++                    "show_on_invoice": c["show_on_invoice"],
++                }
++                for c in prorated
++            ]
++        ).execute()
++
++    new_total = post_invoice_journal(supabase, company_id, invoice, lease, prorated, entry_date=today) if prorated else 0.0
++
++    updated = (
++        supabase.table("invoices")
++        .update({"total_amount": new_total})
++        .eq("id", invoice["id"])
++        .execute()
++        .data[0]
++    )
++    return updated
+diff --git a/frontend/app/(dashboard)/leases/new/page.tsx b/frontend/app/(dashboard)/leases/new/page.tsx
+index 9b5d40d..eaffffd 100644
+--- a/frontend/app/(dashboard)/leases/new/page.tsx
++++ b/frontend/app/(dashboard)/leases/new/page.tsx
+@@ -7,7 +7,7 @@ import { Card } from "@/components/ui/Card";
+ import { Field, Input, Select, AmountInput } from "@/components/ui/Field";
+ import { Button } from "@/components/ui/Button";
+ 
+-type Charge = { label: string; amount: string; recurrence: "recurring" | "one_time"; account_id: string };
++type Charge = { label: string; amount: string; recurrence: "recurring" | "one_time"; account_id: string; show_on_invoice: boolean };
+ type ChargeMapping = { label: string; account_id: string };
+ type LeaseSummary = { tenant_id: string; status: string; room_id: string };
+ 
+@@ -17,14 +17,14 @@ const STEPS = ["Tenant & room", "Rent structure", "Security deposit", "Review"]
+ // every row (label, amount, recurrence, account) is editable, and any row
+ // (including these) can be removed. Add more via "+ Add another fee".
+ const DEFAULT_CHARGES: Charge[] = [
+-  { label: "Rent", amount: "", recurrence: "recurring", account_id: "" },
+-  { label: "Electricity", amount: "", recurrence: "recurring", account_id: "" },
+-  { label: "Water", amount: "", recurrence: "recurring", account_id: "" },
+-  { label: "Gas", amount: "", recurrence: "recurring", account_id: "" },
+-  { label: "Parking", amount: "", recurrence: "recurring", account_id: "" },
+-  { label: "Internet", amount: "", recurrence: "recurring", account_id: "" },
+-  { label: "Service", amount: "", recurrence: "recurring", account_id: "" },
+-  { label: "Other", amount: "", recurrence: "recurring", account_id: "" },
++  { label: "Rent", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
++  { label: "Electricity", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
++  { label: "Water", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
++  { label: "Gas", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
++  { label: "Parking", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
++  { label: "Internet", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
++  { label: "Service", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
++  { label: "Other", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
+ ];
+ 
+ function formatPkr(n: number) {
+@@ -113,8 +113,12 @@ export default function NewLeasePage() {
+     );
+   }
+ 
++  function toggleChargeShowOnInvoice(index: number, value: boolean) {
++    setCharges((prev) => prev.map((c, i) => (i === index ? { ...c, show_on_invoice: value } : c)));
++  }
++
+   function addCustomCharge() {
+-    setCharges((prev) => [...prev, { label: "", amount: "", recurrence: "recurring", account_id: "" }]);
++    setCharges((prev) => [...prev, { label: "", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true }]);
+   }
+ 
+   // Once existing charge-label -> account mappings load, auto-fill any
+@@ -158,6 +162,7 @@ export default function NewLeasePage() {
+           label: c.label,
+           amount: parseFloat(c.amount),
+           recurrence: c.recurrence,
++          show_on_invoice: c.show_on_invoice,
+         })),
+         security_deposit_amount: parseFloat(depositAmount || "0"),
+         security_deposit_date_received: depositDate || startDate,
+@@ -369,6 +374,14 @@ export default function NewLeasePage() {
+                       </Button>
+                     </div>
+                   </div>
++                  <label className="flex items-center gap-2 text-xs text-ink/50 mt-2">
++                    <input
++                      type="checkbox"
++                      checked={c.show_on_invoice}
++                      onChange={(e) => toggleChargeShowOnInvoice(i, e.target.checked)}
++                    />
++                    Print this line on the invoice PDF (unchecking still counts it in the total)
++                  </label>
+                 </div>
+               );
+             })}
+diff --git a/frontend/app/(dashboard)/leases/page.tsx b/frontend/app/(dashboard)/leases/page.tsx
+index 7be4237..24426ee 100644
+--- a/frontend/app/(dashboard)/leases/page.tsx
++++ b/frontend/app/(dashboard)/leases/page.tsx
+@@ -10,6 +10,17 @@ import { Modal } from "@/components/ui/Modal";
+ import { HistoryPanel } from "@/components/ui/HistoryPanel";
+ import { Field, Input, Select } from "@/components/ui/Field";
+ 
++type LeaseCharge = {
++  id: string;
++  lease_id: string;
++  label: string;
++  amount: number;
++  recurrence: "recurring" | "one_time";
++  effective_from: string;
++  effective_to?: string | null;
++  show_on_invoice: boolean;
++};
++
+ export default function LeasesPage() {
+   const [leases, setLeases] = useState<Lease[] | null>(null);
+   const [tenants, setTenants] = useState<Tenant[] | null>(null);
+@@ -23,6 +34,24 @@ export default function LeasesPage() {
+   const [editForm, setEditForm] = useState({ start_date: "", end_date: "" });
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState<string | null>(null);
++  const [search, setSearch] = useState("");
++
++  // --- Charges (add / edit amount / end) ---
++  const [activeCharges, setActiveCharges] = useState<LeaseCharge[] | null>(null);
++  const [chargeHistory, setChargeHistory] = useState<LeaseCharge[] | null>(null);
++  const [chargeImpactMessage, setChargeImpactMessage] = useState<string | null>(null);
++  const [chargeError, setChargeError] = useState<string | null>(null);
++  const [chargeActionBusy, setChargeActionBusy] = useState(false);
++  const [editingChargeId, setEditingChargeId] = useState<string | null>(null);
++  const [editChargeForm, setEditChargeForm] = useState({ new_amount: "", effective_from: new Date().toISOString().slice(0, 10), show_on_invoice: true });
++  const [addChargeOpen, setAddChargeOpen] = useState(false);
++  const [addChargeForm, setAddChargeForm] = useState({
++    label: "",
++    amount: "",
++    recurrence: "recurring" as "recurring" | "one_time",
++    effective_from: new Date().toISOString().slice(0, 10),
++    show_on_invoice: true,
++  });
+ 
+   const [receiveModalOpen, setReceiveModalOpen] = useState(false);
+   const [receivingDeposit, setReceivingDeposit] = useState<SecurityDeposit | null>(null);
+@@ -95,13 +124,103 @@ export default function LeasesPage() {
+     }
+   }
+ 
++  function loadCharges(leaseId: string) {
++    api.get<LeaseCharge[]>(`/leases/${leaseId}/charges`).then(setActiveCharges);
++    api.get<LeaseCharge[]>(`/leases/${leaseId}/charges/history`).then(setChargeHistory);
++  }
++
+   function openEditModal(lease: Lease) {
+     setEditingLease(lease);
+     setEditForm({ start_date: lease.start_date, end_date: lease.end_date });
+     setError(null);
++    setChargeError(null);
++    setChargeImpactMessage(null);
++    setEditingChargeId(null);
++    setAddChargeOpen(false);
++    loadCharges(lease.id);
+     setEditModalOpen(true);
+   }
+ 
++  async function handleAddCharge(e: React.FormEvent) {
++    e.preventDefault();
++    if (!editingLease) return;
++    setChargeActionBusy(true);
++    setChargeError(null);
++    try {
++      const res = await api.post<{ impact_message: string }>(`/leases/${editingLease.id}/charges`, {
++        label: addChargeForm.label,
++        amount: parseFloat(addChargeForm.amount),
++        recurrence: addChargeForm.recurrence,
++        effective_from: addChargeForm.effective_from,
++        show_on_invoice: addChargeForm.show_on_invoice,
++      });
++      setChargeImpactMessage(res.impact_message);
++      setAddChargeOpen(false);
++      setAddChargeForm({ label: "", amount: "", recurrence: "recurring", effective_from: new Date().toISOString().slice(0, 10), show_on_invoice: true });
++      loadCharges(editingLease.id);
++    } catch (err: any) {
++      setChargeError(err.message);
++    } finally {
++      setChargeActionBusy(false);
++    }
++  }
++
++  function openEditCharge(charge: LeaseCharge) {
++    setEditingChargeId(charge.id);
++    setEditChargeForm({
++      new_amount: String(charge.amount),
++      effective_from: new Date().toISOString().slice(0, 10),
++      show_on_invoice: charge.show_on_invoice,
++    });
++    setChargeError(null);
++  }
++
++  async function handleSaveChargeAmount(e: React.FormEvent) {
++    e.preventDefault();
++    if (!editingLease || !editingChargeId) return;
++    setChargeActionBusy(true);
++    setChargeError(null);
++    try {
++      const res = await api.patch<{ impact_message: string }>(`/leases/${editingLease.id}/charges/${editingChargeId}`, {
++        new_amount: parseFloat(editChargeForm.new_amount),
++        effective_from: editChargeForm.effective_from,
++        show_on_invoice: editChargeForm.show_on_invoice,
++      });
++      setChargeImpactMessage(res.impact_message);
++      setEditingChargeId(null);
++      loadCharges(editingLease.id);
++    } catch (err: any) {
++      setChargeError(err.message);
++    } finally {
++      setChargeActionBusy(false);
++    }
++  }
++
++  async function handleEndCharge(charge: LeaseCharge) {
++    if (!editingLease) return;
++    if (!confirm(`End "${charge.label}" today? It will no longer appear on future invoices, but every invoice that already billed it stays exactly as it was.`)) return;
++    setChargeActionBusy(true);
++    setChargeError(null);
++    try {
++      const res = await api.post<{ impact_message: string }>(`/leases/${editingLease.id}/charges/${charge.id}/end`, {});
++      setChargeImpactMessage(res.impact_message);
++      loadCharges(editingLease.id);
++    } catch (err: any) {
++      setChargeError(err.message);
++    } finally {
++      setChargeActionBusy(false);
++    }
++  }
++
++  const filteredLeases = (leases ?? []).filter((l) => {
++    if (!search.trim()) return true;
++    const q = search.trim().toLowerCase();
++    return (
++      tenantName(l.tenant_id).toLowerCase().includes(q) ||
++      roomAndBuilding(l.room_id).toLowerCase().includes(q)
++    );
++  });
++
+   async function handleSave(e: React.FormEvent) {
+     e.preventDefault();
+     if (!editingLease) return;
+@@ -134,9 +253,17 @@ export default function LeasesPage() {
+       </div>
+ 
+       <Card>
++        <div className="flex items-center justify-between mb-4 no-print gap-3 flex-wrap">
++          <Input
++            value={search}
++            onChange={(e) => setSearch(e.target.value)}
++            placeholder="Search by tenant, building, or room…"
++            className="max-w-xs"
++          />
++        </div>
+         <DataTable
+           keyField="id"
+-          rows={leases ?? []}
++          rows={filteredLeases}
+           emptyMessage="No leases yet — create one to get started."
+           columns={[
+             { header: "Tenant", accessor: (l) => <span className="font-medium">{tenantName(l.tenant_id)}</span> },
+@@ -184,7 +311,7 @@ export default function LeasesPage() {
+               header: "",
+               accessor: (l) => (
+                 <Button variant="ghost" onClick={() => openEditModal(l)} className="no-print">
+-                  Edit dates
++                  Edit lease
+                 </Button>
+               ),
+               align: "right",
+@@ -193,45 +320,214 @@ export default function LeasesPage() {
+         />
+       </Card>
+ 
+-      <Modal open={editModalOpen} onClose={() => setEditModalOpen(false)} title="Edit lease dates">
+-        <form onSubmit={handleSave} className="space-y-4">
++      <Modal open={editModalOpen} onClose={() => setEditModalOpen(false)} title="Edit lease">
++        <div className="space-y-6">
+           <p className="text-xs text-ink/50">
+             {editingLease && tenantName(editingLease.tenant_id)} — {editingLease && roomAndBuilding(editingLease.room_id)}
+           </p>
+-          <div className="grid grid-cols-2 gap-4">
+-            <Field label="Start date">
+-              <Input
+-                type="date"
+-                required
+-                value={editForm.start_date}
+-                onChange={(e) => setEditForm({ ...editForm, start_date: e.target.value })}
+-              />
+-            </Field>
+-            <Field label="End date">
+-              <Input
+-                type="date"
+-                required
+-                value={editForm.end_date}
+-                onChange={(e) => setEditForm({ ...editForm, end_date: e.target.value })}
+-              />
+-            </Field>
+-          </div>
+-          {error && <p className="text-sm text-stamp-red">{error}</p>}
+-          <div className="flex justify-end gap-2 pt-2">
+-            <Button type="button" variant="ghost" onClick={() => setEditModalOpen(false)}>
+-              Cancel
+-            </Button>
+-            <Button type="submit" disabled={saving}>
+-              {saving ? "Saving…" : "Save changes"}
+-            </Button>
++
++          {/* --- Dates --- */}
++          <form onSubmit={handleSave} className="space-y-3">
++            <p className="text-xs uppercase tracking-wider text-ink/45">Dates</p>
++            <div className="grid grid-cols-2 gap-4">
++              <Field label="Start date">
++                <Input
++                  type="date"
++                  required
++                  value={editForm.start_date}
++                  onChange={(e) => setEditForm({ ...editForm, start_date: e.target.value })}
++                />
++              </Field>
++              <Field label="End date">
++                <Input
++                  type="date"
++                  required
++                  value={editForm.end_date}
++                  onChange={(e) => setEditForm({ ...editForm, end_date: e.target.value })}
++                />
++              </Field>
++            </div>
++            <p className="text-xs text-ink/40">
++              Any date is fine, including shortening a lease down to a single month — there&apos;s no minimum term.
++            </p>
++            {error && <p className="text-sm text-stamp-red">{error}</p>}
++            <div className="flex justify-end">
++              <Button type="submit" disabled={saving}>
++                {saving ? "Saving…" : "Save dates"}
++              </Button>
++            </div>
++          </form>
++
++          {/* --- Charges --- */}
++          <div className="pt-4 border-t border-border space-y-3">
++            <div className="flex items-center justify-between">
++              <p className="text-xs uppercase tracking-wider text-ink/45">Charges</p>
++              <Button type="button" variant="secondary" onClick={() => setAddChargeOpen((v) => !v)}>
++                {addChargeOpen ? "Cancel" : "+ Add charge"}
++              </Button>
++            </div>
++
++            {chargeImpactMessage && (
++              <p className="text-xs bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2 text-ink/70">
++                {chargeImpactMessage}
++              </p>
++            )}
++            {chargeError && <p className="text-sm text-stamp-red">{chargeError}</p>}
++
++            {addChargeOpen && (
++              <form onSubmit={handleAddCharge} className="space-y-3 bg-ledger/5 border border-ledger/15 rounded-card p-3">
++                <div className="grid grid-cols-2 gap-3">
++                  <Field label="Label">
++                    <Input
++                      required
++                      placeholder="e.g. Parking"
++                      value={addChargeForm.label}
++                      onChange={(e) => setAddChargeForm({ ...addChargeForm, label: e.target.value })}
++                    />
++                  </Field>
++                  <Field label="Amount">
++                    <Input
++                      type="number"
++                      required
++                      value={addChargeForm.amount}
++                      onChange={(e) => setAddChargeForm({ ...addChargeForm, amount: e.target.value })}
++                    />
++                  </Field>
++                </div>
++                <div className="grid grid-cols-2 gap-3">
++                  <Field label="Recurrence">
++                    <Select
++                      value={addChargeForm.recurrence}
++                      onChange={(e) => setAddChargeForm({ ...addChargeForm, recurrence: e.target.value as "recurring" | "one_time" })}
++                    >
++                      <option value="recurring">Recurring (every invoice)</option>
++                      <option value="one_time">One-time (this invoice only)</option>
++                    </Select>
++                  </Field>
++                  <Field label="Starts from">
++                    <Input
++                      type="date"
++                      required
++                      value={addChargeForm.effective_from}
++                      onChange={(e) => setAddChargeForm({ ...addChargeForm, effective_from: e.target.value })}
++                    />
++                  </Field>
++                </div>
++                <label className="flex items-center gap-2 text-xs text-ink/60">
++                  <input
++                    type="checkbox"
++                    checked={addChargeForm.show_on_invoice}
++                    onChange={(e) => setAddChargeForm({ ...addChargeForm, show_on_invoice: e.target.checked })}
++                  />
++                  Print this line on the invoice PDF
++                </label>
++                <div className="flex justify-end">
++                  <Button type="submit" disabled={chargeActionBusy}>
++                    {chargeActionBusy ? "Adding…" : "Add charge"}
++                  </Button>
++                </div>
++              </form>
++            )}
++
++            <div className="space-y-2">
++              {activeCharges === null && <p className="text-xs text-ink/40">Loading charges…</p>}
++              {activeCharges?.length === 0 && <p className="text-xs text-ink/40">No active charges.</p>}
++              {activeCharges?.map((c) =>
++                editingChargeId === c.id ? (
++                  <form
++                    key={c.id}
++                    onSubmit={handleSaveChargeAmount}
++                    className="space-y-2 bg-ledger/5 border border-ledger/15 rounded-card p-3"
++                  >
++                    <p className="text-sm font-medium">{c.label}</p>
++                    <div className="grid grid-cols-2 gap-3">
++                      <Field label="New amount">
++                        <Input
++                          type="number"
++                          required
++                          value={editChargeForm.new_amount}
++                          onChange={(e) => setEditChargeForm({ ...editChargeForm, new_amount: e.target.value })}
++                        />
++                      </Field>
++                      <Field label="Effective from">
++                        <Input
++                          type="date"
++                          required
++                          value={editChargeForm.effective_from}
++                          onChange={(e) => setEditChargeForm({ ...editChargeForm, effective_from: e.target.value })}
++                        />
++                      </Field>
++                    </div>
++                    <label className="flex items-center gap-2 text-xs text-ink/60">
++                      <input
++                        type="checkbox"
++                        checked={editChargeForm.show_on_invoice}
++                        onChange={(e) => setEditChargeForm({ ...editChargeForm, show_on_invoice: e.target.checked })}
++                      />
++                      Print this line on the invoice PDF
++                    </label>
++                    <p className="text-xs text-ink/40">
++                      The old amount stays on every invoice already generated — this only changes what&apos;s billed from {editChargeForm.effective_from || "today"} onward.
++                    </p>
++                    <div className="flex justify-end gap-2">
++                      <Button type="button" variant="ghost" onClick={() => setEditingChargeId(null)}>
++                        Cancel
++                      </Button>
++                      <Button type="submit" disabled={chargeActionBusy}>
++                        {chargeActionBusy ? "Saving…" : "Save"}
++                      </Button>
++                    </div>
++                  </form>
++                ) : (
++                  <div key={c.id} className="flex items-center justify-between bg-paper border border-border rounded-card px-3 py-2">
++                    <div>
++                      <p className="text-sm font-medium">
++                        {c.label}
++                        {!c.show_on_invoice && <span className="ml-2 text-xs text-ink/40">(hidden on PDF)</span>}
++                        {c.recurrence === "one_time" && <span className="ml-2 text-xs text-ink/40">(one-time)</span>}
++                      </p>
++                      <p className="text-xs text-ink/50 figures">Rs {Number(c.amount).toLocaleString("en-PK")} · since {c.effective_from}</p>
++                    </div>
++                    <div className="flex gap-2 no-print">
++                      <Button type="button" variant="ghost" onClick={() => openEditCharge(c)}>
++                        Edit
++                      </Button>
++                      <Button type="button" variant="ghost" onClick={() => handleEndCharge(c)} disabled={chargeActionBusy}>
++                        End
++                      </Button>
++                    </div>
++                  </div>
++                )
++              )}
++            </div>
++
++            {chargeHistory && chargeHistory.length > (activeCharges?.length ?? 0) && (
++              <details className="text-xs text-ink/50">
++                <summary className="cursor-pointer select-none">Full charge history (including ended charges)</summary>
++                <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto">
++                  {chargeHistory.map((c) => (
++                    <div key={c.id} className="border-l-2 border-border pl-2">
++                      {c.label} — Rs {Number(c.amount).toLocaleString("en-PK")} — {c.effective_from} to {c.effective_to ?? "present"}
++                    </div>
++                  ))}
++                </div>
++              </details>
++            )}
+           </div>
++
+           {editingLease && (
+             <div className="pt-4 border-t border-border">
+-              <p className="text-xs uppercase tracking-wider text-ink/45 mb-2">History</p>
++              <p className="text-xs uppercase tracking-wider text-ink/45 mb-2">Lease record history</p>
+               <HistoryPanel tableName="leases" recordId={editingLease.id} />
+             </div>
+           )}
+-        </form>
++
++          <div className="flex justify-end pt-2 border-t border-border">
++            <Button type="button" variant="ghost" onClick={() => setEditModalOpen(false)}>
++              Close
++            </Button>
++          </div>
++        </div>
+       </Modal>
+ 
+       <Modal open={receiveModalOpen} onClose={() => setReceiveModalOpen(false)} title="Record security deposit receipt">

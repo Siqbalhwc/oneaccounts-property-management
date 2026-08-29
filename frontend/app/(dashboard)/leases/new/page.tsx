@@ -7,7 +7,7 @@ import { Card } from "@/components/ui/Card";
 import { Field, Input, Select, AmountInput } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
 
-type Charge = { label: string; amount: string; recurrence: "recurring" | "one_time"; account_id: string };
+type Charge = { label: string; amount: string; recurrence: "recurring" | "one_time"; account_id: string; show_on_invoice: boolean };
 type ChargeMapping = { label: string; account_id: string };
 type LeaseSummary = { tenant_id: string; status: string; room_id: string };
 
@@ -17,14 +17,14 @@ const STEPS = ["Tenant & room", "Rent structure", "Security deposit", "Review"] 
 // every row (label, amount, recurrence, account) is editable, and any row
 // (including these) can be removed. Add more via "+ Add another fee".
 const DEFAULT_CHARGES: Charge[] = [
-  { label: "Rent", amount: "", recurrence: "recurring", account_id: "" },
-  { label: "Electricity", amount: "", recurrence: "recurring", account_id: "" },
-  { label: "Water", amount: "", recurrence: "recurring", account_id: "" },
-  { label: "Gas", amount: "", recurrence: "recurring", account_id: "" },
-  { label: "Parking", amount: "", recurrence: "recurring", account_id: "" },
-  { label: "Internet", amount: "", recurrence: "recurring", account_id: "" },
-  { label: "Service", amount: "", recurrence: "recurring", account_id: "" },
-  { label: "Other", amount: "", recurrence: "recurring", account_id: "" },
+  { label: "Rent", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
+  { label: "Electricity", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
+  { label: "Water", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
+  { label: "Gas", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
+  { label: "Parking", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
+  { label: "Internet", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
+  { label: "Service", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
+  { label: "Other", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
 ];
 
 function formatPkr(n: number) {
@@ -113,8 +113,12 @@ export default function NewLeasePage() {
     );
   }
 
+  function toggleChargeShowOnInvoice(index: number, value: boolean) {
+    setCharges((prev) => prev.map((c, i) => (i === index ? { ...c, show_on_invoice: value } : c)));
+  }
+
   function addCustomCharge() {
-    setCharges((prev) => [...prev, { label: "", amount: "", recurrence: "recurring", account_id: "" }]);
+    setCharges((prev) => [...prev, { label: "", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true }]);
   }
 
   // Once existing charge-label -> account mappings load, auto-fill any
@@ -158,6 +162,7 @@ export default function NewLeasePage() {
           label: c.label,
           amount: parseFloat(c.amount),
           recurrence: c.recurrence,
+          show_on_invoice: c.show_on_invoice,
         })),
         security_deposit_amount: parseFloat(depositAmount || "0"),
         security_deposit_date_received: depositDate || startDate,
@@ -369,6 +374,14 @@ export default function NewLeasePage() {
                       </Button>
                     </div>
                   </div>
+                  <label className="flex items-center gap-2 text-xs text-ink/50 mt-2">
+                    <input
+                      type="checkbox"
+                      checked={c.show_on_invoice}
+                      onChange={(e) => toggleChargeShowOnInvoice(i, e.target.checked)}
+                    />
+                    Print this line on the invoice PDF (unchecking still counts it in the total)
+                  </label>
                 </div>
               );
             })}
