@@ -4,11 +4,12 @@ import { useEffect, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { Card, DataTable } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Field, Input } from "@/components/ui/Field";
+import { Field, Input, Select } from "@/components/ui/Field";
 import { api } from "@/lib/api";
 
 type Account = { id: string; code: string; name: string };
 type Owner = { id: string; name: string };
+type Tenant = { id: string; full_name: string };
 type LedgerRow = {
   entry_date: string;
   description?: string;
@@ -33,6 +34,8 @@ function LedgerPageInner() {
 
   const [account, setAccount] = useState<Account | null>(null);
   const [owner, setOwner] = useState<Owner | null>(null);
+  const [tenants, setTenants] = useState<Tenant[]>([]);
+  const [tenantId, setTenantId] = useState(searchParams.get("tenant_id") ?? "");
   const [rows, setRows] = useState<LedgerRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,6 +48,7 @@ function LedgerPageInner() {
     if (dateFrom) params.set("date_from", dateFrom);
     if (dateTo) params.set("date_to", dateTo);
     if (ownerIdParam) params.set("owner_id", ownerIdParam);
+    if (tenantId) params.set("tenant_id", tenantId);
     api
       .get<LedgerRow[]>(`/financials/general-ledger/${accountId}?${params.toString()}`)
       .then(setRows)
@@ -54,18 +58,29 @@ function LedgerPageInner() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountId, ownerIdParam, dateFrom, dateTo]);
+  }, [accountId, ownerIdParam, tenantId, dateFrom, dateTo]);
 
   useEffect(() => {
     api.get<Account[]>("/chart-of-accounts").then((accounts) => {
       setAccount(accounts.find((a) => a.id === accountId) ?? null);
     });
+    api.get<Tenant[]>("/tenants").then(setTenants);
     if (ownerIdParam) {
       api.get<Owner[]>("/owners").then((owners) => {
         setOwner(owners.find((o) => o.id === ownerIdParam) ?? null);
       });
     }
   }, [accountId, ownerIdParam]);
+
+  function handleTenantChange(value: string) {
+    setTenantId(value);
+    const params = new URLSearchParams(searchParams.toString());
+    if (value) params.set("tenant_id", value);
+    else params.delete("tenant_id");
+    router.replace(`/ledger?${params.toString()}`);
+  }
+
+  const selectedTenant = tenants.find((t) => t.id === tenantId);
 
   const totalDebit = (rows ?? []).filter((r) => r.direction === "debit").reduce((s, r) => s + Number(r.amount), 0);
   const totalCredit = (rows ?? []).filter((r) => r.direction === "credit").reduce((s, r) => s + Number(r.amount), 0);
@@ -95,6 +110,7 @@ function LedgerPageInner() {
           <h1 className="text-2xl font-display font-semibold">
             {account ? `${account.code} · ${account.name}` : "Ledger"}
             {owner && <span className="text-ink/50 font-normal"> — {owner.name}</span>}
+            {selectedTenant && <span className="text-ink/50 font-normal"> — {selectedTenant.full_name}</span>}
           </h1>
           <p className="text-sm text-ink/55 mt-1">Full movement on this account, in date order.</p>
         </div>
@@ -113,6 +129,16 @@ function LedgerPageInner() {
           </Field>
           <Field label="To">
             <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+          </Field>
+          <Field label="Tenant">
+            <Select value={tenantId} onChange={(e) => handleTenantChange(e.target.value)}>
+              <option value="">All tenants</option>
+              {tenants.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.full_name}
+                </option>
+              ))}
+            </Select>
           </Field>
         </div>
       </Card>

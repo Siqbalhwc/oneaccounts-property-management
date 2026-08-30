@@ -233,6 +233,7 @@ def get_general_ledger(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
     owner_id: Optional[str] = Query(None),
+    tenant_id: Optional[str] = Query(None),
     supabase: Client = Depends(get_supabase),
 ):
     """Wraps the general_ledger() SQL function -- the running balance is a
@@ -244,6 +245,7 @@ def get_general_ledger(
             "p_date_from": str(date_from) if date_from else None,
             "p_date_to": str(date_to) if date_to else None,
             "p_owner_id": owner_id,
+            "p_tenant_id": tenant_id,
         },
     ).execute()
     return result.data
