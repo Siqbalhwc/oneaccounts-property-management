@@ -21,14 +21,51 @@ class RefundRequest(BaseModel):
     refund_date: date | None = None
 
 
-class ReceiveRequest(BaseModel):
+class DepositPaymentCreate(BaseModel):
+    amount: float
     account_id: str  # which asset account (Bank, Cash, ...) actually received the money
-    received_date: date | None = None
+    payment_date: date | None = None
+
+
+def _total_paid(supabase: Client, deposit_id: str) -> float:
+    rows = (
+        supabase.table("security_deposit_payments")
+        .select("amount")
+        .eq("security_deposit_id", deposit_id)
+        .execute()
+        .data
+    )
+    return sum(float(r["amount"]) for r in rows)
+
+
+def _with_paid_totals(supabase: Client, deposits: list) -> list:
+    """Attaches amount_paid/amount_pending to each deposit row in ONE extra
+    query (not one per deposit) -- fetches every payment for the given
+    deposits at once and sums them in Python."""
+    if not deposits:
+        return deposits
+    deposit_ids = [d["id"] for d in deposits]
+    payments = (
+        supabase.table("security_deposit_payments")
+        .select("security_deposit_id, amount")
+        .in_("security_deposit_id", deposit_ids)
+        .execute()
+        .data
+    )
+    paid_by_deposit: dict = {}
+    for p in payments:
+        paid_by_deposit[p["security_deposit_id"]] = paid_by_deposit.get(p["security_deposit_id"], 0.0) + float(p["amount"])
+    for d in deposits:
+        paid = paid_by_deposit.get(d["id"], 0.0)
+        d["amount_paid"] = paid
+        d["amount_pending"] = max(float(d["amount_received"]) - paid, 0.0)
+    return deposits
 
 
 @router.get("")
 def list_deposits(supabase: Client = Depends(get_supabase)):
-    return supabase.table("security_deposits").select("*").execute().data
+    deposits = supabase.table("security_deposits").select("*").execute().data
+    return _with_paid_totals(supabase, deposits)
 
 
 @router.get("/{deposit_id}")
@@ -42,22 +79,41 @@ def get_deposit(deposit_id: str, supabase: Client = Depends(get_supabase)):
     )
     if not res.data:
         raise HTTPException(status_code=404, detail="Deposit not found")
-    return res.data
+    return _with_paid_totals(supabase, [res.data])[0]
 
 
-@router.post("/{deposit_id}/receive")
-def receive_deposit(
+@router.get("/{deposit_id}/payments")
+def list_deposit_payments(deposit_id: str, supabase: Client = Depends(get_supabase)):
+    """Every payment recorded toward this deposit so far, oldest first --
+    a tenant may pay a deposit in one go or across several installments."""
+    return (
+        supabase.table("security_deposit_payments")
+        .select("*")
+        .eq("security_deposit_id", deposit_id)
+        .order("payment_date")
+        .order("created_at")
+        .execute()
+        .data
+    )
+
+
+@router.post("/{deposit_id}/payments", status_code=201)
+def record_deposit_payment(
     deposit_id: str,
-    payload: ReceiveRequest,
+    payload: DepositPaymentCreate,
     supabase: Client = Depends(get_supabase),
     company_id: str = Depends(get_current_company_id),
 ):
     """
-    Records that a security deposit -- which wasn't collected at lease
-    signing -- has now actually been received, and posts the corresponding
-    journal entry (Dr [chosen account] / Cr Security Deposits Held). This is
-    the counterpart to leases.py's at-signing posting: exactly one of the
-    two ever fires for a given deposit, so it's never posted twice.
+    Records ONE payment toward a security deposit -- callable as many times
+    as needed, so a tenant can pay the deposit in full in one go, or in
+    several partial installments over time. Posts a journal entry for
+    exactly this payment's amount (Dr [chosen account] / Cr Security
+    Deposits Held) -- never for the deposit's full agreed amount, since
+    that may not be what actually came in yet.
+
+    Blocks any payment that would push the running total past the amount
+    agreed in the lease -- a security deposit should never be overpaid.
     """
     deposit = (
         supabase.table("security_deposits")
@@ -68,11 +124,21 @@ def receive_deposit(
     )
     if not deposit.data:
         raise HTTPException(status_code=404, detail="Deposit not found")
-    if deposit.data["is_received"]:
-        raise HTTPException(status_code=400, detail="This deposit is already marked as received.")
-    amount = float(deposit.data["amount_received"])
-    if amount <= 0:
-        raise HTTPException(status_code=400, detail="This deposit has no amount to receive.")
+
+    if payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="Payment amount must be greater than zero.")
+
+    agreed_amount = float(deposit.data["amount_received"])
+    already_paid = _total_paid(supabase, deposit_id)
+    remaining = agreed_amount - already_paid
+    if payload.amount > remaining + 0.01:  # small epsilon for float rounding
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This would exceed the agreed deposit amount of Rs {agreed_amount:,.0f}. "
+                f"Rs {remaining:,.0f} is still pending — enter that amount or less."
+            ),
+        )
 
     account = (
         supabase.table("chart_of_accounts")
@@ -85,7 +151,7 @@ def receive_deposit(
     if not account.data:
         raise HTTPException(status_code=404, detail="Account not found")
 
-    received_date = payload.received_date or date.today()
+    payment_date = payload.payment_date or date.today()
 
     lease_id = deposit.data["lease_id"]
     lease = (
@@ -106,43 +172,73 @@ def receive_deposit(
         tenant = supabase.table("tenants").select("full_name").eq("id", tenant_id).single().execute().data
         tenant_name = tenant["full_name"] if tenant else "Tenant"
 
+    payment = (
+        supabase.table("security_deposit_payments")
+        .insert(
+            {
+                "company_id": company_id,
+                "security_deposit_id": deposit_id,
+                "amount": payload.amount,
+                "account_id": payload.account_id,
+                "payment_date": str(payment_date),
+            }
+        )
+        .execute()
+        .data[0]
+    )
+
     deposits_held_id = get_account_id(supabase, company_id, "2100")
     tags = {"building_id": building_id, "room_id": room_id, "owner_id": owner_id, "tenant_id": tenant_id, "lease_id": lease_id}
+
+    new_total_paid = already_paid + payload.amount
+    is_first_or_final = new_total_paid >= agreed_amount - 0.01
+    label = "in full" if (is_first_or_final and already_paid == 0) else ("final instalment" if is_first_or_final else "instalment")
 
     post_journal_entry(
         supabase,
         company_id=company_id,
-        entry_date=str(received_date),
-        source_type="security_deposit",
-        source_id=lease_id,
-        description=f"Security deposit — {tenant_name}, Room {room_label}",
+        entry_date=str(payment_date),
+        source_type="security_deposit_payment",
+        source_id=payment["id"],
+        description=f"Security deposit ({label}) — {tenant_name}, Room {room_label}",
         lines=[
-            {"account_id": payload.account_id, "direction": "debit", "amount": amount, **tags},
-            {"account_id": deposits_held_id, "direction": "credit", "amount": amount, **tags},
+            {"account_id": payload.account_id, "direction": "debit", "amount": payload.amount, **tags},
+            {"account_id": deposits_held_id, "direction": "credit", "amount": payload.amount, **tags},
         ],
     )
 
-    updated = (
-        supabase.table("security_deposits")
-        .update(
-            {
-                "is_received": True,
-                "received_account_id": payload.account_id,
-                "date_received": str(received_date),
-            }
-        )
-        .eq("id", deposit_id)
-        .execute()
+    # is_received / received_account_id / date_received are kept for
+    # backward compatibility with anything still reading them (the deposit
+    # receipt PDF, older records) -- now representing "fully settled as of
+    # this payment", updated only once the running total reaches the
+    # agreed amount. amount_paid (below) is the real source of truth from
+    # here on.
+    update_fields = {}
+    if is_first_or_final:
+        update_fields = {
+            "is_received": True,
+            "received_account_id": payload.account_id,
+            "date_received": str(payment_date),
+        }
+    if update_fields:
+        supabase.table("security_deposits").update(update_fields).eq("id", deposit_id).execute()
+
+    updated_deposit = (
+        supabase.table("security_deposits").select("*").eq("id", deposit_id).single().execute().data
     )
-    return updated.data[0]
+    updated_deposit["amount_paid"] = new_total_paid
+    updated_deposit["amount_pending"] = max(agreed_amount - new_total_paid, 0.0)
+
+    return {"payment": payment, "deposit": updated_deposit}
 
 
 @router.get("/{deposit_id}/receipt-pdf")
 def deposit_receipt_pdf(deposit_id: str, supabase: Client = Depends(get_supabase)):
     """
-    Printable acknowledgement-of-receipt PDF for a security deposit -- only
-    available once the deposit is actually marked as received (there's
-    nothing to acknowledge receiving otherwise).
+    Printable receipt PDF for a security deposit, reflecting everything
+    paid toward it so far (whether that's the full amount in one go, or
+    several instalments) -- available as soon as at least one payment has
+    been recorded, even if the deposit isn't fully paid yet.
     """
     from fastapi.responses import StreamingResponse
     import io
@@ -150,8 +246,8 @@ def deposit_receipt_pdf(deposit_id: str, supabase: Client = Depends(get_supabase
     from app.services.deposit_receipt_pdf import fetch_deposit_context, render_deposit_receipt_pdf
 
     ctx = fetch_deposit_context(supabase, deposit_id)
-    if not ctx["deposit"]["is_received"]:
-        raise HTTPException(status_code=400, detail="This deposit hasn't been marked as received yet.")
+    if not ctx["payments"]:
+        raise HTTPException(status_code=400, detail="No payment has been recorded against this deposit yet.")
     pdf_bytes = render_deposit_receipt_pdf(ctx)
 
     return StreamingResponse(
@@ -171,6 +267,11 @@ def refund_deposit(
     """
     Refunds a security deposit, minus any itemized deductions
     (damages, unpaid dues, etc.). Automatically computes the net refund.
+
+    Refunds whatever was ACTUALLY paid so far (sum of
+    security_deposit_payments), not the full agreed amount -- so a tenant
+    who only ever paid part of the deposit before leaving gets refunded
+    correctly against what they really put in, never more.
     """
     deposit = (
         supabase.table("security_deposits")
@@ -182,11 +283,15 @@ def refund_deposit(
     if not deposit.data:
         raise HTTPException(status_code=404, detail="Deposit not found")
 
+    total_received = _total_paid(supabase, deposit_id)
+    if total_received <= 0:
+        raise HTTPException(status_code=400, detail="No payment has been recorded against this deposit yet, so there's nothing to refund.")
+
     total_deductions = sum(d.amount for d in payload.deductions)
-    amount_refunded = deposit.data["amount_received"] - total_deductions
+    amount_refunded = total_received - total_deductions
     if amount_refunded < 0:
         raise HTTPException(
-            status_code=400, detail="Deductions exceed the deposit amount held"
+            status_code=400, detail="Deductions exceed the amount actually held for this deposit."
         )
 
     if payload.deductions:
@@ -217,7 +322,7 @@ def refund_deposit(
         .execute()
     )
 
-    # Dr Security Deposits Held (clears the full liability) /
+    # Dr Security Deposits Held (clears exactly what was actually held) /
     # Cr Bank (actual cash going out) + Cr Other Income (any deductions --
     # damages/unpaid dues retained by the company, not the owner).
     lease_id = deposit.data["lease_id"]
@@ -243,7 +348,7 @@ def refund_deposit(
     tags = {"building_id": building_id, "room_id": room_id, "owner_id": owner_id, "tenant_id": tenant_id, "lease_id": lease_id}
 
     lines = [
-        {"account_id": deposits_held_id, "direction": "debit", "amount": float(deposit.data["amount_received"]), **tags},
+        {"account_id": deposits_held_id, "direction": "debit", "amount": total_received, **tags},
     ]
     if amount_refunded > 0:
         lines.append({"account_id": bank_id, "direction": "credit", "amount": amount_refunded, **tags})

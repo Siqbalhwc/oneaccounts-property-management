@@ -18,8 +18,8 @@ from supabase import Client
 
 def fetch_deposit_context(supabase: Client, deposit_id: str) -> dict:
     """Fetches everything needed to render a deposit receipt: the deposit
-    itself, the lease/tenant/room/building it belongs to, the company
-    (letterhead), and the account it was received into."""
+    itself, every payment recorded toward it so far, the lease/tenant/
+    room/building it belongs to, and the company (letterhead)."""
     deposit = supabase.table("security_deposits").select("*").eq("id", deposit_id).single().execute()
     if not deposit.data:
         raise HTTPException(status_code=404, detail="Deposit not found")
@@ -34,25 +34,36 @@ def fetch_deposit_context(supabase: Client, deposit_id: str) -> dict:
     company = (
         supabase.table("companies").select("*").eq("id", deposit["company_id"]).single().execute().data
     )
-    account = None
-    if deposit.get("received_account_id"):
-        account = (
-            supabase.table("chart_of_accounts")
-            .select("*")
-            .eq("id", deposit["received_account_id"])
-            .single()
-            .execute()
-            .data
-        )
+
+    payments = (
+        supabase.table("security_deposit_payments")
+        .select("*")
+        .eq("security_deposit_id", deposit_id)
+        .order("payment_date")
+        .order("created_at")
+        .execute()
+        .data
+    )
+    account_ids = list({p["account_id"] for p in payments})
+    accounts_by_id = {}
+    if account_ids:
+        fetched = supabase.table("chart_of_accounts").select("*").in_("id", account_ids).execute().data
+        accounts_by_id = {a["id"]: a for a in fetched}
+    for p in payments:
+        p["account"] = accounts_by_id.get(p["account_id"])
+
+    total_paid = sum(float(p["amount"]) for p in payments)
 
     return {
         "deposit": deposit,
+        "payments": payments,
+        "total_paid": total_paid,
+        "amount_pending": max(float(deposit["amount_received"]) - total_paid, 0.0),
         "lease": lease,
         "tenant": tenant,
         "room": room,
         "building": building,
         "company": company,
-        "account": account,
     }
 
 
@@ -61,7 +72,9 @@ def render_deposit_receipt_pdf(ctx: dict) -> bytes:
     context dict built by fetch_deposit_context(). Pure function -- no I/O
     beyond the logo fetch."""
     deposit = ctx["deposit"]
-    tenant, room, building, company, account = ctx["tenant"], ctx["room"], ctx["building"], ctx["company"], ctx["account"]
+    payments, total_paid, amount_pending = ctx["payments"], ctx["total_paid"], ctx["amount_pending"]
+    tenant, room, building, company = ctx["tenant"], ctx["room"], ctx["building"], ctx["company"]
+    is_fully_paid = amount_pending <= 0.01
 
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -112,7 +125,7 @@ def render_deposit_receipt_pdf(ctx: dict) -> bytes:
     c.setFont("Helvetica-Bold", 15)
     c.drawString(20 * mm, y, "SECURITY DEPOSIT RECEIPT")
 
-    badge_text = "RECEIVED"
+    badge_text = "FULLY RECEIVED" if is_fully_paid else "PARTIALLY RECEIVED"
     c.setFont("Helvetica-Bold", 9)
     badge_width = c.stringWidth(badge_text, "Helvetica-Bold", 9) + 10 * mm
     badge_x = width - 20 * mm - badge_width
@@ -132,7 +145,8 @@ def render_deposit_receipt_pdf(ctx: dict) -> bytes:
     y -= 8 * mm
     c.setFillColorRGB(*INK)
     c.setFont("Helvetica", 10)
-    c.drawString(20 * mm, y, f"Date received: {deposit['date_received']}")
+    latest_date = payments[-1]["payment_date"] if payments else deposit.get("date_received")
+    c.drawString(20 * mm, y, f"Latest payment: {latest_date}")
 
     y -= 12 * mm
     c.setFont("Helvetica-Bold", 11)
@@ -152,15 +166,34 @@ def render_deposit_receipt_pdf(ctx: dict) -> bytes:
     c.rect(20 * mm, y - 3 * mm, width - 40 * mm, 11 * mm, fill=1, stroke=0)
     c.setFillColorRGB(*LEDGER)
     c.setFont("Helvetica-Bold", 12)
-    c.drawString(24 * mm, y, "Security deposit amount")
+    c.drawString(24 * mm, y, "Security deposit agreed")
     c.drawRightString(width - 24 * mm, y, f"Rs {float(deposit['amount_received']):,.0f}")
 
-    y -= 16 * mm
+    y -= 14 * mm
     c.setFillColorRGB(*INK)
-    c.setFont("Helvetica", 10)
-    if account:
-        c.drawString(20 * mm, y, f"Received into: {account.get('code', '')} · {account.get('name', '')}")
-        y -= 8 * mm
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(20 * mm, y, "Payments received")
+    y -= 6 * mm
+    c.setFont("Helvetica", 9)
+    for p in payments:
+        acct = p.get("account")
+        acct_label = f"{acct.get('code', '')} · {acct.get('name', '')}" if acct else ""
+        c.drawString(20 * mm, y, f"{p['payment_date']} — {acct_label}")
+        c.drawRightString(width - 20 * mm, y, f"Rs {float(p['amount']):,.0f}")
+        y -= 5 * mm
+
+    y -= 3 * mm
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(20 * mm, y, "Total received")
+    c.drawRightString(width - 20 * mm, y, f"Rs {total_paid:,.0f}")
+    if not is_fully_paid:
+        y -= 6 * mm
+        c.setFillColorRGB(0.55, 0.25, 0.1)
+        c.drawString(20 * mm, y, "Still pending")
+        c.drawRightString(width - 20 * mm, y, f"Rs {amount_pending:,.0f}")
+        c.setFillColorRGB(*INK)
+
+    y -= 12 * mm
 
     c.setFillColorRGB(0.3, 0.34, 0.32)
     c.setFont("Helvetica", 9)

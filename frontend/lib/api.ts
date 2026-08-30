@@ -182,4 +182,14 @@ export type SecurityDeposit = {
   date_refunded?: string;
   is_received: boolean;
   received_account_id?: string | null;
+  amount_paid?: number;
+  amount_pending?: number;
+};
+
+export type SecurityDepositPayment = {
+  id: string;
+  security_deposit_id: string;
+  amount: number;
+  account_id: string;
+  payment_date: string;
 };

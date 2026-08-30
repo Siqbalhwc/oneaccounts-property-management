@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { api, Lease, Tenant, Room, Building, SecurityDeposit, Account, fetchPdfBlob } from "@/lib/api";
+import { api, Lease, Tenant, Room, Building, SecurityDeposit, SecurityDepositPayment, Account, fetchPdfBlob } from "@/lib/api";
 import { Card, DataTable } from "@/components/ui/Card";
 import { StampBadge } from "@/components/ui/StampBadge";
 import { Button } from "@/components/ui/Button";
@@ -82,6 +82,8 @@ export default function LeasesPage() {
 
   const [receiveModalOpen, setReceiveModalOpen] = useState(false);
   const [receivingDeposit, setReceivingDeposit] = useState<SecurityDeposit | null>(null);
+  const [depositPayments, setDepositPayments] = useState<SecurityDepositPayment[] | null>(null);
+  const [receiveAmount, setReceiveAmount] = useState("");
   const [receiveAccountId, setReceiveAccountId] = useState("");
   const [receiveDate, setReceiveDate] = useState("");
   const [receiveError, setReceiveError] = useState<string | null>(null);
@@ -116,6 +118,10 @@ export default function LeasesPage() {
 
   function openReceiveModal(deposit: SecurityDeposit) {
     setReceivingDeposit(deposit);
+    setDepositPayments(null);
+    api.get<SecurityDepositPayment[]>(`/security-deposits/${deposit.id}/payments`).then(setDepositPayments);
+    const pending = deposit.amount_pending ?? deposit.amount_received;
+    setReceiveAmount(pending > 0 ? String(pending) : "");
     setReceiveAccountId("");
     setReceiveDate(new Date().toISOString().slice(0, 10));
     setReceiveError(null);
@@ -128,9 +134,10 @@ export default function LeasesPage() {
     setReceiving(true);
     setReceiveError(null);
     try {
-      await api.post(`/security-deposits/${receivingDeposit.id}/receive`, {
+      await api.post(`/security-deposits/${receivingDeposit.id}/payments`, {
+        amount: parseFloat(receiveAmount),
         account_id: receiveAccountId,
-        received_date: receiveDate || undefined,
+        payment_date: receiveDate || undefined,
       });
       setReceiveModalOpen(false);
       loadDeposits();
@@ -346,13 +353,23 @@ export default function LeasesPage() {
               accessor: (l) => {
                 const deposit = depositForLease(l.id);
                 if (!deposit || Number(deposit.amount_received) <= 0) return "—";
+                const paid = deposit.amount_paid ?? (deposit.is_received ? deposit.amount_received : 0);
+                const pending = deposit.amount_pending ?? Math.max(deposit.amount_received - paid, 0);
+                const fullyPaid = pending <= 0.01;
                 return (
                   <div className="flex items-center gap-2">
-                    <span className="figures text-sm">Rs {Number(deposit.amount_received).toLocaleString("en-PK")}</span>
-                    {deposit.is_received ? (
+                    <div className="text-sm leading-tight">
+                      <span className="figures">Rs {Number(deposit.amount_received).toLocaleString("en-PK")}</span>
+                      {!fullyPaid && paid > 0 && (
+                        <div className="text-xs text-ink/50 figures">
+                          Rs {paid.toLocaleString("en-PK")} received, Rs {pending.toLocaleString("en-PK")} pending
+                        </div>
+                      )}
+                    </div>
+                    {fullyPaid ? (
                       <>
-                        <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-ledger/10 text-ledger">
-                          Received
+                        <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-ledger/10 text-ledger whitespace-nowrap">
+                          Fully received
                         </span>
                         <Button
                           variant="ghost"
@@ -365,11 +382,11 @@ export default function LeasesPage() {
                       </>
                     ) : (
                       <>
-                        <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-brass/15 text-brass">
-                          Pending
+                        <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-brass/15 text-brass whitespace-nowrap">
+                          {paid > 0 ? "Partially received" : "Pending"}
                         </span>
                         <Button variant="secondary" className="no-print" onClick={() => openReceiveModal(deposit)}>
-                          Record receipt
+                          Record payment
                         </Button>
                       </>
                     )}
@@ -655,14 +672,51 @@ export default function LeasesPage() {
         </div>
       </Modal>
 
-      <Modal open={receiveModalOpen} onClose={() => setReceiveModalOpen(false)} title="Record security deposit receipt">
+      <Modal open={receiveModalOpen} onClose={() => setReceiveModalOpen(false)} title="Record security deposit payment">
         <form onSubmit={handleReceiveSubmit} className="space-y-4">
           {receivingDeposit && (
-            <p className="text-xs text-ink/50">
-              Rs {Number(receivingDeposit.amount_received).toLocaleString("en-PK")} —{" "}
-              {tenantName(leases?.find((l) => l.id === receivingDeposit.lease_id)?.tenant_id ?? "")}
-            </p>
+            <div className="text-xs text-ink/50 space-y-0.5">
+              <p>{tenantName(leases?.find((l) => l.id === receivingDeposit.lease_id)?.tenant_id ?? "")}</p>
+              <p>
+                Agreed amount: <span className="figures">Rs {Number(receivingDeposit.amount_received).toLocaleString("en-PK")}</span>
+                {" — "}
+                Received so far: <span className="figures">Rs {Number(receivingDeposit.amount_paid ?? 0).toLocaleString("en-PK")}</span>
+                {" — "}
+                <span className="text-brass font-medium">
+                  Pending: Rs {Number(receivingDeposit.amount_pending ?? receivingDeposit.amount_received).toLocaleString("en-PK")}
+                </span>
+              </p>
+            </div>
           )}
+
+          {depositPayments && depositPayments.length > 0 && (
+            <div className="bg-ledger/5 border border-ledger/15 rounded-card p-3 space-y-1">
+              <p className="text-xs uppercase tracking-wider text-ink/45 mb-1">Payments so far</p>
+              {depositPayments.map((p) => (
+                <div key={p.id} className="flex justify-between text-xs text-ink/70">
+                  <span>{p.payment_date}</span>
+                  <span className="figures">Rs {Number(p.amount).toLocaleString("en-PK")}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <Field
+            label="Amount"
+            hint={
+              receivingDeposit
+                ? `This is a partial payment — enter any amount up to the Rs ${Number(receivingDeposit.amount_pending ?? receivingDeposit.amount_received).toLocaleString("en-PK")} still pending. Paying it in full at once works the same way.`
+                : undefined
+            }
+          >
+            <Input
+              type="number"
+              required
+              max={receivingDeposit?.amount_pending ?? receivingDeposit?.amount_received}
+              value={receiveAmount}
+              onChange={(e) => setReceiveAmount(e.target.value)}
+            />
+          </Field>
           <Field label="Received into which account?">
             <Select required value={receiveAccountId} onChange={(e) => setReceiveAccountId(e.target.value)}>
               <option value="">Select account…</option>
@@ -683,8 +737,8 @@ export default function LeasesPage() {
             <Button type="button" variant="ghost" onClick={() => setReceiveModalOpen(false)}>
               Cancel
             </Button>
-            <Button type="submit" disabled={receiving || !receiveAccountId}>
-              {receiving ? "Saving…" : "Record receipt"}
+            <Button type="submit" disabled={receiving || !receiveAccountId || !receiveAmount}>
+              {receiving ? "Saving…" : "Record payment"}
             </Button>
           </div>
         </form>
