@@ -121,8 +121,8 @@ def _apply_expense_split_to_building_pnl(
     # (an account that only ever appeared in the "Unassigned" row so far).
     account_details: dict = {}
     for r in rows:
-        if r.get("id") and r["id"] not in account_details:
-            account_details[r["id"]] = {"code": r["code"], "name": r["name"], "account_type": r["account_type"]}
+        if r.get("account_id") and r["account_id"] not in account_details:
+            account_details[r["account_id"]] = {"code": r["account_code"], "name": r["account_name"], "account_type": r["account_type"]}
     missing_ids = [aid for aid in reclaimed if aid not in account_details]
     if missing_ids:
         fetched = supabase.table("chart_of_accounts").select("id, code, name, account_type").in_("id", missing_ids).execute().data
@@ -131,8 +131,8 @@ def _apply_expense_split_to_building_pnl(
 
     adjusted = []
     for r in rows:
-        if r.get("group_key") == "unassigned" and r.get("id") in reclaimed:
-            new_amount = float(r["amount"]) - reclaimed[r["id"]]
+        if r.get("group_key") == "unassigned" and r.get("account_id") in reclaimed:
+            new_amount = float(r["amount"]) - reclaimed[r["account_id"]]
             if abs(new_amount) < 0.01:
                 continue  # fully reclaimed by the split -- drop the now-empty row
             adjusted.append({**r, "amount": new_amount})
@@ -143,7 +143,7 @@ def _apply_expense_split_to_building_pnl(
         details = account_details.get(account_id)
         if not details:
             continue
-        existing = next((r for r in adjusted if r.get("group_key") == b_id and r.get("id") == account_id), None)
+        existing = next((r for r in adjusted if r.get("group_key") == b_id and r.get("account_id") == account_id), None)
         if existing:
             existing["amount"] = float(existing["amount"]) + amount
         else:
@@ -151,9 +151,9 @@ def _apply_expense_split_to_building_pnl(
                 {
                     "group_key": b_id,
                     "group_label": building_names.get(b_id, "Unknown building"),
-                    "id": account_id,
-                    "code": details["code"],
-                    "name": details["name"],
+                    "account_id": account_id,
+                    "account_code": details["code"],
+                    "account_name": details["name"],
                     "account_type": details["account_type"],
                     "amount": amount,
                 }

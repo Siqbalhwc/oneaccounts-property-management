@@ -15,7 +15,7 @@ type PnlRow = {
   amount: number;
 };
 
-type Owner = { id: string; name: string };
+type Owner = { id: string; name: string; is_archived?: boolean };
 type Column = { key: string; label: string };
 
 function formatPkr(n: number) {
@@ -57,19 +57,37 @@ export default function ProfitAndLossPage() {
 
   useEffect(() => {
     api.get<Company>("/company/me").then(setCompany);
-    api.get<Building[]>("/buildings").then(setBuildings);
-    api.get<Owner[]>("/owners").then(setOwners);
+    // include_archived=true on purpose -- a cost split made against a
+    // building that's since been archived is still real money that
+    // belongs somewhere. Without archived buildings/owners in this list,
+    // that amount would only count toward the Total column with no
+    // building column to actually show it under -- it would just look
+    // like it vanished, not merely unlabeled.
+    api.get<Building[]>("/buildings?include_archived=true").then(setBuildings);
+    api.get<Owner[]>("/owners?include_archived=true").then(setOwners);
   }, []);
 
   // Columns depend on the view: Total has one "Total" column; By Building /
-  // By Owner have one column per building/owner PLUS a Total column on the
-  // right, matching the template exactly.
+  // By Owner show every ACTIVE building/owner always (even with no data
+  // this period, matching the original behaviour), PLUS a column for any
+  // ARCHIVED building/owner that actually has an amount in this period
+  // (labeled "(Archived)" so it's clear why it's not in the normal list),
+  // PLUS "Unassigned" for anything genuinely never split at all, PLUS
+  // Total on the right. Every rupee the API returns always lands in
+  // exactly one of these columns -- nothing is ever silently dropped.
+  const groupKeysWithData = new Set((rawRows ?? []).map((r) => r.group_key));
+  function buildColumns(entities: { id: string; name: string; is_archived?: boolean }[]): Column[] {
+    const active = entities.filter((e) => !e.is_archived).map((e) => ({ key: e.id, label: e.name }));
+    const archivedWithData = entities
+      .filter((e) => e.is_archived && groupKeysWithData.has(e.id))
+      .map((e) => ({ key: e.id, label: `${e.name} (Archived)` }));
+    const unassigned = groupKeysWithData.has("unassigned") && (rawRows ?? []).some((r) => r.group_key === "unassigned" && Number(r.amount) !== 0)
+      ? [{ key: "unassigned", label: "Unassigned" }]
+      : [];
+    return [...active, ...archivedWithData, ...unassigned, { key: "total", label: "Total" }];
+  }
   const columns: Column[] =
-    view === "total"
-      ? [{ key: "total", label: "Total" }]
-      : view === "building"
-      ? [...buildings.map((b) => ({ key: b.id, label: b.name })), { key: "total", label: "Total" }]
-      : [...owners.map((o) => ({ key: o.id, label: o.name })), { key: "total", label: "Total" }];
+    view === "total" ? [{ key: "total", label: "Total" }] : view === "building" ? buildColumns(buildings) : buildColumns(owners);
 
   // Every account that appears anywhere in the result, in first-seen order
   // (the backend already orders by account_type then code), split into
