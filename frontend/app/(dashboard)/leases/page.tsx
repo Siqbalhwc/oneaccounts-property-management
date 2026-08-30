@@ -43,6 +43,7 @@ export default function LeasesPage() {
   const [chargeError, setChargeError] = useState<string | null>(null);
   const [chargeActionBusy, setChargeActionBusy] = useState(false);
   const [editingChargeId, setEditingChargeId] = useState<string | null>(null);
+  const [editingChargeMinDate, setEditingChargeMinDate] = useState<string>("");
   const [editChargeForm, setEditChargeForm] = useState({ new_amount: "", effective_from: new Date().toISOString().slice(0, 10), show_on_invoice: true });
   const [addChargeOpen, setAddChargeOpen] = useState(false);
   const [addChargeForm, setAddChargeForm] = useState({
@@ -167,9 +168,14 @@ export default function LeasesPage() {
 
   function openEditCharge(charge: LeaseCharge) {
     setEditingChargeId(charge.id);
+    setEditingChargeMinDate(charge.effective_from);
+    // Default to today, but never below the charge's own start date --
+    // picking an earlier date than that is exactly what left this lease
+    // with a charge row whose end date came before its start date.
+    const todayIso = new Date().toISOString().slice(0, 10);
     setEditChargeForm({
       new_amount: String(charge.amount),
-      effective_from: new Date().toISOString().slice(0, 10),
+      effective_from: todayIso < charge.effective_from ? charge.effective_from : todayIso,
       show_on_invoice: charge.show_on_invoice,
     });
     setChargeError(null);
@@ -210,6 +216,21 @@ export default function LeasesPage() {
       const res = await api.post<{ impact_message: string }>(`/leases/${editingLease.id}/charges/${chargeToEnd.id}/end`, {});
       setChargeImpactMessage(res.impact_message);
       setChargeToEnd(null);
+      loadCharges(editingLease.id);
+    } catch (err: any) {
+      setChargeError(err.message);
+    } finally {
+      setChargeActionBusy(false);
+    }
+  }
+
+  async function handleRecalculate() {
+    if (!editingLease) return;
+    setChargeActionBusy(true);
+    setChargeError(null);
+    try {
+      const res = await api.post<{ impact_message: string }>(`/leases/${editingLease.id}/resync-current-invoice`, {});
+      setChargeImpactMessage(res.impact_message);
       loadCharges(editingLease.id);
     } catch (err: any) {
       setChargeError(err.message);
@@ -366,11 +387,16 @@ export default function LeasesPage() {
 
           {/* --- Charges --- */}
           <div className="pt-4 border-t border-border space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <p className="text-xs uppercase tracking-wider text-ink/45">Charges</p>
-              <Button type="button" variant="secondary" onClick={() => setAddChargeOpen((v) => !v)}>
-                {addChargeOpen ? "Cancel" : "+ Add charge"}
-              </Button>
+              <div className="flex gap-2">
+                <Button type="button" variant="ghost" onClick={handleRecalculate} disabled={chargeActionBusy}>
+                  {chargeActionBusy ? "Recalculating…" : "Recalculate this month's invoice"}
+                </Button>
+                <Button type="button" variant="secondary" onClick={() => setAddChargeOpen((v) => !v)}>
+                  {addChargeOpen ? "Cancel" : "+ Add charge"}
+                </Button>
+              </div>
             </div>
 
             {chargeImpactMessage && (
@@ -455,10 +481,11 @@ export default function LeasesPage() {
                           onChange={(e) => setEditChargeForm({ ...editChargeForm, new_amount: e.target.value })}
                         />
                       </Field>
-                      <Field label="Effective from">
+                      <Field label="Effective from" hint={`Can't be before ${editingChargeMinDate} — that's when this charge started.`}>
                         <Input
                           type="date"
                           required
+                          min={editingChargeMinDate}
                           value={editChargeForm.effective_from}
                           onChange={(e) => setEditChargeForm({ ...editChargeForm, effective_from: e.target.value })}
                         />

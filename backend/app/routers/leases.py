@@ -338,6 +338,24 @@ def _resync_result(supabase: Client, company_id: str, lease: dict) -> dict:
     }
 
 
+@router.post("/{lease_id}/resync-current-invoice")
+def resync_current_invoice_endpoint(
+    lease_id: str,
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+):
+    """
+    Manually recalculates this lease's current-month invoice from whatever
+    charges are on it right now -- without needing to touch a charge to
+    trigger it. Useful after fixing lease_charges directly (e.g. a data
+    cleanup), or just to double-check the invoice matches the charges.
+    Same safe rule as every other charge action: only ever touches a
+    current-month invoice that's still a draft with no payment recorded.
+    """
+    lease = _lease_or_404(supabase, lease_id)
+    return _resync_result(supabase, company_id, lease)
+
+
 @router.post("/{lease_id}/charges", status_code=201)
 def add_charge(
     lease_id: str,
@@ -403,6 +421,13 @@ def update_charge_amount(
     )
     if not old.data:
         raise HTTPException(status_code=404, detail="Charge not found")
+    if old.data.get("effective_to") is not None:
+        raise HTTPException(status_code=400, detail="This charge has already been closed out by a later change — edit the newer version of it instead.")
+    if effective_date < date.fromisoformat(str(old.data["effective_from"])):
+        raise HTTPException(
+            status_code=400,
+            detail=f"The effective date can't be before {old.data['effective_from']}, which is when this charge itself started.",
+        )
 
     supabase.table("lease_charges").update(
         {"effective_to": str(effective_date)}
@@ -454,6 +479,11 @@ def end_charge(
         raise HTTPException(status_code=404, detail="Charge not found")
     if old.data.get("effective_to") is not None:
         raise HTTPException(status_code=400, detail="This charge has already been ended")
+    if effective_to < date.fromisoformat(str(old.data["effective_from"])):
+        raise HTTPException(
+            status_code=400,
+            detail=f"The end date can't be before {old.data['effective_from']}, which is when this charge itself started.",
+        )
 
     updated = (
         supabase.table("lease_charges")
