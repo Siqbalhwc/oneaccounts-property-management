@@ -187,13 +187,26 @@ def render_invoice_pdf(ctx: dict) -> bytes:
     c.line(20 * mm, y, width - 20 * mm, y)
 
     c.setFont("Helvetica", 10)
-    for item in line_items:
-        # A charge can be unchecked from "print on PDF" (e.g. a facility
-        # rolled quietly into the headline rent) -- it still counts fully
-        # toward the total below, only its own printed row is skipped.
-        if item.get("show_on_invoice", True) is False:
-            continue
+    # Charges hidden from print (e.g. a facility rolled quietly into the
+    # headline rent) still count fully toward the total -- but simply
+    # skipping their rows would leave the printed lines not adding up to
+    # that total, which looks broken on a real invoice. So for DISPLAY
+    # ONLY, their amounts are folded into the Rent line's printed figure
+    # (never into the stored invoice_line_items, the ledger, or the
+    # total -- those stay exactly as they already were). If there's no
+    # Rent line to fold into for some reason, the largest visible line
+    # absorbs it instead, so the printed page still sums correctly no
+    # matter what.
+    hidden_total = sum(float(item["amount"]) for item in line_items if item.get("show_on_invoice", True) is False)
+    visible_items = [item for item in line_items if item.get("show_on_invoice", True) is not False]
+    fold_into = next((item for item in visible_items if item["label"].strip().lower() == "rent"), None)
+    if fold_into is None and visible_items:
+        fold_into = max(visible_items, key=lambda item: float(item["amount"]))
+
+    for item in visible_items:
         amount = float(item["amount"])
+        if hidden_total and fold_into is not None and item is fold_into:
+            amount += hidden_total
         y -= 7 * mm
         c.drawString(20 * mm, y, item["label"])
         c.drawRightString(width - 20 * mm, y, f"Rs {amount:,.0f}")
