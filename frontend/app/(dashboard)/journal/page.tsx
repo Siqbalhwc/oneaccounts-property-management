@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { Card, DataTable } from "@/components/ui/Card";
+import { Button } from "@/components/ui/Button";
 import { Field, Input, Select } from "@/components/ui/Field";
 import { api, Building } from "@/lib/api";
 
@@ -79,12 +81,17 @@ export default function JournalEntriesPage() {
           <h1 className="text-2xl font-display font-semibold">Journal entries</h1>
           <p className="text-sm text-ink/55 mt-1">Every line posted to the ledger.</p>
         </div>
-        <button
-          onClick={() => setShowFilters(!showFilters)}
-          className="text-sm text-ledger hover:underline whitespace-nowrap"
-        >
-          {showFilters ? "Hide filters" : `Filter${activeFilterCount ? ` (${activeFilterCount})` : ""}`}
-        </button>
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => setShowFilters(!showFilters)}
+            className="text-sm text-ledger hover:underline whitespace-nowrap"
+          >
+            {showFilters ? "Hide filters" : `Filter${activeFilterCount ? ` (${activeFilterCount})` : ""}`}
+          </button>
+          <Link href="/journal/new">
+            <Button>New entry</Button>
+          </Link>
+        </div>
       </div>
 
       {error && (
