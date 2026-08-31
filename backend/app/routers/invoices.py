@@ -7,7 +7,7 @@ from supabase import Client
 
 from app.core.config import settings
 from app.core.deps import get_current_company_id, get_service_client, get_supabase
-from app.services.invoicing import compute_prorated_charges, post_invoice_journal
+from app.services.invoicing import compute_prorated_charges, current_charges_with_earliest_start, post_invoice_journal
 from app.services.phone import normalize_to_whatsapp
 
 router = APIRouter(prefix="/invoices", tags=["Invoices"])
@@ -116,14 +116,7 @@ def generate_invoice_for_lease(
     if existing.data:
         return None
 
-    charges = (
-        supabase.table("lease_charges")
-        .select("*")
-        .eq("lease_id", lease["id"])
-        .is_("effective_to", "null")
-        .execute()
-        .data
-    )
+    charges = current_charges_with_earliest_start(supabase, lease["id"])
     if not charges:
         return None
 
