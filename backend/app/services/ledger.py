@@ -171,6 +171,14 @@ def reverse_journal_entry(supabase: Client, company_id: str, entry_id: str, reas
     once written, only reversed. Marks both entries' status so the reversed
     one is excluded from reports going forward while the audit trail (who
     posted what, when) stays fully intact.
+
+    The reversal's description is deliberately just "Reversal - <original
+    description>", matching the format of every other entry -- WHY it was
+    reversed (the `reason` argument) is stored in its own `reason` column
+    instead of being appended to the description text. Previously `reason`
+    was concatenated straight onto the description, which is why reversals
+    used to read like a run-on sentence of tags and edit details instead of
+    a clean one-liner.
     """
     original = supabase.table("journal_entries").select("*").eq("id", entry_id).single().execute()
     if not original.data:
@@ -196,17 +204,22 @@ def reverse_journal_entry(supabase: Client, company_id: str, entry_id: str, reas
 
     from datetime import date as _date
 
+    original_description = original.data.get("description") or entry_id
+
     reversal = post_journal_entry(
         supabase,
         company_id=company_id,
         entry_date=str(_date.today()),
         source_type=original.data["source_type"],
         source_id=original.data["source_id"],
-        description=f"Reversal of: {original.data.get('description') or entry_id}" + (f" — {reason}" if reason else ""),
+        description=f"Reversal - {original_description}",
         lines=flipped_lines,
     )
 
-    supabase.table("journal_entries").update({"reversal_of": entry_id}).eq("id", reversal["id"]).execute()
+    reversal_updates = {"reversal_of": entry_id}
+    if reason:
+        reversal_updates["reason"] = reason
+    supabase.table("journal_entries").update(reversal_updates).eq("id", reversal["id"]).execute()
     supabase.table("journal_entries").update({"status": "reversed", "reversed_by": reversal["id"]}).eq("id", entry_id).execute()
 
     return reversal
