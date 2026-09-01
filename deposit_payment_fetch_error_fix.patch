@@ -1,0 +1,39 @@
+diff --git a/frontend/app/(dashboard)/leases/page.tsx b/frontend/app/(dashboard)/leases/page.tsx
+index ea28e53..74cfac4 100644
+--- a/frontend/app/(dashboard)/leases/page.tsx
++++ b/frontend/app/(dashboard)/leases/page.tsx
+@@ -133,15 +133,33 @@ export default function LeasesPage() {
+     if (!receivingDeposit) return;
+     setReceiving(true);
+     setReceiveError(null);
++    const amountBefore = Number(receivingDeposit.amount_paid ?? 0);
++    const amountAttempted = parseFloat(receiveAmount);
+     try {
+       await api.post(`/security-deposits/${receivingDeposit.id}/payments`, {
+-        amount: parseFloat(receiveAmount),
++        amount: amountAttempted,
+         account_id: receiveAccountId,
+         payment_date: receiveDate || undefined,
+       });
+       setReceiveModalOpen(false);
+       loadDeposits();
+     } catch (err: any) {
++      // The write can succeed on the server even though the browser's
++      // fetch reports "Failed to fetch" (e.g. a slow response after a
++      // serverless cold start). Before showing an error -- which would
++      // tempt a re-click and risk a genuine duplicate payment -- check
++      // whether the payment actually landed.
++      try {
++        const fresh = await api.get<SecurityDeposit>(`/security-deposits/${receivingDeposit.id}`);
++        const amountAfter = Number(fresh.amount_paid ?? 0);
++        if (amountAfter >= amountBefore + amountAttempted - 0.01) {
++          setReceiveModalOpen(false);
++          loadDeposits();
++          return;
++        }
++      } catch {
++        // Recheck itself failed too -- fall through and show the original error.
++      }
+       setReceiveError(err.message);
+     } finally {
+       setReceiving(false);
