@@ -397,9 +397,16 @@ export default function LeasesPage() {
             {
               header: "",
               accessor: (l) => (
-                <Button variant="ghost" onClick={() => openEditModal(l)} className="no-print">
-                  Edit lease
-                </Button>
+                <div className="flex gap-1 justify-end no-print">
+                  <Link href={`/leases/${l.id}/settlement`}>
+                    <Button variant="ghost" disabled={l.status !== "active"}>
+                      Settlement
+                    </Button>
+                  </Link>
+                  <Button variant="ghost" onClick={() => openEditModal(l)}>
+                    Edit lease
+                  </Button>
+                </div>
               ),
               align: "right",
             },
