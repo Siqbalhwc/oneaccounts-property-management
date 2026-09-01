@@ -26,6 +26,98 @@ def list_ledger(supabase: Client = Depends(get_supabase)):
     return supabase.table("owner_ledger").select("*").order("ledger_month", desc=True).execute().data
 
 
+@router.get("/balances")
+def owner_balances(
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+):
+    """
+    Real-time amount owed to each owner, read straight from the Due to
+    Owners (2200) account -- the SAME account/journal_lines the "View
+    ledger" page (/ledger?account_id=<2200>&owner_id=...) already shows.
+
+    This is deliberately NOT the old owner_ledger table below (used by
+    list_ledger/compute/pay above) -- that table is a one-time-computed
+    snapshot nothing in the current app recomputes automatically anymore,
+    so it silently drifts out of sync with what's actually posted. This
+    endpoint can never disagree with the ledger, because it's reading the
+    exact same rows.
+    """
+    due_to_owners_id = get_account_id(supabase, company_id, "2200")
+    lines = (
+        supabase.table("journal_lines")
+        .select("owner_id, direction, amount")
+        .eq("account_id", due_to_owners_id)
+        .not_.is_("owner_id", "null")
+        .execute()
+        .data
+    )
+    balances: dict[str, float] = {}
+    for l in lines:
+        oid = l["owner_id"]
+        delta = float(l["amount"]) if l["direction"] == "credit" else -float(l["amount"])
+        balances[oid] = balances.get(oid, 0.0) + delta
+    return [
+        {"owner_id": oid, "balance": round(bal, 2)}
+        for oid, bal in balances.items()
+        if round(bal, 2) != 0
+    ]
+
+
+class PayOwnerDirectRequest(BaseModel):
+    owner_id: str
+    amount_paid: float
+    paid_date: Optional[date] = None
+    building_id: Optional[str] = None
+    bank_account_code: str = "1000"
+
+
+@router.post("/pay-owner")
+def pay_owner_direct(
+    payload: PayOwnerDirectRequest,
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+):
+    """
+    Records a payout straight against an owner's real Due to Owners
+    balance -- Dr Due to Owners / Cr Bank -- without needing a matching
+    row in the legacy owner_ledger snapshot table (see /balances above).
+    This is what the Owners page's "Pay" button now calls.
+    """
+    if payload.amount_paid <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than zero.")
+
+    paid_date = payload.paid_date or date.today()
+    due_to_owners_id = get_account_id(supabase, company_id, "2200")
+    bank_id = get_account_id(supabase, company_id, payload.bank_account_code)
+
+    post_journal_entry(
+        supabase,
+        company_id=company_id,
+        entry_date=str(paid_date),
+        source_type="owner_payout",
+        source_id=None,
+        description=f"Owner payout — {str(paid_date)}",
+        lines=[
+            {
+                "account_id": due_to_owners_id,
+                "direction": "debit",
+                "amount": payload.amount_paid,
+                "building_id": payload.building_id,
+                "owner_id": payload.owner_id,
+            },
+            {
+                "account_id": bank_id,
+                "direction": "credit",
+                "amount": payload.amount_paid,
+                "building_id": payload.building_id,
+                "owner_id": payload.owner_id,
+            },
+        ],
+    )
+    return {"message": "Payout recorded", "owner_id": payload.owner_id, "amount_paid": payload.amount_paid}
+
+
 @router.post("/compute", status_code=201)
 def compute_ledger(
     payload: ComputeRequest,

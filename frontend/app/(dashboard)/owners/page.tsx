@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Pencil, ScrollText, Archive, ArchiveRestore } from "lucide-react";
+import { Pencil, ScrollText, Archive, ArchiveRestore, Banknote } from "lucide-react";
 import { Card, DataTable } from "@/components/ui/Card";
+import { StampBadge } from "@/components/ui/StampBadge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
-import { Field, Input } from "@/components/ui/Field";
+import { Field, Input, AmountInput } from "@/components/ui/Field";
 import { api } from "@/lib/api";
 
 type Owner = {
@@ -21,6 +22,14 @@ type Owner = {
 type Account = { id: string; code: string; name: string };
 type BuildingRow = { id: string; name: string; owner_id?: string };
 type RoomRow = { id: string; building_id: string; room_number: string; owner_id?: string };
+// Straight from the Due to Owners (2200) account's real journal_lines --
+// see backend /owner-ledger/balances -- so this can never disagree with
+// what "View ledger" shows for the same owner.
+type OwnerBalance = { owner_id: string; balance: number };
+
+function formatPkr(n: number) {
+  return `Rs ${Number(n || 0).toLocaleString("en-PK")}`;
+}
 
 export default function OwnersPage() {
   const router = useRouter();
@@ -28,6 +37,7 @@ export default function OwnersPage() {
   const [dueToOwnersAccountId, setDueToOwnersAccountId] = useState<string | null>(null);
   const [buildings, setBuildings] = useState<BuildingRow[]>([]);
   const [rooms, setRooms] = useState<RoomRow[]>([]);
+  const [balances, setBalances] = useState<OwnerBalance[]>([]);
 
   const [search, setSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -38,8 +48,19 @@ export default function OwnersPage() {
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", phone: "", cnic: "", address: "" });
 
+  // Pay flow -- posts straight to the ledger (Dr Due to Owners / Cr Bank),
+  // no separate snapshot table involved.
+  const [payOwner, setPayOwner] = useState<Owner | null>(null);
+  const [paySaving, setPaySaving] = useState(false);
+  const [payError, setPayError] = useState<string | null>(null);
+  const [payForm, setPayForm] = useState({ amount_paid: "", paid_date: "" });
+
   function load() {
     api.get<Owner[]>(`/owners${showArchived ? "?include_archived=true" : ""}`).then(setOwners);
+  }
+
+  function loadBalances() {
+    api.get<OwnerBalance[]>("/owner-ledger/balances").then(setBalances);
   }
 
   useEffect(() => {
@@ -54,7 +75,39 @@ export default function OwnersPage() {
     });
     api.get<BuildingRow[]>("/buildings").then(setBuildings);
     api.get<RoomRow[]>("/rooms").then(setRooms);
+    loadBalances();
   }, []);
+
+  function balanceFor(ownerId: string): number {
+    return balances.find((b) => b.owner_id === ownerId)?.balance ?? 0;
+  }
+
+  function openPay(owner: Owner) {
+    setPayError(null);
+    const balance = balanceFor(owner.id);
+    setPayForm({ amount_paid: balance > 0 ? String(balance) : "", paid_date: new Date().toISOString().slice(0, 10) });
+    setPayOwner(owner);
+  }
+
+  async function handlePay(e: React.FormEvent) {
+    e.preventDefault();
+    if (!payOwner) return;
+    setPaySaving(true);
+    setPayError(null);
+    try {
+      await api.post("/owner-ledger/pay-owner", {
+        owner_id: payOwner.id,
+        amount_paid: parseFloat(payForm.amount_paid || "0"),
+        paid_date: payForm.paid_date,
+      });
+      setPayOwner(null);
+      loadBalances();
+    } catch (err: any) {
+      setPayError(err.message);
+    } finally {
+      setPaySaving(false);
+    }
+  }
 
   // A building's default owner, plus any room whose owner_id overrides that
   // default (rooms.owner_id wins over buildings.owner_id -- same rule the
@@ -179,11 +232,24 @@ export default function OwnersPage() {
             { header: "Property", accessor: (o) => <span className="text-xs text-ink/70">{propertiesFor(o.id)}</span> },
             { header: "Phone", accessor: (o) => o.phone ?? "—" },
             { header: "CNIC", accessor: (o) => o.cnic ?? "—" },
-            { header: "Address", accessor: (o) => o.address ?? "—" },
+            {
+              header: "Balance due",
+              accessor: (o) => {
+                const balance = balanceFor(o.id);
+                if (balance <= 0) return <span className="text-ink/40">—</span>;
+                return <span className="figures font-medium text-stamp-red">{formatPkr(balance)}</span>;
+              },
+              align: "right",
+            },
             {
               header: "",
               accessor: (o) => (
                 <div className="flex gap-1 justify-end no-print">
+                  {balanceFor(o.id) > 0 && (
+                    <button onClick={() => openPay(o)} title="Pay owner" className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink">
+                      <Banknote size={16} />
+                    </button>
+                  )}
                   <button onClick={() => openLedger(o)} title="View ledger" className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink">
                     <ScrollText size={16} />
                   </button>
@@ -222,6 +288,40 @@ export default function OwnersPage() {
             </Button>
             <Button type="submit" disabled={saving}>
               {saving ? "Saving…" : editingId ? "Save changes" : "Add owner"}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal open={!!payOwner} onClose={() => setPayOwner(null)} title={payOwner ? `Pay ${payOwner.name}` : "Pay owner"}>
+        <form onSubmit={handlePay} className="space-y-4">
+          {payOwner && (
+            <p className="text-xs text-ink/50 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2">
+              Current balance owed: <span className="figures font-medium">{formatPkr(balanceFor(payOwner.id))}</span>
+            </p>
+          )}
+          <Field label="Amount to pay now">
+            <AmountInput
+              required
+              value={payForm.amount_paid}
+              onChange={(e) => setPayForm({ ...payForm, amount_paid: e.target.value })}
+            />
+          </Field>
+          <Field label="Date paid">
+            <Input
+              type="date"
+              required
+              value={payForm.paid_date}
+              onChange={(e) => setPayForm({ ...payForm, paid_date: e.target.value })}
+            />
+          </Field>
+          {payError && <p className="text-sm text-stamp-red">{payError}</p>}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" variant="ghost" onClick={() => setPayOwner(null)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={paySaving}>
+              {paySaving ? "Saving…" : "Record payout"}
             </Button>
           </div>
         </form>

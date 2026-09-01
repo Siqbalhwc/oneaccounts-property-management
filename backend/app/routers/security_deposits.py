@@ -153,10 +153,20 @@ def record_deposit_payment(
 
     payment_date = payload.payment_date or date.today()
 
+    # Single embedded query instead of four sequential round-trips (lease,
+    # then room, then room's building for owner fallback, then tenant).
+    # Each extra round-trip to PostgREST here was pure added latency on
+    # Vercel's serverless function -- with enough of them stacked up
+    # (this endpoint used to make ~14 sequential calls), the response
+    # could arrive after the browser had already given up, showing
+    # "Failed to fetch" even though the payment + journal entry had
+    # already committed successfully a few calls earlier. This is the fix
+    # for that: fewer round-trips, and no more calls after the write that
+    # could fail and turn a successful save into a reported error.
     lease_id = deposit.data["lease_id"]
     lease = (
         supabase.table("leases")
-        .select("tenant_id, room_id")
+        .select("tenant_id, room_id, tenants(full_name), rooms(room_number, building_id, owner_id, buildings(owner_id))")
         .eq("id", lease_id)
         .single()
         .execute()
@@ -165,12 +175,14 @@ def record_deposit_payment(
     building_id, room_id, owner_id, tenant_id, tenant_name, room_label = None, None, None, None, "Tenant", "room"
     if lease:
         tenant_id, room_id = lease["tenant_id"], lease["room_id"]
-        room = supabase.table("rooms").select("room_number, building_id").eq("id", room_id).single().execute().data
-        building_id = room["building_id"] if room else None
-        room_label = room.get("room_number", "room") if room else "room"
-        owner_id = resolve_room_owner(supabase, room_id)
-        tenant = supabase.table("tenants").select("full_name").eq("id", tenant_id).single().execute().data
-        tenant_name = tenant["full_name"] if tenant else "Tenant"
+        tenant = lease.get("tenants")
+        tenant_name = (tenant.get("full_name") if tenant else None) or "Tenant"
+        room = lease.get("rooms")
+        if room:
+            building_id = room.get("building_id")
+            room_label = room.get("room_number") or "room"
+            building = room.get("buildings")
+            owner_id = room.get("owner_id") or (building.get("owner_id") if building else None)
 
     payment = (
         supabase.table("security_deposit_payments")
@@ -221,11 +233,21 @@ def record_deposit_payment(
             "date_received": str(payment_date),
         }
     if update_fields:
-        supabase.table("security_deposits").update(update_fields).eq("id", deposit_id).execute()
+        try:
+            supabase.table("security_deposits").update(update_fields).eq("id", deposit_id).execute()
+        except Exception:
+            # The payment + journal entry are already safely posted above --
+            # this flag update is best-effort so a hiccup here never turns
+            # an already-successful save into a reported failure. Worst
+            # case, is_received/date_received catch up on the next payment
+            # or the next full page load (amount_paid/amount_pending below
+            # are computed fresh from security_deposit_payments every time,
+            # so the pending amount is correct either way).
+            pass
 
-    updated_deposit = (
-        supabase.table("security_deposits").select("*").eq("id", deposit_id).single().execute().data
-    )
+    # Built from data already in hand -- no extra round-trip needed, and
+    # one less thing that could fail after the real work is already done.
+    updated_deposit = {**deposit.data, **update_fields}
     updated_deposit["amount_paid"] = new_total_paid
     updated_deposit["amount_pending"] = max(agreed_amount - new_total_paid, 0.0)
 
