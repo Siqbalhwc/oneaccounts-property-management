@@ -141,6 +141,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         mobileOpen={mobileNavOpen}
         onClose={() => setMobileNavOpen(false)}
         isPlatformAdmin={!!profile?.is_platform_admin}
+        showImplementation={
+          !!profile?.is_platform_admin ||
+          profile?.role === "client_requester" ||
+          profile?.role === "client_senior_approver"
+        }
       />
       <div className="flex-1 flex flex-col min-w-0">
         <header className="no-print h-16 border-b border-border bg-paper-card flex items-center justify-between px-4 sm:px-6 shrink-0">
