@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Field, Input, Select, AmountInput } from "@/components/ui/Field";
+import { Field, Input, AmountInput } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { api, Building, Tenant, Account } from "@/lib/api";
 
 // Room and Owner aren't fully typed in lib/api.ts (the shared Room type
@@ -67,6 +68,26 @@ export default function NewJournalEntryPage() {
     api.get<Tenant[]>("/tenants").then(setTenants);
   }, []);
 
+  // Option lists for the searchable dropdowns. Account's label folds in
+  // the code (e.g. "5400 · Utilities Expense") so searching also matches
+  // by account code, same as the old plain <select> showed.
+  const accountOptions = useMemo(
+    () => accounts.map((a) => ({ value: a.id, label: `${a.code} · ${a.name}` })),
+    [accounts]
+  );
+  const tenantOptions = useMemo(
+    () => [{ value: "", label: "—" }, ...tenants.map((t) => ({ value: t.id, label: t.full_name }))],
+    [tenants]
+  );
+  const ownerOptions = useMemo(
+    () => [{ value: "", label: "—" }, ...owners.map((o) => ({ value: o.id, label: o.name }))],
+    [owners]
+  );
+  const buildingOptions = useMemo(
+    () => [{ value: "", label: "—" }, ...buildings.map((b) => ({ value: b.id, label: b.name }))],
+    [buildings]
+  );
+
   function updateLine(index: number, patch: Partial<EntryLine>) {
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)));
   }
@@ -127,6 +148,10 @@ export default function NewJournalEntryPage() {
 
   function roomsForBuilding(buildingId: string) {
     return rooms.filter((r) => r.building_id === buildingId);
+  }
+
+  function roomOptionsFor(buildingId: string) {
+    return [{ value: "", label: "—" }, ...roomsForBuilding(buildingId).map((r) => ({ value: r.id, label: r.room_number }))];
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -236,18 +261,16 @@ export default function NewJournalEntryPage() {
               </thead>
               <tbody>
                 {lines.map((line, i) => {
-                  const roomOptions = line.building_id ? roomsForBuilding(line.building_id) : [];
                   return (
                     <tr key={i} className="border-b border-border last:border-b-0 hover:bg-ledger/[0.02]">
                       <td className="sticky left-0 z-10 bg-paper-card shadow-[2px_0_0_rgba(31,45,36,0.04)] py-2 pl-3 pr-2 align-middle min-w-[210px]">
-                        <Select value={line.account_id} onChange={(e) => updateLine(i, { account_id: e.target.value })}>
-                          <option value="">Select account…</option>
-                          {accounts.map((a) => (
-                            <option key={a.id} value={a.id}>
-                              {a.code} · {a.name}
-                            </option>
-                          ))}
-                        </Select>
+                        <SearchableSelect
+                          value={line.account_id}
+                          onChange={(v) => updateLine(i, { account_id: v })}
+                          options={accountOptions}
+                          placeholder="Search account…"
+                          emptyLabel="No accounts match"
+                        />
                       </td>
                       <td className="py-2 px-2 align-middle">
                         <AmountInput
@@ -266,48 +289,41 @@ export default function NewJournalEntryPage() {
                         />
                       </td>
                       <td className="py-2 px-2 align-middle">
-                        <Select value={line.tenant_id} onChange={(e) => updateLine(i, { tenant_id: e.target.value })}>
-                          <option value="">—</option>
-                          {tenants.map((t) => (
-                            <option key={t.id} value={t.id}>
-                              {t.full_name}
-                            </option>
-                          ))}
-                        </Select>
+                        <SearchableSelect
+                          value={line.tenant_id}
+                          onChange={(v) => updateLine(i, { tenant_id: v })}
+                          options={tenantOptions}
+                          placeholder="Search tenant…"
+                          emptyLabel="No tenants match"
+                        />
                       </td>
                       <td className="py-2 px-2 align-middle">
-                        <Select value={line.owner_id} onChange={(e) => updateLine(i, { owner_id: e.target.value })}>
-                          <option value="">—</option>
-                          {owners.map((o) => (
-                            <option key={o.id} value={o.id}>
-                              {o.name}
-                            </option>
-                          ))}
-                        </Select>
+                        <SearchableSelect
+                          value={line.owner_id}
+                          onChange={(v) => updateLine(i, { owner_id: v })}
+                          options={ownerOptions}
+                          placeholder="Search owner…"
+                          emptyLabel="No owners match"
+                        />
                       </td>
                       <td className="py-2 px-2 align-middle">
-                        <Select
+                        <SearchableSelect
                           value={line.room_id}
-                          onChange={(e) => handleRoomChange(i, e.target.value)}
+                          onChange={(v) => handleRoomChange(i, v)}
+                          options={roomOptionsFor(line.building_id)}
+                          placeholder="Search room…"
                           disabled={!line.building_id}
-                        >
-                          <option value="">—</option>
-                          {roomOptions.map((r) => (
-                            <option key={r.id} value={r.id}>
-                              {r.room_number}
-                            </option>
-                          ))}
-                        </Select>
+                          emptyLabel="No rooms match"
+                        />
                       </td>
                       <td className="py-2 px-2 align-middle">
-                        <Select value={line.building_id} onChange={(e) => handleBuildingChange(i, e.target.value)}>
-                          <option value="">—</option>
-                          {buildings.map((b) => (
-                            <option key={b.id} value={b.id}>
-                              {b.name}
-                            </option>
-                          ))}
-                        </Select>
+                        <SearchableSelect
+                          value={line.building_id}
+                          onChange={(v) => handleBuildingChange(i, v)}
+                          options={buildingOptions}
+                          placeholder="Search building…"
+                          emptyLabel="No buildings match"
+                        />
                       </td>
                       <td className="py-2 pr-3 align-middle">
                         <button
