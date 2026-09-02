@@ -44,11 +44,13 @@ export function Sidebar({
   mobileOpen,
   onClose,
   isPlatformAdmin,
+  showImplementation,
 }: {
   company: Company | null;
   mobileOpen: boolean;
   onClose: () => void;
   isPlatformAdmin?: boolean;
+  showImplementation?: boolean;
 }) {
   const pathname = usePathname();
 
@@ -124,16 +126,48 @@ export function Sidebar({
               <p className="px-2 text-[10px] uppercase tracking-widest text-brass/70 font-medium mb-2">
                 Platform
               </p>
+              <div className="space-y-0.5">
+                <Link
+                  href="/tower"
+                  onClick={onClose}
+                  className={`block px-2.5 py-2 rounded-card text-sm transition-colors ${
+                    pathname.startsWith("/tower")
+                      ? "bg-paper/10 text-paper font-medium border-l-2 border-brass -ml-px pl-[9px]"
+                      : "text-paper/70 hover:text-paper hover:bg-paper/5"
+                  }`}
+                >
+                  Tower — all companies
+                </Link>
+                <Link
+                  href="/implementation"
+                  onClick={onClose}
+                  className={`block px-2.5 py-2 rounded-card text-sm transition-colors ${
+                    pathname.startsWith("/implementation")
+                      ? "bg-paper/10 text-paper font-medium border-l-2 border-brass -ml-px pl-[9px]"
+                      : "text-paper/70 hover:text-paper hover:bg-paper/5"
+                  }`}
+                >
+                  Implementation Portal
+                </Link>
+              </div>
+            </div>
+          )}
+
+          {!isPlatformAdmin && showImplementation && (
+            <div>
+              <p className="px-2 text-[10px] uppercase tracking-widest text-brass/70 font-medium mb-2">
+                Onboarding
+              </p>
               <Link
-                href="/tower"
+                href="/implementation"
                 onClick={onClose}
                 className={`block px-2.5 py-2 rounded-card text-sm transition-colors ${
-                  pathname.startsWith("/tower")
+                  pathname.startsWith("/implementation")
                     ? "bg-paper/10 text-paper font-medium border-l-2 border-brass -ml-px pl-[9px]"
                     : "text-paper/70 hover:text-paper hover:bg-paper/5"
                 }`}
               >
-                Tower — all companies
+                My Implementation
               </Link>
             </div>
           )}
