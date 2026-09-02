@@ -95,6 +95,29 @@
   .scrollbar-thin::-webkit-scrollbar-thumb:hover {
     background: color-mix(in srgb, currentColor 35%, transparent);
   }
+
+  /* A themed horizontal scrollbar (brass tones, matching the app palette)
+     for wide side-scrolling tables -- e.g. the journal entry grid on
+     narrow screens. Uses explicit brand colors rather than currentColor,
+     so it never inherits into (and tints) the table's own text. */
+  .scrollbar-brass {
+    scrollbar-width: thin;
+    scrollbar-color: theme("colors.brass.DEFAULT") theme("colors.paper.DEFAULT");
+  }
+  .scrollbar-brass::-webkit-scrollbar {
+    height: 9px;
+  }
+  .scrollbar-brass::-webkit-scrollbar-track {
+    background: theme("colors.paper.DEFAULT");
+  }
+  .scrollbar-brass::-webkit-scrollbar-thumb {
+    background: theme("colors.brass.DEFAULT");
+    border-radius: 999px;
+    border: 2px solid theme("colors.paper.DEFAULT");
+  }
+  .scrollbar-brass::-webkit-scrollbar-thumb:hover {
+    background: theme("colors.brass.dark");
+  }
 }
 
 /* Printing: hide navigation chrome and let the current report/page fill
