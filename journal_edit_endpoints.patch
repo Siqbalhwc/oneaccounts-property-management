@@ -1,0 +1,233 @@
+diff --git a/backend/app/routers/ledger.py b/backend/app/routers/ledger.py
+index 9182bfb..a74259b 100644
+--- a/backend/app/routers/ledger.py
++++ b/backend/app/routers/ledger.py
+@@ -6,6 +6,7 @@ from pydantic import BaseModel, field_validator
+ from supabase import Client
+ 
+ from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
++from app.crud.generic import write_audit_log
+ from app.services.ledger import JournalLine, UnbalancedJournalEntry, post_journal_entry
+ 
+ router = APIRouter(prefix="/ledger", tags=["Ledger"])
+@@ -142,3 +143,220 @@ def create_manual_journal_entry(
+         raise HTTPException(status_code=400, detail=str(e))
+ 
+     return entry
++
++
++@router.get("/manual-entries")
++def list_manual_journal_entries(
++    supabase: Client = Depends(get_supabase),
++    company_id: str = Depends(get_current_company_id),
++):
++    """
++    Lists every manually-posted journal entry (source_type='manual_adjustment'),
++    newest first, with a compact one-line summary of its accounts and its
++    total amount. Powers the "Manual entries" table on the Journal page --
++    the only entries that can ever be edited (vs. reversed), so this is
++    deliberately its own small list rather than reusing /financials/journal,
++    which is one row per LINE across every source type.
++    """
++    entries = (
++        supabase.table("journal_entries")
++        .select("*")
++        .eq("company_id", company_id)
++        .eq("source_type", "manual_adjustment")
++        .order("entry_date", desc=True)
++        .order("created_at", desc=True)
++        .execute()
++        .data
++    )
++    if not entries:
++        return []
++
++    entry_ids = [e["id"] for e in entries]
++    lines = (
++        supabase.table("journal_lines")
++        .select("journal_entry_id, direction, amount, account_id")
++        .in_("journal_entry_id", entry_ids)
++        .execute()
++        .data
++    )
++    account_ids = {l["account_id"] for l in lines}
++    accounts = (
++        supabase.table("chart_of_accounts")
++        .select("id, code")
++        .in_("id", list(account_ids))
++        .execute()
++        .data
++        if account_ids
++        else []
++    )
++    code_by_account = {a["id"]: a["code"] for a in accounts}
++
++    lines_by_entry: dict[str, list] = {}
++    for l in lines:
++        lines_by_entry.setdefault(l["journal_entry_id"], []).append(l)
++
++    result = []
++    for e in entries:
++        entry_lines = lines_by_entry.get(e["id"], [])
++        total_amount = round(sum(float(l["amount"]) for l in entry_lines if l["direction"] == "debit"), 2)
++        debit_codes = [code_by_account.get(l["account_id"], "?") for l in entry_lines if l["direction"] == "debit"]
++        credit_codes = [code_by_account.get(l["account_id"], "?") for l in entry_lines if l["direction"] == "credit"]
++        result.append(
++            {
++                "id": e["id"],
++                "entry_date": e["entry_date"],
++                "description": e.get("description"),
++                "status": e["status"],
++                "total_amount": total_amount,
++                "lines_summary": f"Dr {', '.join(debit_codes)} · Cr {', '.join(credit_codes)}",
++            }
++        )
++    return result
++
++
++@router.get("/manual-entry/{entry_id}")
++def get_manual_journal_entry(
++    entry_id: str,
++    supabase: Client = Depends(get_supabase),
++):
++    """
++    Full detail for one manual entry, for the edit screen -- rejects (400)
++    anything that isn't source_type='manual_adjustment' so this can never
++    become a back door for editing an invoice/payment/expense/etc.-generated
++    entry, which must still be corrected by reversal.
++    """
++    entry = supabase.table("journal_entries").select("*").eq("id", entry_id).single().execute()
++    if not entry.data:
++        raise HTTPException(status_code=404, detail="Journal entry not found")
++    if entry.data["source_type"] != "manual_adjustment":
++        raise HTTPException(status_code=400, detail="Only manually-created entries can be opened here.")
++
++    lines = (
++        supabase.table("journal_lines")
++        .select("account_id, direction, amount, building_id, room_id, owner_id, tenant_id")
++        .eq("journal_entry_id", entry_id)
++        .execute()
++        .data
++    )
++    return {
++        "id": entry.data["id"],
++        "entry_date": entry.data["entry_date"],
++        "description": entry.data.get("description"),
++        "source_type": entry.data["source_type"],
++        "source_id": entry.data.get("source_id"),
++        "status": entry.data["status"],
++        "lines": lines,
++    }
++
++
++@router.patch("/manual-entry/{entry_id}")
++def update_manual_journal_entry(
++    entry_id: str,
++    payload: ManualJournalEntryCreate,
++    supabase: Client = Depends(get_supabase),
++    company_id: str = Depends(get_current_company_id),
++    user: dict = Depends(get_current_user),
++    _perm: None = Depends(require_owner_or_admin),
++):
++    """
++    Edits a manual/adjustment entry IN PLACE (date, memo, lines) -- the one
++    deliberate exception to "posted entries are never touched, only
++    reversed". This only ever applies to entries this same form created
++    (source_type='manual_adjustment'); every other source_type (invoice,
++    payment, expense, salary, deposit, ...) must still be corrected by
++    reversing it, same as before. A reversed manual entry can no longer be
++    edited either -- reverse and repost fresh instead, so the audit trail
++    of "why" isn't lost.
++
++    Every change is written to audit_log (old lines vs new lines, old vs
++    new date/memo) so the History panel on the edit screen has something
++    to show, exactly like every other editable record in this app.
++    """
++    existing = supabase.table("journal_entries").select("*").eq("id", entry_id).single().execute()
++    if not existing.data:
++        raise HTTPException(status_code=404, detail="Journal entry not found")
++    if existing.data["source_type"] != "manual_adjustment":
++        raise HTTPException(
++            status_code=400,
++            detail="Only manually-created entries can be edited. Post a reversal for this one instead.",
++        )
++    if existing.data["status"] == "reversed":
++        raise HTTPException(status_code=400, detail="This entry was already reversed and can't be edited.")
++
++    if len(payload.lines) < 2:
++        raise HTTPException(status_code=400, detail="A journal entry needs at least two lines.")
++
++    account_ids = {l.account_id for l in payload.lines}
++    accounts = (
++        supabase.table("chart_of_accounts")
++        .select("id")
++        .eq("company_id", company_id)
++        .in_("id", list(account_ids))
++        .execute()
++        .data
++    )
++    found_ids = {a["id"] for a in accounts}
++    missing = account_ids - found_ids
++    if missing:
++        raise HTTPException(status_code=400, detail="One or more selected accounts were not found.")
++
++    total_debits = round(sum(l.amount for l in payload.lines if l.direction == "debit"), 2)
++    total_credits = round(sum(l.amount for l in payload.lines if l.direction == "credit"), 2)
++    if total_debits != total_credits:
++        raise HTTPException(status_code=400, detail="Debits must equal credits before this can be saved.")
++    if total_debits == 0:
++        raise HTTPException(status_code=400, detail="This entry has a zero amount -- nothing to save.")
++
++    old_lines = supabase.table("journal_lines").select("*").eq("journal_entry_id", entry_id).execute().data
++
++    updated = (
++        supabase.table("journal_entries")
++        .update({"entry_date": str(payload.entry_date), "description": payload.description})
++        .eq("id", entry_id)
++        .execute()
++        .data[0]
++    )
++
++    # Lines are replaced wholesale (delete + reinsert) rather than diffed
++    # line-by-line -- simpler, and matches how the create endpoint already
++    # writes lines. Like the rest of the ledger (see reference doc, known
++    # open item #1), this is two separate calls, not one transaction; a
++    # failure between them is rare but possible at this scale and is a
++    # candidate for a single Postgres function later.
++    supabase.table("journal_lines").delete().eq("journal_entry_id", entry_id).execute()
++    new_line_rows = [
++        {
++            "company_id": company_id,
++            "journal_entry_id": entry_id,
++            "account_id": l.account_id,
++            "direction": l.direction,
++            "amount": l.amount,
++            "building_id": l.building_id,
++            "room_id": l.room_id,
++            "owner_id": l.owner_id,
++            "tenant_id": l.tenant_id,
++        }
++        for l in payload.lines
++    ]
++    supabase.table("journal_lines").insert(new_line_rows).execute()
++
++    write_audit_log(
++        supabase,
++        company_id,
++        user["user_id"],
++        "update",
++        "journal_entries",
++        entry_id,
++        {
++            "entry_date": existing.data["entry_date"],
++            "description": existing.data.get("description"),
++            "lines": old_lines,
++        },
++        {
++            "entry_date": str(payload.entry_date),
++            "description": payload.description,
++            "lines": new_line_rows,
++        },
++    )
++
++    return {**updated, "lines": new_line_rows}
