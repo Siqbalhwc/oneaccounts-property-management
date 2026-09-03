@@ -2,10 +2,8 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Pencil } from "lucide-react";
 import { Card, DataTable } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { StampBadge } from "@/components/ui/StampBadge";
 import { Field, Input, Select } from "@/components/ui/Field";
 import { api, Building } from "@/lib/api";
 
@@ -22,14 +20,6 @@ type JournalLine = {
 
 type Owner = { id: string; name: string };
 type Tenant = { id: string; full_name: string };
-type ManualEntry = {
-  id: string;
-  entry_date: string;
-  description: string | null;
-  status: string;
-  total_amount: number;
-  lines_summary: string;
-};
 
 function formatPkr(n: number) {
   return `Rs ${Number(n || 0).toLocaleString("en-PK")}`;
@@ -47,20 +37,6 @@ export default function JournalEntriesPage() {
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showFilters, setShowFilters] = useState(false);
-
-  // Manual/adjustment entries only -- these are the only entries that can
-  // ever be edited (vs. reversed), so they get their own small list with
-  // an Edit action, separate from the all-lines table below which mixes
-  // in every source type and isn't grouped by entry.
-  const [manualEntries, setManualEntries] = useState<ManualEntry[] | null>(null);
-  const [manualError, setManualError] = useState<string | null>(null);
-
-  function loadManualEntries() {
-    api
-      .get<ManualEntry[]>("/ledger/manual-entries")
-      .then(setManualEntries)
-      .catch((err: any) => setManualError(err.message));
-  }
 
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -92,7 +68,6 @@ export default function JournalEntriesPage() {
     api.get<Building[]>("/buildings").then(setBuildings);
     api.get<Owner[]>("/owners").then(setOwners);
     api.get<Tenant[]>("/tenants").then(setTenants);
-    loadManualEntries();
   }, []);
 
   const activeFilterCount = [buildingFilter, ownerFilter, tenantFilter, sourceTypeFilter].filter(Boolean).length;
@@ -169,42 +144,6 @@ export default function JournalEntriesPage() {
           </div>
         </Card>
       )}
-
-      <Card>
-        <div className="mb-3">
-          <h2 className="text-sm font-semibold">Manual entries</h2>
-          <p className="text-xs text-ink/50 mt-0.5">
-            Only entries posted here via &quot;New entry&quot; can be edited after posting.
-            Everything else (leases, invoices, payments, expenses, salaries, deposits)
-            must be corrected by reversing it instead.
-          </p>
-        </div>
-        {manualError && <p className="text-sm text-stamp-red mb-2">Couldn&apos;t load manual entries — {manualError}.</p>}
-        <DataTable
-          keyField="id"
-          rows={manualEntries ?? []}
-          emptyMessage="No manual entries yet."
-          columns={[
-            { header: "Date", accessor: (e) => e.entry_date },
-            { header: "Description", accessor: (e) => e.description ?? "—" },
-            { header: "Lines", accessor: (e) => <span className="text-ink/60 text-xs">{e.lines_summary}</span> },
-            { header: "Amount", accessor: (e) => <span className="figures">{formatPkr(e.total_amount)}</span>, align: "right" },
-            { header: "Status", accessor: (e) => <StampBadge status={e.status === "reversed" ? "terminated" : "active"} /> },
-            {
-              header: "",
-              accessor: (e) =>
-                e.status === "reversed" ? (
-                  <span className="text-xs text-ink/35">Reversed</span>
-                ) : (
-                  <Link href={`/journal/${e.id}/edit`} title="Edit" className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink inline-flex">
-                    <Pencil size={16} />
-                  </Link>
-                ),
-              align: "right",
-            },
-          ]}
-        />
-      </Card>
 
       <Card>
         <DataTable
