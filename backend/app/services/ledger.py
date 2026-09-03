@@ -78,6 +78,42 @@ def get_account_for_charge_label(supabase: Client, company_id: str, label: str) 
     return account
 
 
+def get_tenant_account_balance(
+    supabase: Client,
+    account_id: str,
+    tenant_id: str,
+    as_of_date: str,
+) -> float:
+    """
+    A tenant's running balance in one account (e.g. Accounts Receivable) as
+    of a given date, inclusive of that date. Wraps the same general_ledger()
+    SQL function the General Ledger page/report already calls, so "balance
+    as of a date" is computed exactly one way everywhere in this system --
+    never a second, slightly-different version living here.
+
+    Returns 0.0 if there's no activity for this tenant on this account up
+    to that date (a brand-new tenant, or a genuinely zero balance) rather
+    than raising -- an empty ledger is a valid, common case, not an error.
+    """
+    rows = (
+        supabase.rpc(
+            "general_ledger",
+            {
+                "p_account_id": account_id,
+                "p_date_from": None,
+                "p_date_to": as_of_date,
+                "p_owner_id": None,
+                "p_tenant_id": tenant_id,
+            },
+        )
+        .execute()
+        .data
+    )
+    if not rows:
+        return 0.0
+    return float(rows[-1]["running_balance"])
+
+
 def resolve_room_owner(supabase: Client, room_id: str) -> Optional[str]:
     """Effective owner_id for a room: its own owner_id if set, else its building's."""
     room = (

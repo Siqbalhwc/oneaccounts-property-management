@@ -7,6 +7,7 @@ drifting apart over time.
 
 import io
 import urllib.request
+from datetime import date, timedelta
 
 from fastapi import HTTPException
 from reportlab.lib.pagesizes import A4
@@ -15,17 +16,29 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from supabase import Client
 
+from app.services.ledger import get_account_id, get_tenant_account_balance
+
 
 def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
     """Fetches everything needed to render an invoice: the invoice itself,
     its line items, and the tenant/room/building/company it belongs to.
-    Also fetches the lease's security deposit (if any) and whether this is
-    the lease's first invoice -- the first invoice shows the deposit as an
-    informational line (amount + received/pending status), matching what
-    the lease creation screen already showed at signing. The deposit stays
-    outside invoice_line_items/total_amount on purpose: it's tracked and
-    settled through its own separate flow (security_deposits.py), not
-    through invoice payments."""
+    Also fetches the lease's security deposit (if any), plus two ledger-
+    derived figures shown on EVERY invoice (not just the first):
+
+    - opening_balance: the tenant's Accounts Receivable balance as of the
+      day before this invoice's month starts (e.g. generating the Sep 2026
+      invoice checks the balance as at 31 Aug 2026) -- pulled live from
+      journal_lines via the same general_ledger() function the General
+      Ledger page uses, so it can never drift out of sync with the real
+      books. None if it couldn't be computed (e.g. chart of accounts isn't
+      fully set up yet) -- the PDF still renders in that case, just without
+      this line, rather than failing the whole invoice.
+    - deposit / deposit paid+pending+refunded amounts: the security
+      deposit's CURRENT state (from security_deposit_payments, the real
+      source of truth since partial payments were added), not the legacy
+      is_received flag -- shown as information only, never added into the
+      invoice total. It's tracked and settled through its own separate
+      flow (security_deposits.py), not through invoice payments."""
     invoice = supabase.table("invoices").select("*").eq("id", invoice_id).single().execute()
     if not invoice.data:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -49,15 +62,30 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
     )
     deposit = deposit_rows[0] if deposit_rows else None
 
-    lease_invoices = (
-        supabase.table("invoices")
-        .select("id, created_at")
-        .eq("lease_id", lease["id"])
-        .order("created_at")
-        .execute()
-        .data
-    )
-    is_first_invoice = bool(lease_invoices) and lease_invoices[0]["id"] == invoice["id"]
+    deposit_paid = 0.0
+    deposit_pending = 0.0
+    deposit_refunded = 0.0
+    if deposit:
+        payment_rows = (
+            supabase.table("security_deposit_payments")
+            .select("amount")
+            .eq("security_deposit_id", deposit["id"])
+            .execute()
+            .data
+        )
+        deposit_paid = sum(float(p["amount"]) for p in payment_rows)
+        deposit_refunded = float(deposit.get("amount_refunded") or 0)
+        deposit_pending = max(float(deposit["amount_received"]) - deposit_paid, 0.0)
+
+    opening_balance = None
+    try:
+        ar_account_id = get_account_id(supabase, invoice["company_id"], "1100")
+        cutoff = date.fromisoformat(str(invoice["invoice_month"])) - timedelta(days=1)
+        opening_balance = get_tenant_account_balance(
+            supabase, ar_account_id, lease["tenant_id"], str(cutoff)
+        )
+    except Exception:
+        opening_balance = None  # never block the PDF from generating over this
 
     return {
         "invoice": invoice,
@@ -68,8 +96,21 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
         "building": building,
         "company": company,
         "deposit": deposit,
-        "is_first_invoice": is_first_invoice,
+        "deposit_paid": deposit_paid,
+        "deposit_pending": deposit_pending,
+        "deposit_refunded": deposit_refunded,
+        "opening_balance": opening_balance,
     }
+
+
+def _fmt_pkr(amount: float) -> str:
+    """Rs 25,000 for a normal (owed) amount; (Rs 5,000) -- accounting-style
+    parentheses -- for a negative one, e.g. a tenant credit/advance. Plain
+    'Rs -5,000' reads like a typo on a printed page; this reads unambiguously
+    as a credit at a glance, the same convention used on bank/CC statements."""
+    if amount < 0:
+        return f"(Rs {abs(amount):,.0f})"
+    return f"Rs {amount:,.0f}"
 
 
 def render_invoice_pdf(ctx: dict) -> bytes:
@@ -77,7 +118,11 @@ def render_invoice_pdf(ctx: dict) -> bytes:
     fetch_invoice_context(). Pure function -- no I/O beyond the logo fetch."""
     invoice, line_items = ctx["invoice"], ctx["line_items"]
     tenant, room, building, company = ctx["tenant"], ctx["room"], ctx["building"], ctx["company"]
-    deposit, is_first_invoice = ctx.get("deposit"), ctx.get("is_first_invoice")
+    deposit = ctx.get("deposit")
+    deposit_paid = ctx.get("deposit_paid") or 0.0
+    deposit_pending = ctx.get("deposit_pending") or 0.0
+    deposit_refunded = ctx.get("deposit_refunded") or 0.0
+    opening_balance = ctx.get("opening_balance")
 
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -223,12 +268,68 @@ def render_invoice_pdf(ctx: dict) -> bytes:
     c.drawString(24 * mm, y, "Total")
     c.drawRightString(width - 24 * mm, y, f"Rs {float(invoice['total_amount']):,.0f}")
 
-    # Security deposit -- shown for information only on the first invoice.
-    # It is NOT part of the invoice total above and is not settled by
-    # paying this invoice: it's tracked and receipted through its own
-    # separate flow, so a tenant/owner always knows its true status.
-    if is_first_invoice and deposit and float(deposit.get("amount_received") or 0) > 0:
-        received = bool(deposit.get("is_received"))
+    # Opening balance -- the tenant's receivable balance as of the day
+    # before this invoice's month starts, pulled live from the ledger
+    # (see fetch_invoice_context). Shown as its own line so the tenant can
+    # see exactly how "Total receivable" below is built: what they still
+    # owed coming in, plus this month's fresh charges. opening_balance is
+    # None only if it couldn't be computed at all (never shown in that
+    # case) -- a computed value of 0 IS shown, so the breakdown looks
+    # consistent invoice to invoice rather than sometimes appearing and
+    # sometimes not.
+    if opening_balance is not None:
+        y -= 9 * mm
+        c.setFillColorRGB(*INK)
+        c.setFont("Helvetica", 10)
+        c.drawString(20 * mm, y, "Opening balance (brought forward)")
+        c.drawRightString(width - 20 * mm, y, _fmt_pkr(opening_balance))
+
+        # A negative opening balance means the tenant is in credit (e.g. an
+        # advance payment last month) -- call that out in words too, right
+        # under the figure, so "(Rs 5,000)" reads as good news immediately
+        # rather than looking like an error on the page.
+        if opening_balance < 0:
+            y -= 5 * mm
+            c.setFont("Helvetica-Oblique", 8)
+            c.setFillColorRGB(0.4, 0.43, 0.41)
+            c.drawRightString(width - 20 * mm, y, "Credit from an earlier advance payment")
+            c.setFillColorRGB(*INK)
+
+        total_receivable = opening_balance + float(invoice["total_amount"])
+
+        y -= 12 * mm
+        c.setFillColorRGB(*PAPER)
+        c.rect(20 * mm, y - 3 * mm, width - 40 * mm, 11 * mm, fill=1, stroke=0)
+        c.setFillColorRGB(*LEDGER)
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(24 * mm, y, "Total receivable")
+        c.drawRightString(width - 24 * mm, y, _fmt_pkr(total_receivable))
+
+        # The advance can be large enough to cover this month's bill
+        # entirely and still leave a credit -- e.g. total_amount 25,000
+        # against an opening balance of (30,000) nets to (5,000) receivable.
+        # Spell that out too, so nothing due this month is unambiguous
+        # rather than implied by a bracketed number alone.
+        if total_receivable < 0:
+            y -= 8 * mm
+            c.setFont("Helvetica-Oblique", 8)
+            c.setFillColorRGB(0.4, 0.43, 0.41)
+            c.drawRightString(
+                width - 20 * mm, y,
+                f"No payment due this month — Rs {abs(total_receivable):,.0f} credit remains after this invoice.",
+            )
+            c.setFillColorRGB(*INK)
+
+    # Security deposit -- shown for information on every invoice, not just
+    # the first, using the CURRENT paid/pending state (security deposits
+    # can be paid in installments -- see security_deposits.py). It is NOT
+    # part of the invoice total or "Total receivable" above, and is not
+    # settled by paying this invoice: it's tracked and receipted through
+    # its own separate flow, so a tenant/owner always knows its true
+    # status. Skipped only if nothing has ever been agreed for this lease,
+    # or the deposit has already been fully refunded and closed out.
+    deposit_net_held = deposit_paid - deposit_refunded
+    if deposit and float(deposit.get("amount_received") or 0) > 0 and (deposit_net_held > 0.01 or deposit_pending > 0.01):
         y -= 12 * mm
         c.setStrokeColorRGB(0.86, 0.84, 0.77)
         c.setLineWidth(0.75)
@@ -237,11 +338,12 @@ def render_invoice_pdf(ctx: dict) -> bytes:
         c.setFillColorRGB(*INK)
         c.setFont("Helvetica", 10)
         c.drawString(20 * mm, y, "Security deposit (refundable, held separately)")
-        c.drawRightString(width - 20 * mm, y, f"Rs {float(deposit['amount_received']):,.0f}")
+        c.drawRightString(width - 20 * mm, y, f"Rs {max(deposit_net_held, 0):,.0f}")
 
         y -= 6 * mm
-        status_text = "RECEIVED" if received else "PENDING"
-        status_color = LEDGER if received else (0.722, 0.525, 0.180)
+        fully_paid = deposit_pending <= 0.01
+        status_text = "RECEIVED" if fully_paid else "PARTIALLY RECEIVED"
+        status_color = LEDGER if fully_paid else (0.722, 0.525, 0.180)
         c.setFont("Helvetica-Bold", 8)
         badge_width = c.stringWidth(status_text, "Helvetica-Bold", 8) + 8 * mm
         c.setFillColorRGB(*status_color)
@@ -251,8 +353,10 @@ def render_invoice_pdf(ctx: dict) -> bytes:
 
         c.setFillColorRGB(0.4, 0.43, 0.41)
         c.setFont("Helvetica", 9)
-        combined = float(invoice["total_amount"]) + float(deposit["amount_received"])
-        note = f"Total due at signing (bill + deposit): Rs {combined:,.0f}" if not received else "Deposit already collected — see your security deposit receipt."
+        if fully_paid:
+            note = "Deposit fully collected — see your security deposit receipt."
+        else:
+            note = f"Rs {deposit_pending:,.0f} of the deposit is still pending."
         c.drawString(20 * mm + badge_width + 4 * mm, y, note)
 
     y -= 20 * mm
