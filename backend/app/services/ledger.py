@@ -139,6 +139,32 @@ def resolve_room_owner(supabase: Client, room_id: str) -> Optional[str]:
     return building.get("owner_id") if building else None
 
 
+def get_lease_receivable_balance(supabase: Client, company_id: str, lease_id: str) -> float:
+    """
+    The true amount currently owed by a lease (current invoice + any older
+    unpaid invoices, net of every payment and discount ever posted against
+    it) -- read directly from the ledger rather than recomputed invoice by
+    invoice. Every invoice debits Accounts Receivable; every payment and
+    discount credits it; both are tagged with lease_id. So the balance is
+    simply (AR debits - AR credits) for this lease -- if advances ever
+    outweigh what's owed, this naturally goes negative, with nothing extra
+    to track or keep in sync.
+    """
+    ar_id = get_account_id(supabase, company_id, "1100")
+    lines = (
+        supabase.table("journal_lines")
+        .select("direction, amount")
+        .eq("company_id", company_id)
+        .eq("account_id", ar_id)
+        .eq("lease_id", lease_id)
+        .execute()
+        .data
+    )
+    debits = sum(float(l["amount"]) for l in lines if l["direction"] == "debit")
+    credits = sum(float(l["amount"]) for l in lines if l["direction"] == "credit")
+    return round(debits - credits, 2)
+
+
 def post_journal_entry(
     supabase: Client,
     company_id: str,

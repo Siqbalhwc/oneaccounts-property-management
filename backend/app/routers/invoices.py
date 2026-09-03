@@ -26,14 +26,17 @@ def list_invoices(
     exclude_paid: Optional[bool] = Query(
         None, description="If true, only returns invoices not yet fully settled (excludes 'paid' and 'cancelled')"
     ),
+    lease_id: Optional[str] = Query(None, description="Only invoices for this lease"),
     supabase: Client = Depends(get_supabase),
 ):
     """
-    All three filters are purely additive -- omitting them returns exactly
-    what this endpoint always returned (every invoice), so existing callers
-    (Invoices page, Reports page) are unaffected. Added so the Dashboard can
-    ask for a recent window PLUS any still-unpaid invoice regardless of age,
-    instead of pulling the company's entire invoice history every load.
+    All filters are purely additive -- omitting them returns exactly what
+    this endpoint always returned (every invoice), so existing callers
+    (Invoices page, Reports page) are unaffected. date_from/date_to/
+    exclude_paid were added so the Dashboard can ask for a recent window
+    PLUS any still-unpaid invoice regardless of age, instead of pulling the
+    company's entire invoice history every load. lease_id was added for the
+    Receive Payment page, which needs one lease's invoices only.
     """
     query = supabase.table("invoices").select("*")
     if date_from:
@@ -42,6 +45,8 @@ def list_invoices(
         query = query.lte("invoice_month", str(date_to))
     if exclude_paid:
         query = query.not_.in_("status", ["paid", "cancelled"])
+    if lease_id:
+        query = query.eq("lease_id", lease_id)
     return query.order("created_at", desc=True).execute().data
 
 

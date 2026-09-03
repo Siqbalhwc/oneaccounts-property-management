@@ -1,11 +1,13 @@
+import uuid
 from datetime import date
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from supabase import Client
 
-from app.core.deps import get_current_company_id, get_supabase
-from app.services.ledger import get_account_id, post_journal_entry, resolve_room_owner
+from app.core.deps import get_current_company_id, get_current_user, get_supabase
+from app.services.ledger import get_account_id, get_lease_receivable_balance, post_journal_entry, resolve_room_owner
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 
@@ -159,3 +161,252 @@ def record_payment(
     )
 
     return payment
+
+
+# ---------------------------------------------------------------------------
+# Receipts -- receive a payment against one or more of a lease's outstanding
+# invoices at once, with an optional discount, and automatically carry any
+# amount received beyond what's owed forward as an advance on the lease.
+# ---------------------------------------------------------------------------
+class ReceiptRequest(BaseModel):
+    lease_id: str
+    account_id: str  # which Bank/Cash account the money actually landed in
+    receipt_date: date
+    payment_method: str = "cash"  # 'cash' | 'bank_transfer' | 'cheque' | 'other'
+    amount_received: float
+    invoice_ids: List[str]  # the invoices ticked on screen; allocated oldest-month first regardless of list order
+    discount_amount: float = 0
+    discount_account_id: Optional[str] = None
+    notes: Optional[str] = None
+
+
+def _get_caller_role(supabase: Client, user_id: str) -> Optional[str]:
+    profile = supabase.table("profiles").select("role").eq("id", user_id).single().execute()
+    return profile.data["role"] if profile.data else None
+
+
+@router.post("/receipt", status_code=201)
+def record_receipt(
+    payload: ReceiptRequest,
+    supabase: Client = Depends(get_supabase),
+    user: dict = Depends(get_current_user),
+    company_id: str = Depends(get_current_company_id),
+):
+    """
+    Records ONE receipt that can settle several of a lease's outstanding
+    invoices at once (oldest first), with an optional discount to whatever
+    GL account the caller picks. The rule enforced here, in order:
+
+      1. Discount is owner/admin only -- checked server-side, not just
+         hidden in the UI, since the UI is never the real security boundary
+         in this codebase.
+      2. amount_received + discount_amount can NEVER exceed the combined
+         balance of the ticked invoices. Cash is applied first (oldest
+         invoice to newest); the discount only ever fills whatever gap is
+         left after that -- it can't create a negative on an invoice.
+      3. If the amount received is MORE than the ticked invoices need, the
+         extra is never allowed into the discount -- it's recorded as a
+         separate advance payment (no invoice attached, tagged to the
+         lease/tenant), which is exactly what makes the lease's running
+         balance (see get_lease_receivable_balance) go negative -- a real,
+         ledger-backed credit, not a UI label.
+
+    Posts exactly one journal entry for the whole receipt:
+      Dr [account_id]         amount_received
+      Dr [discount_account_id] discount_amount   (only if discount_amount > 0)
+      Cr Accounts Receivable   amount_received + discount_amount
+    """
+    if payload.amount_received < 0 or payload.discount_amount < 0:
+        raise HTTPException(status_code=400, detail="Amounts can't be negative.")
+    if not payload.invoice_ids and payload.amount_received <= 0:
+        raise HTTPException(status_code=400, detail="Enter an amount received, or tick at least one invoice.")
+
+    if payload.discount_amount > 0:
+        role = _get_caller_role(supabase, user["user_id"])
+        if role not in ("owner", "admin"):
+            raise HTTPException(status_code=403, detail="Only an owner or admin can apply a discount.")
+        if not payload.discount_account_id:
+            raise HTTPException(status_code=400, detail="Select which account the discount should be charged to.")
+
+    account = (
+        supabase.table("chart_of_accounts")
+        .select("id")
+        .eq("id", payload.account_id)
+        .eq("company_id", company_id)
+        .single()
+        .execute()
+    )
+    if not account.data:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    if payload.discount_account_id:
+        discount_account = (
+            supabase.table("chart_of_accounts")
+            .select("id")
+            .eq("id", payload.discount_account_id)
+            .eq("company_id", company_id)
+            .single()
+            .execute()
+        )
+        if not discount_account.data:
+            raise HTTPException(status_code=404, detail="Discount account not found")
+
+    lease = supabase.table("leases").select("id, tenant_id, room_id").eq("id", payload.lease_id).single().execute()
+    if not lease.data:
+        raise HTTPException(status_code=404, detail="Lease not found")
+    tenant_id = lease.data["tenant_id"]
+    room_id = lease.data["room_id"]
+    room = supabase.table("rooms").select("building_id").eq("id", room_id).single().execute().data
+    building_id = room["building_id"] if room else None
+    owner_id = resolve_room_owner(supabase, room_id)
+
+    # Fetch the ticked invoices and each one's current remaining balance,
+    # sorted oldest month first -- this order is what "apply oldest first"
+    # actually means, regardless of what order they were ticked in.
+    invoices = (
+        supabase.table("invoices")
+        .select("*")
+        .in_("id", payload.invoice_ids)
+        .eq("lease_id", payload.lease_id)
+        .order("invoice_month")
+        .execute()
+        .data
+        if payload.invoice_ids
+        else []
+    )
+    balances: Dict[str, float] = {}
+    for inv in invoices:
+        prior_payments = (
+            supabase.table("payments")
+            .select("amount, discount_amount")
+            .eq("invoice_id", inv["id"])
+            .execute()
+            .data
+        )
+        settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in prior_payments)
+        balances[inv["id"]] = round(float(inv["total_amount"]) - settled, 2)
+
+    ticked_total = round(sum(max(b, 0) for b in balances.values()), 2)
+
+    if payload.discount_amount > 0 and (payload.amount_received + payload.discount_amount) > ticked_total + 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Amount received plus discount (Rs {payload.amount_received + payload.discount_amount:,.2f}) "
+                f"can't exceed the ticked invoices' total balance (Rs {ticked_total:,.2f})."
+            ),
+        )
+
+    # Pass 1: apply cash, oldest invoice to newest.
+    cash_remaining = payload.amount_received
+    discount_remaining = payload.discount_amount
+    cash_alloc: Dict[str, float] = {}
+    for inv in invoices:
+        if cash_remaining <= 0:
+            break
+        take = min(cash_remaining, max(balances[inv["id"]], 0))
+        if take > 0:
+            cash_alloc[inv["id"]] = take
+            balances[inv["id"]] -= take
+            cash_remaining -= take
+
+    # Pass 2: apply whatever discount is left to close the remaining gaps,
+    # oldest invoice to newest. Guaranteed not to exceed each invoice's
+    # remaining balance by the check above.
+    discount_alloc: Dict[str, float] = {}
+    for inv in invoices:
+        if discount_remaining <= 0:
+            break
+        take = min(discount_remaining, max(balances[inv["id"]], 0))
+        if take > 0:
+            discount_alloc[inv["id"]] = take
+            balances[inv["id"]] -= take
+            discount_remaining -= take
+
+    advance_amount = round(cash_remaining, 2)  # cash left over after every ticked invoice is fully covered
+
+    receipt_group_id = str(uuid.uuid4())
+    created_payments = []
+
+    for inv in invoices:
+        c = round(cash_alloc.get(inv["id"], 0), 2)
+        d = round(discount_alloc.get(inv["id"], 0), 2)
+        if c == 0 and d == 0:
+            continue
+        row = {
+            "company_id": company_id,
+            "invoice_id": inv["id"],
+            "tenant_id": tenant_id,
+            "amount": c,
+            "discount_amount": d,
+            "discount_account_id": payload.discount_account_id if d > 0 else None,
+            "payment_date": str(payload.receipt_date),
+            "payment_method": payload.payment_method,
+            "notes": payload.notes,
+            "receipt_group_id": receipt_group_id,
+        }
+        created_payments.append(supabase.table("payments").insert(row).execute().data[0])
+
+        all_payments = (
+            supabase.table("payments").select("amount, discount_amount").eq("invoice_id", inv["id"]).execute().data
+        )
+        total_settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in all_payments)
+        new_status = "paid" if total_settled >= float(inv["total_amount"]) - 0.01 else "partial"
+        supabase.table("invoices").update({"status": new_status}).eq("id", inv["id"]).execute()
+
+    if advance_amount > 0.01:
+        row = {
+            "company_id": company_id,
+            "invoice_id": None,
+            "tenant_id": tenant_id,
+            "amount": advance_amount,
+            "discount_amount": 0,
+            "payment_date": str(payload.receipt_date),
+            "payment_method": payload.payment_method,
+            "notes": (payload.notes or "") + " (advance -- exceeds current balance owed)",
+            "receipt_group_id": receipt_group_id,
+        }
+        created_payments.append(supabase.table("payments").insert(row).execute().data[0])
+
+    tenant = supabase.table("tenants").select("full_name").eq("id", tenant_id).single().execute().data
+    tenant_name = tenant["full_name"] if tenant else "Tenant"
+
+    ar_id = get_account_id(supabase, company_id, "1100")
+    lines = [
+        {
+            "account_id": payload.account_id, "direction": "debit", "amount": round(payload.amount_received, 2),
+            "building_id": building_id, "room_id": room_id, "owner_id": owner_id,
+            "tenant_id": tenant_id, "lease_id": payload.lease_id,
+        },
+    ]
+    if payload.discount_amount > 0:
+        lines.append({
+            "account_id": payload.discount_account_id, "direction": "debit", "amount": round(payload.discount_amount, 2),
+            "building_id": building_id, "room_id": room_id, "owner_id": owner_id,
+            "tenant_id": tenant_id, "lease_id": payload.lease_id,
+        })
+    lines.append({
+        "account_id": ar_id, "direction": "credit",
+        "amount": round(payload.amount_received + payload.discount_amount, 2),
+        "building_id": building_id, "room_id": room_id, "owner_id": owner_id,
+        "tenant_id": tenant_id, "lease_id": payload.lease_id,
+    })
+
+    entry = post_journal_entry(
+        supabase,
+        company_id=company_id,
+        entry_date=str(payload.receipt_date),
+        source_type="receipt",
+        source_id=receipt_group_id,
+        description=f"Receipt — {tenant_name}" + (" (with discount)" if payload.discount_amount > 0 else ""),
+        lines=lines,
+        created_by=user["user_id"],
+    )
+
+    return {
+        "receipt_group_id": receipt_group_id,
+        "payments": created_payments,
+        "advance_amount": advance_amount,
+        "journal_entry_id": entry["id"],
+        "running_balance": get_lease_receivable_balance(supabase, company_id, payload.lease_id),
+    }

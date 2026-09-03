@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, Invoice, Lease, Building, Tenant, Room, Account, fetchPdfBlob } from "@/lib/api";
+import { useRouter } from "next/navigation";
+import { api, Invoice, Lease, Building, Tenant, Room, fetchPdfBlob } from "@/lib/api";
 import { Card, DataTable } from "@/components/ui/Card";
 import { StampBadge } from "@/components/ui/StampBadge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
-import { Field, Input, AmountInput, Select } from "@/components/ui/Field";
+import { Field, Input, Select } from "@/components/ui/Field";
 import { WhatsAppIcon } from "@/components/ui/WhatsAppIcon";
 import { Banknote, Printer } from "lucide-react";
 
@@ -15,12 +16,12 @@ function formatPkr(n: number) {
 }
 
 export default function InvoicesPage() {
+  const router = useRouter();
   const [invoices, setInvoices] = useState<Invoice[] | null>(null);
   const [buildings, setBuildings] = useState<Building[] | null>(null);
   const [leases, setLeases] = useState<Lease[] | null>(null);
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
   const [rooms, setRooms] = useState<Room[] | null>(null);
-  const [accounts, setAccounts] = useState<Account[]>([]);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [sendingWhatsappId, setSendingWhatsappId] = useState<string | null>(null);
   const [monthFilter, setMonthFilter] = useState<string>("");
@@ -36,18 +37,6 @@ export default function InvoicesPage() {
     due_in_days: "7",
   });
 
-  const [paymentModalOpen, setPaymentModalOpen] = useState(false);
-  const [paymentSaving, setPaymentSaving] = useState(false);
-  const [paymentError, setPaymentError] = useState<string | null>(null);
-  const [activeInvoice, setActiveInvoice] = useState<Invoice | null>(null);
-  const [paymentForm, setPaymentForm] = useState({
-    amount: "",
-    payment_date: new Date().toISOString().slice(0, 10),
-    payment_method: "cash",
-    account_id: "",
-    notes: "",
-  });
-
   function load() {
     api.get<Invoice[]>("/invoices").then(setInvoices);
   }
@@ -58,7 +47,6 @@ export default function InvoicesPage() {
     api.get<Lease[]>("/leases").then(setLeases);
     api.get<Tenant[]>("/tenants").then(setTenants);
     api.get<Room[]>("/rooms").then(setRooms);
-    api.get<Account[]>("/chart-of-accounts").then(setAccounts);
   }, []);
 
   async function handleGenerate(e: React.FormEvent) {
@@ -117,44 +105,6 @@ export default function InvoicesPage() {
       alert(`Couldn't prepare the WhatsApp message: ${err.message}`);
     } finally {
       setSendingWhatsappId(null);
-    }
-  }
-
-  function openPaymentModal(invoice: Invoice) {
-    setActiveInvoice(invoice);
-    setPaymentError(null);
-    setPaymentForm({
-      amount: String(invoice.total_amount),
-      payment_date: new Date().toISOString().slice(0, 10),
-      payment_method: "cash",
-      account_id: "",
-      notes: "",
-    });
-    setPaymentModalOpen(true);
-  }
-
-  async function handleRecordPayment(e: React.FormEvent) {
-    e.preventDefault();
-    if (!activeInvoice) return;
-    setPaymentSaving(true);
-    setPaymentError(null);
-    try {
-      const lease = await api.get<Lease>(`/leases/${activeInvoice.lease_id}`);
-      await api.post("/payments", {
-        invoice_id: activeInvoice.id,
-        tenant_id: lease.tenant_id,
-        amount: parseFloat(paymentForm.amount),
-        payment_date: paymentForm.payment_date,
-        payment_method: paymentForm.payment_method,
-        account_id: paymentForm.account_id,
-        notes: paymentForm.notes || undefined,
-      });
-      setPaymentModalOpen(false);
-      load();
-    } catch (err: any) {
-      setPaymentError(err.message);
-    } finally {
-      setPaymentSaving(false);
     }
   }
 
@@ -233,8 +183,8 @@ export default function InvoicesPage() {
                 <div className="flex gap-1 justify-end no-print">
                   {i.status !== "paid" && (
                     <button
-                      onClick={() => openPaymentModal(i)}
-                      title="Record payment"
+                      onClick={() => router.push(`/receipts/new?lease_id=${i.lease_id}`)}
+                      title="Receive payment"
                       className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink"
                     >
                       <Banknote size={16} />
@@ -313,72 +263,6 @@ export default function InvoicesPage() {
             </Button>
             <Button type="submit" disabled={generating}>
               {generating ? "Generating…" : "Generate"}
-            </Button>
-          </div>
-        </form>
-      </Modal>
-
-      <Modal
-        open={paymentModalOpen}
-        onClose={() => setPaymentModalOpen(false)}
-        title={`Record payment — ${activeInvoice?.invoice_month ?? ""}`}
-      >
-        <form onSubmit={handleRecordPayment} className="space-y-4">
-          <Field label="Amount received">
-            <AmountInput
-              required
-              value={paymentForm.amount}
-              onChange={(e) => setPaymentForm({ ...paymentForm, amount: e.target.value })}
-            />
-          </Field>
-          <Field label="Payment date">
-            <Input
-              type="date"
-              required
-              value={paymentForm.payment_date}
-              onChange={(e) => setPaymentForm({ ...paymentForm, payment_date: e.target.value })}
-            />
-          </Field>
-          <Field label="Payment method">
-            <Select
-              value={paymentForm.payment_method}
-              onChange={(e) => setPaymentForm({ ...paymentForm, payment_method: e.target.value })}
-            >
-              <option value="cash">Cash</option>
-              <option value="bank_transfer">Bank transfer</option>
-              <option value="cheque">Cheque</option>
-              <option value="other">Other</option>
-            </Select>
-          </Field>
-          <Field label="Received into which account?">
-            <Select
-              required
-              value={paymentForm.account_id}
-              onChange={(e) => setPaymentForm({ ...paymentForm, account_id: e.target.value })}
-            >
-              <option value="">Select account…</option>
-              {accounts
-                .filter((a) => a.account_type === "asset")
-                .map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.code} · {a.name}
-                  </option>
-                ))}
-            </Select>
-          </Field>
-          <Field label="Notes (optional)">
-            <Input
-              value={paymentForm.notes}
-              onChange={(e) => setPaymentForm({ ...paymentForm, notes: e.target.value })}
-            />
-          </Field>
-          {paymentError && <p className="text-sm text-stamp-red">{paymentError}</p>}
-          <div className="flex justify-end gap-2 pt-2">
-            <Button type="button" variant="ghost" onClick={() => setPaymentModalOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={paymentSaving || !paymentForm.account_id}>
-              {paymentSaving ? "Saving…" : "Record payment"}
             </Button>
           </div>
         </form>

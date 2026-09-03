@@ -7,7 +7,7 @@ from supabase import Client
 
 from app.core.deps import get_current_company_id, get_current_user, get_supabase
 from app.crud.generic import write_audit_log
-from app.services.ledger import get_account_id, post_journal_entry, resolve_room_owner
+from app.services.ledger import get_account_id, get_lease_receivable_balance, post_journal_entry, resolve_room_owner
 from app.services.invoicing import resync_current_month_invoice
 from app.services.lease_settlement import compute_settlement_preview, finalize_settlement
 from app.routers.invoices import generate_invoice_for_lease
@@ -104,6 +104,61 @@ def get_lease(lease_id: str, supabase: Client = Depends(get_supabase)):
     if not res.data:
         raise HTTPException(status_code=404, detail="Lease not found")
     return res.data
+
+
+@router.get("/{lease_id}/receivable-summary")
+def get_lease_receivable_summary(
+    lease_id: str,
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+):
+    """
+    Powers the Receive Payment screen: every invoice for this lease that
+    isn't fully settled yet (oldest first, so the frontend can default the
+    checklist to "apply oldest first"), each with its own remaining
+    balance, plus the lease's overall running balance straight from the
+    ledger. The running balance can be LOWER than the sum of the invoice
+    balances shown (if the tenant has an unapplied advance sitting on the
+    lease) or even negative (advance exceeds everything currently owed) --
+    that's expected, not a bug; it's the actual net position.
+    """
+    lease = supabase.table("leases").select("id, tenant_id, room_id").eq("id", lease_id).single().execute()
+    if not lease.data:
+        raise HTTPException(status_code=404, detail="Lease not found")
+
+    invoices = (
+        supabase.table("invoices")
+        .select("*")
+        .eq("lease_id", lease_id)
+        .neq("status", "cancelled")
+        .order("invoice_month")
+        .execute()
+        .data
+    )
+
+    outstanding = []
+    for inv in invoices:
+        payments = (
+            supabase.table("payments")
+            .select("amount, discount_amount")
+            .eq("invoice_id", inv["id"])
+            .execute()
+            .data
+        )
+        settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in payments)
+        balance = round(float(inv["total_amount"]) - settled, 2)
+        if balance > 0.01:
+            outstanding.append({**inv, "balance": balance})
+
+    running_balance = get_lease_receivable_balance(supabase, company_id, lease_id)
+
+    return {
+        "lease_id": lease_id,
+        "tenant_id": lease.data["tenant_id"],
+        "room_id": lease.data["room_id"],
+        "outstanding_invoices": outstanding,
+        "running_balance": running_balance,
+    }
 
 
 class LeaseEdit(BaseModel):
