@@ -152,11 +152,23 @@ def get_lease_receivable_summary(
 
     running_balance = get_lease_receivable_balance(supabase, company_id, lease_id)
 
+    # Anything owed that ISN'T tied to one of the outstanding invoices above
+    # -- most commonly a manual journal entry (e.g. a receivable posted by
+    # hand through the Journal Entry form, tagged to this tenant/lease)
+    # rather than an invoice. running_balance is the true ledger total; the
+    # invoices above only cover the invoice-tied portion of it, so whatever
+    # is left over is exactly this. Floored at 0 so a tenant advance (which
+    # already makes running_balance negative/lower) never shows here as a
+    # negative "opening balance" to tick.
+    outstanding_total = round(sum(o["balance"] for o in outstanding), 2)
+    opening_balance = max(round(running_balance - outstanding_total, 2), 0.0)
+
     return {
         "lease_id": lease_id,
         "tenant_id": lease.data["tenant_id"],
         "room_id": lease.data["room_id"],
         "outstanding_invoices": outstanding,
+        "opening_balance": opening_balance,
         "running_balance": running_balance,
     }
 

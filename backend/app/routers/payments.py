@@ -175,6 +175,7 @@ class ReceiptRequest(BaseModel):
     payment_method: str = "cash"  # 'cash' | 'bank_transfer' | 'cheque' | 'other'
     amount_received: float
     invoice_ids: List[str]  # the invoices ticked on screen; allocated oldest-month first regardless of list order
+    apply_to_opening_balance: bool = False  # the "opening balance" checklist row -- amounts owed that aren't tied to any invoice (e.g. a manual receivable entry)
     discount_amount: float = 0
     discount_account_id: Optional[str] = None
     notes: Optional[str] = None
@@ -286,7 +287,40 @@ def record_receipt(
         settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in prior_payments)
         balances[inv["id"]] = round(float(inv["total_amount"]) - settled, 2)
 
-    ticked_total = round(sum(max(b, 0) for b in balances.values()), 2)
+    # Opening balance -- amounts owed that aren't tied to any specific
+    # invoice (most commonly a manual journal entry posted through the
+    # Journal Entry form, tagged to this tenant/lease -- see
+    # /leases/{id}/receivable-summary, which computes it the same way).
+    # Recomputed fresh here from the ledger rather than trusting whatever
+    # the frontend sent, exactly like every amount below it. Only ever
+    # used if the box was actually ticked on screen.
+    opening_balance = 0.0
+    if payload.apply_to_opening_balance:
+        all_invoices_for_lease = (
+            supabase.table("invoices")
+            .select("id, total_amount")
+            .eq("lease_id", payload.lease_id)
+            .neq("status", "cancelled")
+            .execute()
+            .data
+        )
+        tied_balance_total = 0.0
+        for inv in all_invoices_for_lease:
+            prior = (
+                supabase.table("payments")
+                .select("amount, discount_amount")
+                .eq("invoice_id", inv["id"])
+                .execute()
+                .data
+            )
+            settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in prior)
+            bal = round(float(inv["total_amount"]) - settled, 2)
+            if bal > 0.01:
+                tied_balance_total += bal
+        running_balance_now = get_lease_receivable_balance(supabase, company_id, payload.lease_id)
+        opening_balance = max(round(running_balance_now - tied_balance_total, 2), 0.0)
+
+    ticked_total = round(sum(max(b, 0) for b in balances.values()) + opening_balance, 2)
 
     if payload.discount_amount > 0 and (payload.amount_received + payload.discount_amount) > ticked_total + 0.01:
         raise HTTPException(
@@ -297,9 +331,16 @@ def record_receipt(
             ),
         )
 
-    # Pass 1: apply cash, oldest invoice to newest.
+    # Pass 1: apply cash. The opening balance is inherently the OLDEST debt
+    # on the lease (it predates every invoice-tied balance below), so it's
+    # settled first, then invoices oldest month to newest.
     cash_remaining = payload.amount_received
     discount_remaining = payload.discount_amount
+
+    opening_balance_cash = min(cash_remaining, opening_balance) if opening_balance > 0 else 0.0
+    cash_remaining -= opening_balance_cash
+    opening_balance -= opening_balance_cash
+
     cash_alloc: Dict[str, float] = {}
     for inv in invoices:
         if cash_remaining <= 0:
@@ -310,9 +351,13 @@ def record_receipt(
             balances[inv["id"]] -= take
             cash_remaining -= take
 
-    # Pass 2: apply whatever discount is left to close the remaining gaps,
-    # oldest invoice to newest. Guaranteed not to exceed each invoice's
-    # remaining balance by the check above.
+    # Pass 2: apply whatever discount is left to close the remaining gaps --
+    # opening balance first, then oldest invoice to newest. Guaranteed not
+    # to exceed each balance by the check above.
+    opening_balance_discount = min(discount_remaining, opening_balance) if opening_balance > 0 else 0.0
+    discount_remaining -= opening_balance_discount
+    opening_balance -= opening_balance_discount
+
     discount_alloc: Dict[str, float] = {}
     for inv in invoices:
         if discount_remaining <= 0:
@@ -323,10 +368,25 @@ def record_receipt(
             balances[inv["id"]] -= take
             discount_remaining -= take
 
-    advance_amount = round(cash_remaining, 2)  # cash left over after every ticked invoice is fully covered
+    advance_amount = round(cash_remaining, 2)  # cash left over after opening balance + every ticked invoice is fully covered
 
     receipt_group_id = str(uuid.uuid4())
     created_payments = []
+
+    if opening_balance_cash > 0.01 or opening_balance_discount > 0.01:
+        row = {
+            "company_id": company_id,
+            "invoice_id": None,
+            "tenant_id": tenant_id,
+            "amount": round(opening_balance_cash, 2),
+            "discount_amount": round(opening_balance_discount, 2),
+            "discount_account_id": payload.discount_account_id if opening_balance_discount > 0 else None,
+            "payment_date": str(payload.receipt_date),
+            "payment_method": payload.payment_method,
+            "notes": ((payload.notes or "") + " (applied to opening balance)").strip(),
+            "receipt_group_id": receipt_group_id,
+        }
+        created_payments.append(supabase.table("payments").insert(row).execute().data[0])
 
     for inv in invoices:
         c = round(cash_alloc.get(inv["id"], 0), 2)

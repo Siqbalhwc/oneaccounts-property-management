@@ -20,6 +20,7 @@ type Summary = {
   tenant_id: string;
   room_id: string;
   outstanding_invoices: OutstandingInvoice[];
+  opening_balance: number;
   running_balance: number;
 };
 
@@ -35,6 +36,7 @@ export default function ReceivePaymentPage() {
   const [building, setBuilding] = useState<Building | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [ticked, setTicked] = useState<Record<string, boolean>>({});
+  const [applyOpeningBalance, setApplyOpeningBalance] = useState(true);
 
   const [accountId, setAccountId] = useState("");
   const [paymentMethod, setPaymentMethod] = useState("cash");
@@ -71,8 +73,9 @@ export default function ReceivePaymentPage() {
       const initialTicked: Record<string, boolean> = {};
       s.outstanding_invoices.forEach((i) => (initialTicked[i.id] = true));
       setTicked(initialTicked);
+      setApplyOpeningBalance(s.opening_balance > 0.01);
 
-      const ticketTotal = s.outstanding_invoices.reduce((sum, i) => sum + i.balance, 0);
+      const ticketTotal = s.outstanding_invoices.reduce((sum, i) => sum + i.balance, 0) + (s.opening_balance || 0);
       setAmountReceived(ticketTotal ? String(ticketTotal) : "");
 
       const [t, r] = await Promise.all([
@@ -95,8 +98,10 @@ export default function ReceivePaymentPage() {
     [summary, ticked]
   );
   const totalReceivable = useMemo(
-    () => tickedInvoices.reduce((sum, i) => sum + i.balance, 0),
-    [tickedInvoices]
+    () =>
+      tickedInvoices.reduce((sum, i) => sum + i.balance, 0) +
+      (applyOpeningBalance ? summary?.opening_balance || 0 : 0),
+    [tickedInvoices, applyOpeningBalance, summary]
   );
 
   const receivedNum = parseFloat(amountReceived) || 0;
@@ -118,7 +123,7 @@ export default function ReceivePaymentPage() {
       setError("Select which account this payment was received into.");
       return;
     }
-    if (receivedNum <= 0 && tickedInvoices.length === 0) {
+    if (receivedNum <= 0 && tickedInvoices.length === 0 && !applyOpeningBalance) {
       setError("Enter an amount received, or tick at least one invoice.");
       return;
     }
@@ -140,6 +145,7 @@ export default function ReceivePaymentPage() {
         receipt_date: receiptDate,
         amount_received: receivedNum,
         invoice_ids: tickedInvoices.map((i) => i.id),
+        apply_to_opening_balance: applyOpeningBalance && summary.opening_balance > 0.01,
         discount_amount: discountNum,
         discount_account_id: discountNum > 0 ? discountAccountId : undefined,
         notes: notes || undefined,
@@ -176,8 +182,22 @@ export default function ReceivePaymentPage() {
               <div>
                 <span className="block text-sm font-medium text-ink mb-1.5">Apply to invoices (oldest first)</span>
                 <div className="border border-border rounded-card divide-y divide-border">
-                  {summary.outstanding_invoices.length === 0 && (
+                  {summary.outstanding_invoices.length === 0 && summary.opening_balance <= 0.01 && (
                     <p className="text-sm text-ink/50 p-3">No outstanding invoices for this lease.</p>
+                  )}
+                  {summary.opening_balance > 0.01 && (
+                    <label className="flex items-center justify-between px-3 py-2.5 text-sm cursor-pointer bg-brass-dark/5">
+                      <span className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={applyOpeningBalance}
+                          onChange={(e) => setApplyOpeningBalance(e.target.checked)}
+                        />
+                        Opening balance
+                        <span className="text-ink/40 text-xs">(not tied to an invoice)</span>
+                      </span>
+                      <span className="figures">{formatPkr(summary.opening_balance)}</span>
+                    </label>
                   )}
                   {summary.outstanding_invoices.map((inv) => (
                     <label key={inv.id} className="flex items-center justify-between px-3 py-2.5 text-sm cursor-pointer">
