@@ -16,7 +16,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from supabase import Client
 
-from app.services.ledger import get_account_id, get_tenant_account_balance
+from app.services.ledger import get_account_id, get_tenant_account_balance_as_of
 
 
 def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
@@ -27,12 +27,15 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
 
     - opening_balance: the tenant's Accounts Receivable balance as of the
       day before this invoice's month starts (e.g. generating the Sep 2026
-      invoice checks the balance as at 31 Aug 2026) -- pulled live from
-      journal_lines via the same general_ledger() function the General
-      Ledger page uses, so it can never drift out of sync with the real
-      books. None if it couldn't be computed (e.g. chart of accounts isn't
-      fully set up yet) -- the PDF still renders in that case, just without
-      this line, rather than failing the whole invoice.
+      invoice checks the balance as at 31 Aug 2026) -- read directly off
+      journal_entries/journal_lines (see get_tenant_account_balance_as_of),
+      the exact same tables the rest of the ledger uses, so it can never
+      drift out of sync with the real books. None only if this company's
+      chart of accounts genuinely doesn't have the Accounts Receivable
+      account set up yet -- the PDF still renders in that case, just
+      without this line, rather than failing the whole invoice. Any OTHER
+      kind of error is allowed to surface rather than being hidden, so a
+      real bug shows up instead of silently vanishing from every invoice.
     - deposit / deposit paid+pending+refunded amounts: the security
       deposit's CURRENT state (from security_deposit_payments, the real
       source of truth since partial payments were added), not the legacy
@@ -80,12 +83,13 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
     opening_balance = None
     try:
         ar_account_id = get_account_id(supabase, invoice["company_id"], "1100")
+    except ValueError:
+        ar_account_id = None  # chart of accounts isn't fully set up for this company yet
+    if ar_account_id:
         cutoff = date.fromisoformat(str(invoice["invoice_month"])) - timedelta(days=1)
-        opening_balance = get_tenant_account_balance(
-            supabase, ar_account_id, lease["tenant_id"], str(cutoff)
+        opening_balance = get_tenant_account_balance_as_of(
+            supabase, invoice["company_id"], ar_account_id, lease["tenant_id"], str(cutoff)
         )
-    except Exception:
-        opening_balance = None  # never block the PDF from generating over this
 
     return {
         "invoice": invoice,

@@ -1,0 +1,126 @@
+diff --git a/backend/app/services/invoice_pdf.py b/backend/app/services/invoice_pdf.py
+index 9e7a9b2..f8ec1ff 100644
+--- a/backend/app/services/invoice_pdf.py
++++ b/backend/app/services/invoice_pdf.py
+@@ -16,7 +16,7 @@ from reportlab.lib.utils import ImageReader
+ from reportlab.pdfgen import canvas
+ from supabase import Client
+ 
+-from app.services.ledger import get_account_id, get_tenant_account_balance
++from app.services.ledger import get_account_id, get_tenant_account_balance_as_of
+ 
+ 
+ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
+@@ -27,12 +27,15 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
+ 
+     - opening_balance: the tenant's Accounts Receivable balance as of the
+       day before this invoice's month starts (e.g. generating the Sep 2026
+-      invoice checks the balance as at 31 Aug 2026) -- pulled live from
+-      journal_lines via the same general_ledger() function the General
+-      Ledger page uses, so it can never drift out of sync with the real
+-      books. None if it couldn't be computed (e.g. chart of accounts isn't
+-      fully set up yet) -- the PDF still renders in that case, just without
+-      this line, rather than failing the whole invoice.
++      invoice checks the balance as at 31 Aug 2026) -- read directly off
++      journal_entries/journal_lines (see get_tenant_account_balance_as_of),
++      the exact same tables the rest of the ledger uses, so it can never
++      drift out of sync with the real books. None only if this company's
++      chart of accounts genuinely doesn't have the Accounts Receivable
++      account set up yet -- the PDF still renders in that case, just
++      without this line, rather than failing the whole invoice. Any OTHER
++      kind of error is allowed to surface rather than being hidden, so a
++      real bug shows up instead of silently vanishing from every invoice.
+     - deposit / deposit paid+pending+refunded amounts: the security
+       deposit's CURRENT state (from security_deposit_payments, the real
+       source of truth since partial payments were added), not the legacy
+@@ -80,12 +83,13 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
+     opening_balance = None
+     try:
+         ar_account_id = get_account_id(supabase, invoice["company_id"], "1100")
++    except ValueError:
++        ar_account_id = None  # chart of accounts isn't fully set up for this company yet
++    if ar_account_id:
+         cutoff = date.fromisoformat(str(invoice["invoice_month"])) - timedelta(days=1)
+-        opening_balance = get_tenant_account_balance(
+-            supabase, ar_account_id, lease["tenant_id"], str(cutoff)
++        opening_balance = get_tenant_account_balance_as_of(
++            supabase, invoice["company_id"], ar_account_id, lease["tenant_id"], str(cutoff)
+         )
+-    except Exception:
+-        opening_balance = None  # never block the PDF from generating over this
+ 
+     return {
+         "invoice": invoice,
+diff --git a/backend/app/services/ledger.py b/backend/app/services/ledger.py
+index af82de7..28322be 100644
+--- a/backend/app/services/ledger.py
++++ b/backend/app/services/ledger.py
+@@ -78,6 +78,47 @@ def get_account_for_charge_label(supabase: Client, company_id: str, label: str)
+     return account
+ 
+ 
++def get_tenant_account_balance_as_of(
++    supabase: Client, company_id: str, account_id: str, tenant_id: str, as_of_date: str
++) -> float:
++    """
++    A tenant's balance in one account (e.g. Accounts Receivable) as of a
++    given date, inclusive -- computed the SAME direct way as
++    get_lease_receivable_balance above (sum journal_lines by account +
++    tenant, straight off the tables), just also filtered to entries dated
++    on or before as_of_date. Deliberately does NOT go through the
++    general_ledger() database function -- that function lives only in the
++    live Supabase database, not as a file in this repo (see reference doc,
++    known open item #4), so a mismatch between what this code expects and
++    that function's real signature fails silently and invisibly on every
++    invoice. This version has no such dependency.
++    """
++    entries = (
++        supabase.table("journal_entries")
++        .select("id")
++        .eq("company_id", company_id)
++        .lte("entry_date", as_of_date)
++        .execute()
++        .data
++    )
++    entry_ids = [e["id"] for e in entries]
++    if not entry_ids:
++        return 0.0
++    lines = (
++        supabase.table("journal_lines")
++        .select("direction, amount")
++        .eq("company_id", company_id)
++        .eq("account_id", account_id)
++        .eq("tenant_id", tenant_id)
++        .in_("journal_entry_id", entry_ids)
++        .execute()
++        .data
++    )
++    debits = sum(float(l["amount"]) for l in lines if l["direction"] == "debit")
++    credits = sum(float(l["amount"]) for l in lines if l["direction"] == "credit")
++    return round(debits - credits, 2)
++
++
+ def get_tenant_account_balance(
+     supabase: Client,
+     account_id: str,
+@@ -85,15 +126,11 @@ def get_tenant_account_balance(
+     as_of_date: str,
+ ) -> float:
+     """
+-    A tenant's running balance in one account (e.g. Accounts Receivable) as
+-    of a given date, inclusive of that date. Wraps the same general_ledger()
+-    SQL function the General Ledger page/report already calls, so "balance
+-    as of a date" is computed exactly one way everywhere in this system --
+-    never a second, slightly-different version living here.
+-
+-    Returns 0.0 if there's no activity for this tenant on this account up
+-    to that date (a brand-new tenant, or a genuinely zero balance) rather
+-    than raising -- an empty ledger is a valid, common case, not an error.
++    DEPRECATED -- kept only so nothing breaks if something still imports
++    it. Relies on the general_ledger() database RPC, which isn't mirrored
++    in this repo and has been silently failing (returning None) on every
++    invoice's "Opening balance" line. Use get_tenant_account_balance_as_of
++    instead, which reads the same tables directly.
+     """
+     rows = (
+         supabase.rpc(

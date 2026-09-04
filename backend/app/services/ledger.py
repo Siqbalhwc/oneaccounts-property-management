@@ -78,6 +78,47 @@ def get_account_for_charge_label(supabase: Client, company_id: str, label: str) 
     return account
 
 
+def get_tenant_account_balance_as_of(
+    supabase: Client, company_id: str, account_id: str, tenant_id: str, as_of_date: str
+) -> float:
+    """
+    A tenant's balance in one account (e.g. Accounts Receivable) as of a
+    given date, inclusive -- computed the SAME direct way as
+    get_lease_receivable_balance above (sum journal_lines by account +
+    tenant, straight off the tables), just also filtered to entries dated
+    on or before as_of_date. Deliberately does NOT go through the
+    general_ledger() database function -- that function lives only in the
+    live Supabase database, not as a file in this repo (see reference doc,
+    known open item #4), so a mismatch between what this code expects and
+    that function's real signature fails silently and invisibly on every
+    invoice. This version has no such dependency.
+    """
+    entries = (
+        supabase.table("journal_entries")
+        .select("id")
+        .eq("company_id", company_id)
+        .lte("entry_date", as_of_date)
+        .execute()
+        .data
+    )
+    entry_ids = [e["id"] for e in entries]
+    if not entry_ids:
+        return 0.0
+    lines = (
+        supabase.table("journal_lines")
+        .select("direction, amount")
+        .eq("company_id", company_id)
+        .eq("account_id", account_id)
+        .eq("tenant_id", tenant_id)
+        .in_("journal_entry_id", entry_ids)
+        .execute()
+        .data
+    )
+    debits = sum(float(l["amount"]) for l in lines if l["direction"] == "debit")
+    credits = sum(float(l["amount"]) for l in lines if l["direction"] == "credit")
+    return round(debits - credits, 2)
+
+
 def get_tenant_account_balance(
     supabase: Client,
     account_id: str,
@@ -85,15 +126,11 @@ def get_tenant_account_balance(
     as_of_date: str,
 ) -> float:
     """
-    A tenant's running balance in one account (e.g. Accounts Receivable) as
-    of a given date, inclusive of that date. Wraps the same general_ledger()
-    SQL function the General Ledger page/report already calls, so "balance
-    as of a date" is computed exactly one way everywhere in this system --
-    never a second, slightly-different version living here.
-
-    Returns 0.0 if there's no activity for this tenant on this account up
-    to that date (a brand-new tenant, or a genuinely zero balance) rather
-    than raising -- an empty ledger is a valid, common case, not an error.
+    DEPRECATED -- kept only so nothing breaks if something still imports
+    it. Relies on the general_ledger() database RPC, which isn't mirrored
+    in this repo and has been silently failing (returning None) on every
+    invoice's "Opening balance" line. Use get_tenant_account_balance_as_of
+    instead, which reads the same tables directly.
     """
     rows = (
         supabase.rpc(
