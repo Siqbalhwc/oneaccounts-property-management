@@ -1,12 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, Tenant, Room, Building, Account } from "@/lib/api";
 import { Card } from "@/components/ui/Card";
 import { Field, Input, Select, AmountInput } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
-import { SearchableSelect } from "@/components/ui/SearchableSelect";
 
 type Charge = { label: string; amount: string; recurrence: "recurring" | "one_time"; account_id: string; show_on_invoice: boolean };
 type ChargeMapping = { label: string; account_id: string };
@@ -17,19 +16,15 @@ const STEPS = ["Tenant & room", "Rent structure", "Security deposit", "Review"] 
 // These are just a convenient starting point, not fixed/locked fields --
 // every row (label, amount, recurrence, account) is editable, and any row
 // (including these) can be removed. Add more via "+ Add another fee".
-// Only Rent prints on the invoice PDF by default -- every other head starts
-// unchecked (still counted fully in the total/ledger either way); each
-// checkbox can still be toggled per-lease as needed.
 const DEFAULT_CHARGES: Charge[] = [
   { label: "Rent", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
-  { label: "Service Charges", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: false },
-  { label: "Collection Deduction", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: false },
-  { label: "Gas", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: false },
-  { label: "Parking", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: false },
-  { label: "Cable & Net Package", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: false },
-  { label: "Internet", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: false },
-  { label: "Tv Cable", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: false },
-  { label: "Electricity", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: false },
+  { label: "Electricity", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
+  { label: "Water", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
+  { label: "Gas", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
+  { label: "Parking", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
+  { label: "Internet", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
+  { label: "Service", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
+  { label: "Other", amount: "", recurrence: "recurring", account_id: "", show_on_invoice: true },
 ];
 
 function formatPkr(n: number) {
@@ -89,28 +84,6 @@ export default function NewLeasePage() {
     (r) => r.building_id === buildingId && r.status === "vacant"
   );
 
-  // Only tenants without a currently-active lease are eligible for a new
-  // agreement -- filters the underlying list, the field itself still works
-  // exactly as before.
-  const availableTenants = tenants.filter(
-    (t) => !existingLeases.some((l) => l.tenant_id === t.id && l.status === "active")
-  );
-
-  // "Posts to account" options for the searchable dropdown -- label folds
-  // in the account code so typing the code filters just like typing the
-  // name does (same convention as the Journal Entry page).
-  const postingAccounts = accounts.filter(
-    (a) => a.account_type === "income" || a.account_type === "liability"
-  );
-  const accountOptions = useMemo(
-    () =>
-      postingAccounts.map((a) => ({
-        value: a.id,
-        label: `${a.code} · ${a.name}${a.transfers_to_owner ? " (owner)" : " (company)"}`,
-      })),
-    [accounts]
-  );
-
   function oneYearLater(dateStr: string): string {
     const d = new Date(dateStr);
     d.setFullYear(d.getFullYear() + 1);
@@ -137,19 +110,6 @@ export default function NewLeasePage() {
   function updateCharge(index: number, field: keyof Charge, value: string) {
     setCharges((prev) =>
       prev.map((c, i) => (i === index ? { ...c, [field]: value } : c))
-    );
-  }
-
-  // Selecting an account fills in the fee name to match it (e.g. picking
-  // "4400 · Gas Recovery Income" sets the label to "Gas Recovery Income") so
-  // the two stay in sync by default -- the label field remains a normal
-  // text input, so it can still be renamed afterward if needed.
-  function updateChargeAccount(index: number, accountId: string) {
-    const account = accounts.find((a) => a.id === accountId);
-    setCharges((prev) =>
-      prev.map((c, i) =>
-        i === index ? { ...c, account_id: accountId, label: account ? account.name : c.label } : c
-      )
     );
   }
 
@@ -281,10 +241,10 @@ export default function NewLeasePage() {
       <Card>
         {step === 0 && (
           <div className="space-y-4">
-            <Field label="Tenant" hint="Only tenants without a currently-active lease are shown.">
+            <Field label="Tenant">
               <Select value={tenantId} onChange={(e) => setTenantId(e.target.value)}>
                 <option value="">Select a tenant…</option>
-                {availableTenants.map((t) => (
+                {tenants.map((t) => (
                   <option key={t.id} value={t.id}>
                     {t.full_name} — {t.cnic}
                   </option>
@@ -396,13 +356,16 @@ export default function NewLeasePage() {
                             : undefined
                         }
                       >
-                        <SearchableSelect
-                          value={c.account_id}
-                          onChange={(v) => updateChargeAccount(i, v)}
-                          options={accountOptions}
-                          placeholder="Search by account name or code…"
-                          emptyLabel="No accounts match"
-                        />
+                        <Select value={c.account_id} onChange={(e) => updateCharge(i, "account_id", e.target.value)}>
+                          <option value="">Select account…</option>
+                          {accounts
+                            .filter((a) => a.account_type === "income" || a.account_type === "liability")
+                            .map((a) => (
+                              <option key={a.id} value={a.id}>
+                                {a.code} · {a.name}{a.transfers_to_owner ? " (owner)" : " (company)"}
+                              </option>
+                            ))}
+                        </Select>
                       </Field>
                     </div>
                     <div className="lg:col-span-1 flex lg:justify-end lg:pt-6">
