@@ -184,7 +184,7 @@ export default function LeaseSettlementPage() {
         </button>
         <h1 className="text-2xl font-display font-semibold">Close lease — settlement</h1>
         <p className="text-sm text-ink/55 mt-1">
-          {tenant?.full_name ?? "—"} — {building?.name ?? "—"}, Room {room?.room_number ?? "—"}
+          {tenant?.full_name ?? "—"} — {building?.name ?? "—"}, Apartment {room?.room_number ?? "—"}
         </p>
       </div>
 

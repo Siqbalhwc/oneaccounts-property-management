@@ -171,7 +171,7 @@ export default function ReceivePaymentPage() {
         <h1 className="text-2xl font-display font-semibold">Receive payment</h1>
         <p className="text-sm text-ink/55 mt-1">
           {tenant?.full_name ?? "—"} — {building?.name ?? "—"}
-          {room ? `, Room ${room.room_number}` : ""}
+          {room ? `, Apartment ${room.room_number}` : ""}
         </p>
       </div>
 

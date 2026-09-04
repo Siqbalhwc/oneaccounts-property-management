@@ -314,7 +314,7 @@ export default function ReportsPage() {
             emptyMessage="No security deposits recorded yet."
             columns={[
               { header: "Tenant", accessor: (d) => tenantName(leaseById(d.lease_id)?.tenant_id ?? "") },
-              { header: "Building / Room", accessor: (d) => roomLabel(leaseById(d.lease_id)?.room_id) },
+              { header: "Building / Apartment", accessor: (d) => roomLabel(leaseById(d.lease_id)?.room_id) },
               { header: "Received", accessor: (d) => <span className="figures">{formatPkr(d.amount_received)}</span>, align: "right" },
               { header: "Date received", accessor: (d) => d.date_received },
               { header: "Status", accessor: (d) => <StampBadge status={d.status} /> },

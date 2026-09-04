@@ -197,7 +197,7 @@ export default function NewJournalEntryPage() {
         <p className="text-sm text-ink/55 mt-1 max-w-3xl">
           For manual adjustments — corrections, write-offs, or anything else that
           doesn&apos;t come from an invoice, payment, expense, salary, or deposit action.
-          Tag each line with building / room / owner so it shows up correctly in P&amp;L
+          Tag each line with building / apartment / owner so it shows up correctly in P&amp;L
           and owner reports.
         </p>
       </div>
@@ -211,7 +211,7 @@ export default function NewJournalEntryPage() {
             <Field label="Reference / memo" hint="A short, clear summary — this is what shows in the journal list.">
               <Input
                 required
-                placeholder="e.g. Correction — overstated water charge for Room 204, July 2026"
+                placeholder="e.g. Correction — overstated water charge for Apartment 204, July 2026"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
               />
@@ -251,7 +251,7 @@ export default function NewJournalEntryPage() {
                     Owner
                   </th>
                   <th className="text-left text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 px-2 whitespace-nowrap min-w-[110px]">
-                    Room
+                    Apartment
                   </th>
                   <th className="text-left text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 px-2 whitespace-nowrap min-w-[150px]">
                     Building
@@ -311,9 +311,9 @@ export default function NewJournalEntryPage() {
                           value={line.room_id}
                           onChange={(v) => handleRoomChange(i, v)}
                           options={roomOptionsFor(line.building_id)}
-                          placeholder="Search room…"
+                          placeholder="Search apartment…"
                           disabled={!line.building_id}
-                          emptyLabel="No rooms match"
+                          emptyLabel="No apartments match"
                         />
                       </td>
                       <td className="py-2 px-2 align-middle">

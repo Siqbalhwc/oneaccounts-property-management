@@ -338,7 +338,7 @@ export default function LeasesPage() {
         <div>
           <h1 className="text-2xl font-display font-semibold">Leases</h1>
           <p className="text-sm text-ink/55 mt-1">
-            One-year agreements linking a tenant to a room, with their rent
+            One-year agreements linking a tenant to an apartment, with their rent
             structure and security deposit.
           </p>
         </div>
@@ -352,7 +352,7 @@ export default function LeasesPage() {
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by tenant, building, or room…"
+            placeholder="Search by tenant, building, or apartment…"
             className="max-w-xs"
           />
         </div>
@@ -362,7 +362,7 @@ export default function LeasesPage() {
           emptyMessage="No leases yet — create one to get started."
           columns={[
             { header: "Tenant", accessor: (l) => <span className="font-medium">{tenantName(l.tenant_id)}</span> },
-            { header: "Building / Room", accessor: (l) => roomAndBuilding(l.room_id) },
+            { header: "Building / Apartment", accessor: (l) => roomAndBuilding(l.room_id) },
             { header: "Start date", accessor: (l) => l.start_date },
             { header: "End date", accessor: (l) => l.end_date },
             { header: "Status", accessor: (l) => <StampBadge status={l.status} /> },

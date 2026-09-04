@@ -170,7 +170,7 @@ export default function InvoicesPage() {
             { header: "Invoice #", accessor: (i) => <span className="figures text-xs">{i.invoice_number ?? "—"}</span> },
             { header: "Month", accessor: (i) => i.invoice_month },
             { header: "Tenant", accessor: (i) => tenantName(i.lease_id) },
-            { header: "Property / Room", accessor: (i) => propertyAndRoom(i.lease_id) },
+            { header: "Property / Apartment", accessor: (i) => propertyAndRoom(i.lease_id) },
             {
               header: "Amount",
               accessor: (i) => <span className="figures">{formatPkr(i.total_amount)}</span>,

@@ -516,7 +516,7 @@ export default function DashboardHome() {
               </div>
             </div>
           ) : (
-            <p className="text-sm text-ink/45 py-6 text-center">No rooms recorded yet.</p>
+            <p className="text-sm text-ink/45 py-6 text-center">No apartments recorded yet.</p>
           )}
         </Card>
 
@@ -583,7 +583,7 @@ export default function DashboardHome() {
             onRowClick={() => router.push("/invoices")}
             columns={[
               { header: "Tenant", accessor: (r) => <span className="font-medium">{r.tenantName}</span> },
-              { header: "Building / Room", accessor: (r) => r.roomLabel },
+              { header: "Building / Apartment", accessor: (r) => r.roomLabel },
               { header: "Amount", accessor: (r) => <span className="figures">{pkr(r.total_amount)}</span>, align: "right" },
               { header: "Due date", accessor: (r) => r.due_date },
               {

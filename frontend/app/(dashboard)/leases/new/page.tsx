@@ -12,7 +12,7 @@ type Charge = { label: string; amount: string; recurrence: "recurring" | "one_ti
 type ChargeMapping = { label: string; account_id: string };
 type LeaseSummary = { tenant_id: string; status: string; room_id: string };
 
-const STEPS = ["Tenant & room", "Rent structure", "Security deposit", "Review"] as const;
+const STEPS = ["Tenant & apartment", "Rent structure", "Security deposit", "Review"] as const;
 
 // These are just a convenient starting point, not fixed/locked fields --
 // every row (label, amount, recurrence, account) is editable, and any row
@@ -317,9 +317,9 @@ export default function NewLeasePage() {
               </Select>
             </Field>
 
-            <Field label="Room" hint="Only vacant rooms are shown.">
+            <Field label="Apartment" hint="Only vacant apartments are shown.">
               <Select value={roomId} onChange={(e) => setRoomId(e.target.value)} disabled={!buildingId}>
-                <option value="">Select a room…</option>
+                <option value="">Select an apartment…</option>
                 {vacantRooms.map((r) => (
                   <option key={r.id} value={r.id}>
                     {r.room_number} {r.room_type ? `(${r.room_type})` : ""}
@@ -516,7 +516,7 @@ export default function NewLeasePage() {
               </p>
             </div>
             <div>
-              <p className="text-xs uppercase tracking-wider text-ink/45 mb-1">Room</p>
+              <p className="text-xs uppercase tracking-wider text-ink/45 mb-1">Apartment</p>
               <p className="text-sm">
                 {rooms.find((r) => r.id === roomId)?.room_number ?? "—"} &middot;{" "}
                 {startDate} to {endDate}

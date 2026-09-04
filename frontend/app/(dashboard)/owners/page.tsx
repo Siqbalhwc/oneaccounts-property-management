@@ -123,7 +123,7 @@ export default function OwnersPage() {
       ...ownedBuildings.map((b) => b.name),
       ...ownedRooms.map((r) => {
         const building = buildings.find((b) => b.id === r.building_id);
-        return `${building?.name ?? "—"} — Room ${r.room_number}`;
+        return `${building?.name ?? "—"} — Apartment ${r.room_number}`;
       }),
     ];
     return parts.length ? parts.join(", ") : "—";
@@ -200,7 +200,7 @@ export default function OwnersPage() {
           <h1 className="text-2xl font-display font-semibold">Owners</h1>
           <p className="text-sm text-ink/55 mt-1">
             Everyone rent gets paid out to — assign them to a building or an
-            individual room from the Buildings page.
+            individual apartment from the Buildings page.
           </p>
         </div>
         <Button onClick={openAddModal}>Add owner</Button>

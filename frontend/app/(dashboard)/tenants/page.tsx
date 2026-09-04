@@ -69,7 +69,7 @@ export default function TenantsPage() {
     if (!activeLease) return "Not assigned";
     const room = rooms.find((r) => r.id === activeLease.room_id);
     const building = buildings.find((b) => b.id === room?.building_id);
-    return room ? `${building?.name ?? "—"} — Room ${room.room_number}` : "Not assigned";
+    return room ? `${building?.name ?? "—"} — Apartment ${room.room_number}` : "Not assigned";
   }
 
   const normalizedSearch = searchTerm.trim().toLowerCase();
@@ -146,7 +146,7 @@ export default function TenantsPage() {
           <h1 className="text-2xl font-display font-semibold">Tenants</h1>
           <p className="text-sm text-ink/55 mt-1">
             Identified by CNIC — a tenant&apos;s record follows them across every
-            room they&apos;ve rented.
+            apartment they&apos;ve rented.
           </p>
         </div>
         <Button onClick={openAddModal}>Add tenant</Button>

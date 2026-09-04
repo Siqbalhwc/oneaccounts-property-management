@@ -56,7 +56,7 @@ export function NotificationBell() {
         return {
           key: `inv-${i.id}`,
           href: "/invoices",
-          title: `Invoice overdue — ${tenant?.full_name ?? "Tenant"}${room ? `, Room ${room.room_number}` : ""}`,
+          title: `Invoice overdue — ${tenant?.full_name ?? "Tenant"}${room ? `, Apartment ${room.room_number}` : ""}`,
           subtitle: `${pkr(i.total_amount)} · ${daysOverdue} day${daysOverdue === 1 ? "" : "s"} overdue`,
           tone: "red" as const,
         };
@@ -73,7 +73,7 @@ export function NotificationBell() {
         return {
           key: `lease-${l.id}`,
           href: "/leases",
-          title: `Lease expiring — ${tenant?.full_name ?? "Tenant"}${room ? `, Room ${room.room_number}` : ""}`,
+          title: `Lease expiring — ${tenant?.full_name ?? "Tenant"}${room ? `, Apartment ${room.room_number}` : ""}`,
           subtitle: `Renews in ${daysLeft} day${daysLeft === 1 ? "" : "s"}`,
           tone: "amber" as const,
         };

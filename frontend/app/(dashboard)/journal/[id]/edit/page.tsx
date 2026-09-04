@@ -281,7 +281,7 @@ export default function EditJournalEntryPage() {
                     Owner
                   </th>
                   <th className="text-left text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 px-2 whitespace-nowrap min-w-[110px]">
-                    Room
+                    Apartment
                   </th>
                   <th className="text-left text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 px-2 whitespace-nowrap min-w-[150px]">
                     Building
@@ -340,9 +340,9 @@ export default function EditJournalEntryPage() {
                         value={line.room_id}
                         onChange={(v) => handleRoomChange(i, v)}
                         options={roomOptionsFor(line.building_id)}
-                        placeholder="Search room…"
+                        placeholder="Search apartment…"
                         disabled={!line.building_id}
-                        emptyLabel="No rooms match"
+                        emptyLabel="No apartments match"
                       />
                     </td>
                     <td className="py-2 px-2 align-middle">
