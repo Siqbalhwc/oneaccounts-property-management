@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { Menu } from "lucide-react";
 import { supabase } from "@/lib/supabaseClient";
 import { Sidebar } from "@/components/ui/Sidebar";
+import { GlobalSearch } from "@/components/ui/GlobalSearch";
+import { NotificationBell } from "@/components/ui/NotificationBell";
 import { Company } from "@/lib/api";
 
 type ProfileInfo = {
@@ -135,7 +137,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const firstName = profile?.full_name?.split(" ")[0] ?? "";
 
   return (
-    <div className="flex min-h-screen">
+    <div className="flex items-start gap-4 p-4 min-h-screen">
       <Sidebar
         company={company}
         mobileOpen={mobileNavOpen}
@@ -147,21 +149,25 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           profile?.role === "client_senior_approver"
         }
       />
-      <div className="flex-1 flex flex-col min-w-0">
-        <header className="no-print h-16 border-b border-border bg-paper-card flex items-center justify-between px-4 sm:px-6 shrink-0">
-          <div className="flex items-center gap-3 min-w-0">
-            <button
-              onClick={() => setMobileNavOpen(true)}
-              className="lg:hidden text-ink/60 hover:text-ink shrink-0"
-              aria-label="Open menu"
-            >
-              <Menu size={22} />
-            </button>
-            <p className="text-sm text-ink/60 truncate hidden sm:block">
-              {greeting()}{firstName ? `, ${firstName}` : ""}.
-            </p>
+      <div className="flex-1 flex flex-col gap-4 min-w-0">
+        <header className="no-print bg-paper-card border border-border rounded-shell shadow-shell flex items-center gap-4 px-4 sm:px-5 py-3 shrink-0">
+          <button
+            onClick={() => setMobileNavOpen(true)}
+            className="lg:hidden text-ink/60 hover:text-ink shrink-0"
+            aria-label="Open menu"
+          >
+            <Menu size={22} />
+          </button>
+          <p className="text-sm text-ink/60 truncate hidden sm:block shrink-0">
+            {greeting()}{firstName ? `, ${firstName}` : ""}.
+          </p>
+
+          <div className="hidden md:block flex-1">
+            <GlobalSearch />
           </div>
-          <div className="flex items-center gap-3 shrink-0">
+
+          <div className="flex items-center gap-3 ml-auto shrink-0">
+            <NotificationBell />
             <div className="text-right hidden sm:block">
               <p className="text-sm font-medium leading-tight">
                 {profile?.full_name ?? "Unknown user"}
@@ -181,7 +187,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </button>
           </div>
         </header>
-        <main className="content flex-1 px-4 sm:px-6 py-6 max-w-[1440px] w-full mx-auto">
+        <main className="content flex-1 max-w-[1440px] w-full mx-auto">
           {children}
         </main>
       </div>

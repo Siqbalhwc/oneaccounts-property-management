@@ -41,9 +41,20 @@ const config: Config = {
       },
       borderRadius: {
         card: "6px",
+        shell: "16px",
       },
       boxShadow: {
         card: "0 1px 2px rgba(31,45,36,0.06), 0 1px 0 rgba(31,45,36,0.04)",
+        shell: "0 4px 8px rgba(31,45,36,0.05), 0 18px 40px -14px rgba(31,45,36,0.22)",
+      },
+      keyframes: {
+        shimmer: {
+          "0%": { backgroundPosition: "100% 0" },
+          "100%": { backgroundPosition: "-100% 0" },
+        },
+      },
+      animation: {
+        shimmer: "shimmer 1.6s ease-in-out infinite",
       },
     },
   },

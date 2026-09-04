@@ -62,6 +62,20 @@
   .stamp-held { @apply text-stamp-amber; }
   .stamp-refunded { @apply text-stamp-green; }
 
+  /* Loading placeholder for any value/shape not back from the API yet.
+     Sits in for the old plain "Loading…" text so a card's skeleton roughly
+     matches the shape of what's about to appear in it. */
+  .skeleton {
+    @apply rounded-card animate-shimmer;
+    background-image: linear-gradient(
+      90deg,
+      color-mix(in srgb, theme("colors.border.DEFAULT") 55%, transparent) 25%,
+      color-mix(in srgb, theme("colors.border.DEFAULT") 90%, transparent) 37%,
+      color-mix(in srgb, theme("colors.border.DEFAULT") 55%, transparent) 63%
+    );
+    background-size: 400% 100%;
+  }
+
   /* Hides a scrollbar visually while keeping the element scrollable --
      used on horizontally-scrolling tab bars so a sliver of scrollbar
      doesn't show up on screens where the tabs are slightly wider than

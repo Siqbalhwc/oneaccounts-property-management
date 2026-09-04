@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { WhatsAppIcon } from "@/components/ui/WhatsAppIcon";
 import {
   Wallet,
@@ -15,6 +16,7 @@ import {
   CreditCard,
   FileText,
   PlusCircle,
+  ChevronRight,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -32,6 +34,9 @@ import { Card, DataTable } from "@/components/ui/Card";
 import { StampBadge } from "@/components/ui/StampBadge";
 import { ProgressRing } from "@/components/ui/ProgressRing";
 import { Select } from "@/components/ui/Field";
+import { Skeleton } from "@/components/ui/Skeleton";
+import { useCountUp } from "@/components/ui/useCountUp";
+import { KpiTile } from "@/components/ui/KpiTile";
 
 type Payment = {
   id: string;
@@ -84,6 +89,7 @@ function relativeTime(iso?: string) {
 const DONUT_COLORS = { occupied: "#2F4F3D", vacant: "#C89B5C", maintenance: "#A63D40", reserved: "#565F5A" };
 
 export default function DashboardHome() {
+  const router = useRouter();
   const [buildings, setBuildings] = useState<Building[] | null>(null);
   const [rooms, setRooms] = useState<Room[] | null>(null);
   const [leases, setLeases] = useState<Lease[] | null>(null);
@@ -201,6 +207,20 @@ export default function DashboardHome() {
   })();
   const previous = metricsFor(monthKey(prevMonthDate));
 
+  // ---------- KPI loading state + count-up values ----------
+  // Each KPI only depends on the specific datasets that feed it, so each
+  // card can resolve (and animate in) independently rather than all four
+  // waiting on the slowest of the three underlying fetches.
+  const collectedLoading = payments === null;
+  const expensesLoading = expenses === null;
+  const salariesLoading = salaryPayments === null;
+  const netProfitLoading = payments === null || expenses === null || salaryPayments === null;
+
+  const collectedAnimated = useCountUp(collectedLoading ? 0 : current.collected);
+  const expensesAnimated = useCountUp(expensesLoading ? 0 : current.expensesTotal);
+  const salariesAnimated = useCountUp(salariesLoading ? 0 : current.salariesTotal);
+  const netProfitAnimated = useCountUp(netProfitLoading ? 0 : current.netProfit);
+
   // ---------- Portfolio overview ----------
   const totalRooms = rooms?.length ?? 0;
   const occupied = rooms?.filter((r) => r.status === "occupied").length ?? 0;
@@ -309,7 +329,7 @@ export default function DashboardHome() {
   const maxBuildingAmount = Math.max(1, ...topBuildings.map((b) => b.amount));
 
   // ---------- Recent activity feed (from real data, not fabricated) ----------
-  type Activity = { icon: React.ReactNode; title: string; subtitle: string; amount?: string; at: string };
+  type Activity = { icon: React.ReactNode; title: string; subtitle: string; amount?: string; at: string; href: string };
   const activities: Activity[] = useMemo(() => {
     return [
       ...(payments ?? []).map((p) => ({
@@ -318,6 +338,7 @@ export default function DashboardHome() {
         subtitle: p.invoice_id ? "Invoice payment" : "Payment",
         amount: pkr(p.amount),
         at: p.created_at ?? p.payment_date,
+        href: "/invoices",
       })),
       ...(leases ?? []).map((l) => {
         const room = roomOf(l.room_id);
@@ -327,6 +348,7 @@ export default function DashboardHome() {
           title: "New lease created",
           subtitle: room ? `${room.room_number}, ${building?.name ?? ""}` : "",
           at: (l as any).created_at ?? l.start_date,
+          href: "/leases",
         };
       }),
       ...(expenses ?? []).map((e) => ({
@@ -335,6 +357,7 @@ export default function DashboardHome() {
         subtitle: expenseCategoriesById.get(e.category_id)?.name ?? "Expense",
         amount: pkr(e.amount),
         at: e.created_at ?? e.expense_date,
+        href: "/expenses",
       })),
     ]
       .filter((a) => a.at)
@@ -393,72 +416,81 @@ export default function DashboardHome() {
 
       {/* KPI cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Link href="/invoices" className="card p-5 block hover:border-brass-dark/40 transition-colors">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-full bg-ledger/10 text-ledger flex items-center justify-center">
-              <Wallet size={18} />
-            </div>
-            <p className="text-xs uppercase tracking-wider text-ink/50 font-medium">Collected this month</p>
-          </div>
-          <p className="text-2xl font-display font-semibold figures">{pkr(current.collected)}</p>
-          {pctChange(current.collected, previous.collected) && (
-            <p className={`text-xs mt-1 ${current.collected >= previous.collected ? "text-stamp-green" : "text-stamp-red"}`}>
-              {pctChange(current.collected, previous.collected)} from last month
-            </p>
-          )}
-        </Link>
+        <KpiTile
+          href="/invoices"
+          icon={<Wallet size={18} />}
+          iconClassName="bg-ledger/10 text-ledger"
+          label="Collected this month"
+          value={pkr(collectedAnimated)}
+          loading={collectedLoading}
+          deltaText={pctChange(current.collected, previous.collected) && `${pctChange(current.collected, previous.collected)} from last month`}
+          deltaTone={current.collected >= previous.collected ? "up" : "down"}
+        />
 
-        <Link href="/expenses" className="card p-5 block hover:border-brass-dark/40 transition-colors">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-full bg-stamp-red/10 text-stamp-red flex items-center justify-center">
-              <Receipt size={18} />
-            </div>
-            <p className="text-xs uppercase tracking-wider text-ink/50 font-medium">Expenses this month</p>
-          </div>
-          <p className="text-2xl font-display font-semibold figures">{pkr(current.expensesTotal)}</p>
-          {pctChange(current.expensesTotal, previous.expensesTotal) && (
-            <p className={`text-xs mt-1 ${current.expensesTotal <= previous.expensesTotal ? "text-stamp-green" : "text-stamp-red"}`}>
-              {pctChange(current.expensesTotal, previous.expensesTotal)} from last month
-            </p>
-          )}
-        </Link>
+        <KpiTile
+          href="/expenses"
+          icon={<Receipt size={18} />}
+          iconClassName="bg-stamp-red/10 text-stamp-red"
+          label="Expenses this month"
+          value={pkr(expensesAnimated)}
+          loading={expensesLoading}
+          deltaText={pctChange(current.expensesTotal, previous.expensesTotal) && `${pctChange(current.expensesTotal, previous.expensesTotal)} from last month`}
+          deltaTone={current.expensesTotal <= previous.expensesTotal ? "up" : "down"}
+        />
 
-        <Link href="/reports" className="card p-5 block hover:border-brass-dark/40 transition-colors">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-full bg-brass/15 text-brass-dark flex items-center justify-center">
-              <Users size={18} />
-            </div>
-            <p className="text-xs uppercase tracking-wider text-ink/50 font-medium">Salaries this month</p>
-          </div>
-          <p className="text-2xl font-display font-semibold figures">{pkr(current.salariesTotal)}</p>
-        </Link>
+        <KpiTile
+          href="/reports"
+          icon={<Users size={18} />}
+          iconClassName="bg-brass/15 text-brass-dark"
+          label="Salaries this month"
+          value={pkr(salariesAnimated)}
+          loading={salariesLoading}
+          deltaTone="neutral"
+        />
 
-        <Link href="/reports" className="card p-5 block hover:border-brass-dark/40 transition-colors">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-full bg-ledger/10 text-ledger flex items-center justify-center">
-              <TrendingUp size={18} />
-            </div>
-            <p className="text-xs uppercase tracking-wider text-ink/50 font-medium">Net profit</p>
-          </div>
-          <p className="text-2xl font-display font-semibold figures">{pkr(current.netProfit)}</p>
-          {pctChange(current.netProfit, previous.netProfit) && (
-            <p className={`text-xs mt-1 ${current.netProfit >= previous.netProfit ? "text-stamp-green" : "text-stamp-red"}`}>
-              {pctChange(current.netProfit, previous.netProfit)} from last month
-            </p>
-          )}
-        </Link>
+        <KpiTile
+          href="/reports"
+          icon={<TrendingUp size={18} />}
+          iconClassName="bg-ledger/10 text-ledger"
+          label="Net profit"
+          value={pkr(netProfitAnimated)}
+          loading={netProfitLoading}
+          deltaText={pctChange(current.netProfit, previous.netProfit) && `${pctChange(current.netProfit, previous.netProfit)} from last month`}
+          deltaTone={current.netProfit >= previous.netProfit ? "up" : "down"}
+        />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Property overview donut */}
         <Card title="Property overview">
-          <div className="grid grid-cols-4 gap-2 mb-4">
-            <MiniStat icon={<Building2 size={16} />} value={buildings?.length ?? 0} label="Buildings" color="ledger" />
-            <MiniStat icon={<KeyRound size={16} />} value={occupied} label="Occupied" color="ledger" />
-            <MiniStat icon={<DoorOpen size={16} />} value={vacant} label="Vacant" color="brass" />
-            <MiniStat icon={<Wrench size={16} />} value={maintenance} label="Repair" color="red" />
-          </div>
-          {donutData.length > 0 ? (
+          {rooms === null ? (
+            <div className="grid grid-cols-4 gap-2 mb-4">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className="text-center">
+                  <Skeleton className="w-9 h-9 rounded-full mx-auto mb-1.5" />
+                  <Skeleton className="h-4 w-6 mx-auto" />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="grid grid-cols-4 gap-2 mb-4">
+              <MiniStat icon={<Building2 size={16} />} value={buildings?.length ?? 0} label="Buildings" color="ledger" />
+              <MiniStat icon={<KeyRound size={16} />} value={occupied} label="Occupied" color="ledger" />
+              <MiniStat icon={<DoorOpen size={16} />} value={vacant} label="Vacant" color="brass" />
+              <MiniStat icon={<Wrench size={16} />} value={maintenance} label="Repair" color="red" />
+            </div>
+          )}
+          {rooms === null ? (
+            <div className="flex items-center gap-4">
+              <Skeleton className="w-[120px] h-[120px] rounded-full shrink-0" />
+              <div className="flex-1 space-y-2.5">
+                <Skeleton className="h-3 w-4/5" />
+                <Skeleton className="h-3 w-3/5" />
+                <Skeleton className="h-3 w-2/3" />
+                <Skeleton className="h-3 w-1/2" />
+              </div>
+            </div>
+          ) : donutData.length > 0 ? (
             <div className="flex items-center gap-4">
               <div style={{ width: 120, height: 120 }} className="shrink-0">
                 <ResponsiveContainer width="100%" height="100%">
@@ -484,25 +516,31 @@ export default function DashboardHome() {
               </div>
             </div>
           ) : (
-            <p className="text-sm text-ink/45 py-6 text-center">
-              {rooms === null ? "Loading…" : "No rooms recorded yet."}
-            </p>
+            <p className="text-sm text-ink/45 py-6 text-center">No rooms recorded yet.</p>
           )}
         </Card>
 
         {/* Income vs expenses trend */}
         <Card title="Income vs expenses (last 6 months)">
-          <div style={{ width: "100%", height: 180 }}>
-            <ResponsiveContainer>
-              <BarChart data={trend}>
-                <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#1F2D24" }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: "#1F2D24" }} axisLine={false} tickLine={false} width={40} />
-                <Tooltip formatter={(v: number) => pkr(v)} contentStyle={{ fontSize: 12, borderRadius: 6 }} />
-                <Bar dataKey="Income" fill="#2F4F3D" radius={[3, 3, 0, 0]} />
-                <Bar dataKey="Expenses" fill="#A63D40" radius={[3, 3, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+          {payments === null || expenses === null ? (
+            <div className="flex items-end gap-3" style={{ height: 180, paddingTop: 8 }}>
+              {[62, 78, 48, 88, 68, 95].map((h, i) => (
+                <Skeleton key={i} className="flex-1" style={{ height: `${h}%` }} />
+              ))}
+            </div>
+          ) : (
+            <div style={{ width: "100%", height: 180 }}>
+              <ResponsiveContainer>
+                <BarChart data={trend}>
+                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#1F2D24" }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fontSize: 10, fill: "#1F2D24" }} axisLine={false} tickLine={false} width={40} />
+                  <Tooltip formatter={(v: number) => pkr(v)} contentStyle={{ fontSize: 12, borderRadius: 6 }} />
+                  <Bar dataKey="Income" fill="#2F4F3D" radius={[3, 3, 0, 0]} />
+                  <Bar dataKey="Expenses" fill="#A63D40" radius={[3, 3, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
         </Card>
       </div>
 
@@ -518,79 +556,136 @@ export default function DashboardHome() {
         {reminderError && (
           <p className="text-xs text-stamp-red mb-2">{reminderError}</p>
         )}
-        <DataTable
-          keyField="id"
-          rows={awaitingPayment}
-          emptyMessage={invoices === null ? "Loading…" : "No outstanding invoices right now."}
-          columns={[
-            { header: "Tenant", accessor: (r) => r.tenantName },
-            { header: "Building / Room", accessor: (r) => r.roomLabel },
-            { header: "Amount", accessor: (r) => <span className="figures">{pkr(r.total_amount)}</span>, align: "right" },
-            { header: "Due date", accessor: (r) => r.due_date },
-            {
-              header: "Status",
-              accessor: (r) =>
-                r.daysOverdue > 0 ? (
-                  <span className="text-stamp-red font-medium text-sm">{r.daysOverdue} days overdue</span>
-                ) : r.daysOverdue === 0 ? (
-                  <span className="text-stamp-amber font-medium text-sm">Due today</span>
-                ) : (
-                  <StampBadge status={r.status} />
+        {invoices === null ? (
+          <div className="space-y-0">
+            <div className="flex gap-4 pb-2.5 border-b border-border">
+              <Skeleton className="h-3 w-16" />
+              <Skeleton className="h-3 w-24" />
+              <Skeleton className="h-3 w-16 ml-auto" />
+              <Skeleton className="h-3 w-20" />
+              <Skeleton className="h-3 w-16" />
+            </div>
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="flex items-center gap-4 py-3 border-b border-border/60 last:border-0">
+                <Skeleton className="h-3.5 w-20" />
+                <Skeleton className="h-3.5 w-28" />
+                <Skeleton className="h-3.5 w-16 ml-auto" />
+                <Skeleton className="h-3.5 w-16" />
+                <Skeleton className="h-3.5 w-20" />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <DataTable
+            keyField="id"
+            rows={awaitingPayment}
+            emptyMessage="No outstanding invoices right now."
+            onRowClick={() => router.push("/invoices")}
+            columns={[
+              { header: "Tenant", accessor: (r) => <span className="font-medium">{r.tenantName}</span> },
+              { header: "Building / Room", accessor: (r) => r.roomLabel },
+              { header: "Amount", accessor: (r) => <span className="figures">{pkr(r.total_amount)}</span>, align: "right" },
+              { header: "Due date", accessor: (r) => r.due_date },
+              {
+                header: "Status",
+                accessor: (r) =>
+                  r.daysOverdue > 0 ? (
+                    <span className="text-stamp-red font-medium text-sm">{r.daysOverdue} days overdue</span>
+                  ) : r.daysOverdue === 0 ? (
+                    <span className="text-stamp-amber font-medium text-sm">Due today</span>
+                  ) : (
+                    <StampBadge status={r.status} />
+                  ),
+              },
+              {
+                header: "",
+                accessor: (r) => (
+                  <div className="flex items-center justify-end gap-1">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        sendReminder(r.id);
+                      }}
+                      disabled={sendingReminderId === r.id}
+                      title="Send WhatsApp reminder"
+                      className="p-1.5 rounded-full text-stamp-green hover:bg-stamp-green/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed no-print"
+                    >
+                      <WhatsAppIcon size={16} />
+                    </button>
+                    <ChevronRight size={14} className="text-ink/0 group-hover:text-ink/35 no-print" />
+                  </div>
                 ),
-            },
-            {
-              header: "",
-              accessor: (r) => (
-                <button
-                  onClick={() => sendReminder(r.id)}
-                  disabled={sendingReminderId === r.id}
-                  title="Send WhatsApp reminder"
-                  className="p-1.5 rounded-full text-stamp-green hover:bg-stamp-green/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed no-print"
-                >
-                  <WhatsAppIcon size={16} />
-                </button>
-              ),
-              align: "right",
-            },
-          ]}
-        />
+                align: "right",
+              },
+            ]}
+          />
+        )}
       </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Rent collection summary */}
         <Card title={`Rent collection — ${monthLabel(selectedMonth)}`}>
-          <div className="flex flex-col items-center gap-4">
-            <ProgressRing percent={collectionRate} label="Collection rate" />
-            <div className="grid grid-cols-2 gap-x-4 gap-y-3 w-full">
-              <div>
-                <p className="text-xs text-ink/50">Total rent</p>
-                <p className="figures font-medium text-sm">{pkr(totalRent)}</p>
-              </div>
-              <div>
-                <p className="text-xs text-ink/50">Collected</p>
-                <p className="figures font-medium text-sm text-stamp-green">{pkr(current.collected)}</p>
-              </div>
-              <div>
-                <p className="text-xs text-ink/50">Outstanding</p>
-                <p className="figures font-medium text-sm text-stamp-amber">{pkr(outstanding)}</p>
-              </div>
-              <div>
-                <p className="text-xs text-ink/50">Overdue</p>
-                <p className="figures font-medium text-sm text-stamp-red">
-                  {pkr(overdueTotal)}{" "}
-                  <span className="text-ink/40 font-normal">({overdueInvoicesThisMonth.length})</span>
-                </p>
+          {invoices === null || payments === null ? (
+            <div className="flex flex-col items-center gap-4">
+              <Skeleton className="w-[88px] h-[88px] rounded-full" />
+              <div className="grid grid-cols-2 gap-x-4 gap-y-3 w-full">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <div key={i} className="space-y-1.5">
+                    <Skeleton className="h-2.5 w-14" />
+                    <Skeleton className="h-3.5 w-20" />
+                  </div>
+                ))}
               </div>
             </div>
-          </div>
+          ) : (
+            <div className="flex flex-col items-center gap-4">
+              <ProgressRing percent={collectionRate} label="Collection rate" />
+              <div className="grid grid-cols-2 gap-x-4 gap-y-3 w-full">
+                <div>
+                  <p className="text-xs text-ink/50">Total rent</p>
+                  <p className="figures font-medium text-sm">{pkr(totalRent)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-ink/50">Collected</p>
+                  <p className="figures font-medium text-sm text-stamp-green">{pkr(current.collected)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-ink/50">Outstanding</p>
+                  <p className="figures font-medium text-sm text-stamp-amber">{pkr(outstanding)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-ink/50">Overdue</p>
+                  <p className="figures font-medium text-sm text-stamp-red">
+                    {pkr(overdueTotal)}{" "}
+                    <span className="text-ink/40 font-normal">({overdueInvoicesThisMonth.length})</span>
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
         </Card>
 
         {/* Top performing buildings */}
         <Card title="Top performing buildings">
-          {topBuildings.length > 0 ? (
+          {payments === null || buildings === null ? (
+            <div className="space-y-3">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <Skeleton className="h-3 w-3.5" />
+                  <Skeleton className="h-3 w-20" />
+                  <Skeleton className="h-2 flex-1 rounded-full" />
+                  <Skeleton className="h-3 w-14" />
+                </div>
+              ))}
+            </div>
+          ) : topBuildings.length > 0 ? (
             <div className="space-y-3">
               {topBuildings.map((b, i) => (
-                <div key={b.name} className="flex items-center gap-2">
+                <button
+                  key={b.name}
+                  onClick={() => router.push("/buildings")}
+                  className="w-full flex items-center gap-2 group rounded-card -mx-1.5 px-1.5 py-1 hover:bg-brass/[0.07] transition-colors text-left"
+                >
                   <span className="text-xs text-ink/40 w-3.5">{i + 1}.</span>
                   <span className="text-sm w-20 truncate">{b.name}</span>
                   <div className="flex-1 h-2 bg-border rounded-full overflow-hidden">
@@ -600,24 +695,40 @@ export default function DashboardHome() {
                     />
                   </div>
                   <span className="text-xs figures font-medium w-16 text-right">{pkr(b.amount)}</span>
-                </div>
+                  <ChevronRight
+                    size={13}
+                    className="text-ink/0 group-hover:text-ink/35 transition-colors shrink-0 -ml-1"
+                  />
+                </button>
               ))}
             </div>
           ) : (
-            <p className="text-sm text-ink/45 py-6 text-center">
-              {payments === null || buildings === null
-                ? "Loading…"
-                : "No payments recorded for this month yet."}
-            </p>
+            <p className="text-sm text-ink/45 py-6 text-center">No payments recorded for this month yet.</p>
           )}
         </Card>
 
         {/* Recent activity */}
         <Card title="Recent activity">
-          {activities.length > 0 ? (
-            <div className="space-y-2.5">
+          {payments === null && leases === null && expenses === null ? (
+            <div className="space-y-3">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="flex items-start gap-2.5">
+                  <Skeleton className="w-6 h-6 rounded-full shrink-0" />
+                  <div className="flex-1 space-y-1.5">
+                    <Skeleton className="h-3 w-4/5" />
+                    <Skeleton className="h-2.5 w-2/5" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : activities.length > 0 ? (
+            <div className="space-y-0.5">
               {activities.slice(0, 5).map((a, i) => (
-                <div key={i} className="flex items-start gap-2.5 py-1">
+                <button
+                  key={i}
+                  onClick={() => router.push(a.href)}
+                  className="w-full flex items-start gap-2.5 py-1.5 -mx-1.5 px-1.5 rounded-card hover:bg-brass/[0.07] transition-colors text-left"
+                >
                   <div className="w-6 h-6 rounded-full bg-ledger/8 text-ledger flex items-center justify-center shrink-0 mt-0.5 [&>svg]:w-3 [&>svg]:h-3">
                     {a.icon}
                   </div>
@@ -628,13 +739,11 @@ export default function DashboardHome() {
                   {a.amount && (
                     <p className="text-xs figures font-medium shrink-0">{a.amount}</p>
                   )}
-                </div>
+                </button>
               ))}
             </div>
           ) : (
-            <p className="text-sm text-ink/45 py-6 text-center">
-              {payments === null && leases === null && expenses === null ? "Loading…" : "Nothing recorded yet."}
-            </p>
+            <p className="text-sm text-ink/45 py-6 text-center">Nothing recorded yet.</p>
           )}
         </Card>
       </div>
