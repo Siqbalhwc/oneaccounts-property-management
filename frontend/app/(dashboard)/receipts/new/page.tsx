@@ -145,7 +145,7 @@ export default function ReceivePaymentPage() {
         receipt_date: receiptDate,
         amount_received: receivedNum,
         invoice_ids: tickedInvoices.map((i) => i.id),
-        apply_to_opening_balance: applyOpeningBalance && summary.opening_balance > 0.01,
+        apply_to_opening_balance: applyOpeningBalance && (summary?.opening_balance ?? 0) > 0.01,
         discount_amount: discountNum,
         discount_account_id: discountNum > 0 ? discountAccountId : undefined,
         notes: notes || undefined,

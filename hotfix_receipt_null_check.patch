@@ -1,0 +1,13 @@
+diff --git a/frontend/app/(dashboard)/receipts/new/page.tsx b/frontend/app/(dashboard)/receipts/new/page.tsx
+index c3fb2fb..e8f857b 100644
+--- a/frontend/app/(dashboard)/receipts/new/page.tsx
++++ b/frontend/app/(dashboard)/receipts/new/page.tsx
+@@ -145,7 +145,7 @@ export default function ReceivePaymentPage() {
+         receipt_date: receiptDate,
+         amount_received: receivedNum,
+         invoice_ids: tickedInvoices.map((i) => i.id),
+-        apply_to_opening_balance: applyOpeningBalance && summary.opening_balance > 0.01,
++        apply_to_opening_balance: applyOpeningBalance && (summary?.opening_balance ?? 0) > 0.01,
+         discount_amount: discountNum,
+         discount_account_id: discountNum > 0 ? discountAccountId : undefined,
+         notes: notes || undefined,
