@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from supabase import Client
 
 from app.core.deps import get_current_company_id, get_current_user, get_supabase
-from app.services.ledger import get_account_id, get_lease_receivable_balance, post_journal_entry, resolve_room_owner
+from app.services.ledger import get_account_id, get_tenant_account_balance_as_of, post_journal_entry, resolve_room_owner
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 
@@ -331,7 +331,16 @@ def record_receipt(
             bal = round(float(inv["total_amount"]) - settled, 2)
             if bal > 0.01:
                 tied_balance_total += bal
-        running_balance_now = get_lease_receivable_balance(supabase, company_id, payload.lease_id)
+        # Tenant-wide (not lease_id-scoped) so this always reconciles with
+        # /leases/{id}/receivable-summary and the invoice PDF's "Opening
+        # balance" -- see the comment on that endpoint for why.
+        try:
+            ar_account_id = get_account_id(supabase, company_id, "1100")
+            running_balance_now = get_tenant_account_balance_as_of(
+                supabase, company_id, ar_account_id, tenant_id, str(date.today())
+            )
+        except ValueError:
+            running_balance_now = 0.0
         opening_balance = max(round(running_balance_now - tied_balance_total, 2), 0.0)
 
     ticked_total = round(sum(max(b, 0) for b in balances.values()) + opening_balance, 2)
@@ -477,10 +486,18 @@ def record_receipt(
         created_by=user["user_id"],
     )
 
+    try:
+        ar_account_id_final = get_account_id(supabase, company_id, "1100")
+        final_running_balance = get_tenant_account_balance_as_of(
+            supabase, company_id, ar_account_id_final, tenant_id, str(date.today())
+        )
+    except ValueError:
+        final_running_balance = 0.0
+
     return {
         "receipt_group_id": receipt_group_id,
         "payments": created_payments,
         "advance_amount": advance_amount,
         "journal_entry_id": entry["id"],
-        "running_balance": get_lease_receivable_balance(supabase, company_id, payload.lease_id),
+        "running_balance": final_running_balance,
     }

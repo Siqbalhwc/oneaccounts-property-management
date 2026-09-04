@@ -7,7 +7,7 @@ from supabase import Client
 
 from app.core.deps import get_current_company_id, get_current_user, get_supabase
 from app.crud.generic import write_audit_log
-from app.services.ledger import get_account_id, get_lease_receivable_balance, post_journal_entry, resolve_room_owner
+from app.services.ledger import get_account_id, get_tenant_account_balance_as_of, post_journal_entry, resolve_room_owner
 from app.services.invoicing import resync_current_month_invoice
 from app.services.lease_settlement import compute_settlement_preview, finalize_settlement
 from app.routers.invoices import generate_invoice_for_lease
@@ -150,12 +150,31 @@ def get_lease_receivable_summary(
         if balance > 0.01:
             outstanding.append({**inv, "balance": balance})
 
-    running_balance = get_lease_receivable_balance(supabase, company_id, lease_id)
+    # The running balance is computed TENANT-wide (every AR entry tagged to
+    # this tenant, across every account entry regardless of which lease_id
+    # -- or no lease_id -- it was tagged with), as of today. Deliberately
+    # NOT scoped to just this lease_id: a manual journal entry posted
+    # through the Journal Entry form is commonly tagged to the tenant only
+    # (e.g. an opening balance from before this system was used) without a
+    # lease_id set, and this way it's never silently missed here. This is
+    # also exactly how the invoice PDF's "Opening balance" is computed
+    # (see get_tenant_account_balance_as_of / fetch_invoice_context), so
+    # the two always reconcile to the same figure. (If a tenant genuinely
+    # has more than one lease open at once, this balance is shared across
+    # both rather than split per-lease -- a known simplification, flagged
+    # here rather than silently assumed.)
+    try:
+        ar_account_id = get_account_id(supabase, company_id, "1100")
+        running_balance = get_tenant_account_balance_as_of(
+            supabase, company_id, ar_account_id, lease.data["tenant_id"], str(date.today())
+        )
+    except ValueError:
+        running_balance = 0.0  # chart of accounts isn't fully set up for this company yet
 
     # Anything owed that ISN'T tied to one of the outstanding invoices above
     # -- most commonly a manual journal entry (e.g. a receivable posted by
-    # hand through the Journal Entry form, tagged to this tenant/lease)
-    # rather than an invoice. running_balance is the true ledger total; the
+    # hand through the Journal Entry form, tagged to this tenant) rather
+    # than an invoice. running_balance is the true ledger total; the
     # invoices above only cover the invoice-tied portion of it, so whatever
     # is left over is exactly this. Floored at 0 so a tenant advance (which
     # already makes running_balance negative/lower) never shows here as a

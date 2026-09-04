@@ -350,18 +350,24 @@ def render_invoice_pdf(ctx: dict) -> bytes:
             c.setFillColorRGB(*INK)
 
     # Security deposit -- shown for information on every invoice, not just
-    # the first. The AMOUNT is read straight off the ledger (deposit_held_
-    # ledger, see fetch_invoice_context) so it's correct whether the money
-    # was recorded through the dedicated Security Deposit screen, a manual
-    # journal entry (e.g. an opening balance carried over from before this
-    # system was used), or both -- both post to the same 2100 account, so
-    # the ledger is the one place that can never miss either kind. It is
-    # NOT part of the invoice total or "Total receivable" above, and is
-    # not settled by paying this invoice -- refunds go through the
-    # dedicated flow. Skipped only if nothing is actually held (ledger
-    # balance at/near zero) and nothing is still pending against an agreed
-    # amount.
-    if deposit_held_ledger > 0.01 or deposit_pending > 0.01:
+    # the first. The BASE number (deposit_paid - deposit_refunded) is
+    # exactly what this always was, straight from the dedicated Security
+    # Deposit screen's own records -- untouched, so the case that already
+    # worked keeps working no matter what. On top of that, IF the ledger
+    # shows a higher total for this lease's 2100 (Security Deposits Held)
+    # account, the extra is added in -- that only happens when there's a
+    # manual journal entry for this lease against that account (e.g. an
+    # opening balance carried over from before this system was used) that
+    # the dedicated screen doesn't know about. If the ledger figure is
+    # ever missing or lower (e.g. this company's chart of accounts isn't
+    # fully set up), it's simply ignored and the original, already-correct
+    # number is shown -- this can only ever add to what was already
+    # displayed, never take away from it. It is NOT part of the invoice
+    # total or "Total receivable" above, and is not settled by paying this
+    # invoice -- refunds go through the dedicated flow.
+    deposit_net_held_dedicated = deposit_paid - deposit_refunded
+    displayed_deposit = max(deposit_held_ledger, deposit_net_held_dedicated)
+    if displayed_deposit > 0.01 or deposit_pending > 0.01:
         y -= 12 * mm
         c.setStrokeColorRGB(0.86, 0.84, 0.77)
         c.setLineWidth(0.75)
@@ -370,7 +376,7 @@ def render_invoice_pdf(ctx: dict) -> bytes:
         c.setFillColorRGB(*INK)
         c.setFont("Helvetica", 10)
         c.drawString(20 * mm, y, "Security deposit (refundable, held separately)")
-        c.drawRightString(width - 20 * mm, y, f"Rs {max(deposit_held_ledger, 0):,.0f}")
+        c.drawRightString(width - 20 * mm, y, f"Rs {max(displayed_deposit, 0):,.0f}")
 
         y -= 6 * mm
         if deposit and float(deposit.get("amount_received") or 0) > 0:
