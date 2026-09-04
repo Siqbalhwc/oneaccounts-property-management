@@ -275,16 +275,44 @@ def record_receipt(
         if payload.invoice_ids
         else []
     )
-    balances: Dict[str, float] = {}
-    for inv in invoices:
-        prior_payments = (
+
+    # Every non-cancelled invoice on this lease (not just the ticked ones)
+    # and every payment against any of them, fetched in TWO queries total
+    # -- reused below both for the ticked invoices' balances and for the
+    # opening-balance calculation. Previously this was one extra query PER
+    # invoice (here, and again in the opening-balance block below) -- on a
+    # lease with a year or more of invoice history, that's 20-30+
+    # sequential round-trips on a single request. On Vercel's serverless
+    # cold starts that's exactly what was showing up as "Failed to fetch"
+    # in the browser even though the receipt had already been recorded
+    # successfully server-side a few calls earlier (the same class of bug
+    # already fixed once in security_deposits.py -- see its comment).
+    all_invoices_for_lease = (
+        supabase.table("invoices")
+        .select("id, total_amount")
+        .eq("lease_id", payload.lease_id)
+        .neq("status", "cancelled")
+        .execute()
+        .data
+    )
+    all_invoice_ids = [inv["id"] for inv in all_invoices_for_lease]
+    settled_by_invoice: Dict[str, float] = {}
+    if all_invoice_ids:
+        all_prior_payments = (
             supabase.table("payments")
-            .select("amount, discount_amount")
-            .eq("invoice_id", inv["id"])
+            .select("invoice_id, amount, discount_amount")
+            .in_("invoice_id", all_invoice_ids)
             .execute()
             .data
         )
-        settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in prior_payments)
+        for p in all_prior_payments:
+            settled_by_invoice[p["invoice_id"]] = settled_by_invoice.get(p["invoice_id"], 0.0) + float(
+                p["amount"]
+            ) + float(p.get("discount_amount") or 0)
+
+    balances: Dict[str, float] = {}
+    for inv in invoices:
+        settled = settled_by_invoice.get(inv["id"], 0.0)
         balances[inv["id"]] = round(float(inv["total_amount"]) - settled, 2)
 
     # Opening balance -- amounts owed that aren't tied to any specific
@@ -293,27 +321,13 @@ def record_receipt(
     # /leases/{id}/receivable-summary, which computes it the same way).
     # Recomputed fresh here from the ledger rather than trusting whatever
     # the frontend sent, exactly like every amount below it. Only ever
-    # used if the box was actually ticked on screen.
+    # used if the box was actually ticked on screen. Reuses the batched
+    # invoice/payment data fetched above -- no extra per-invoice queries.
     opening_balance = 0.0
     if payload.apply_to_opening_balance:
-        all_invoices_for_lease = (
-            supabase.table("invoices")
-            .select("id, total_amount")
-            .eq("lease_id", payload.lease_id)
-            .neq("status", "cancelled")
-            .execute()
-            .data
-        )
         tied_balance_total = 0.0
         for inv in all_invoices_for_lease:
-            prior = (
-                supabase.table("payments")
-                .select("amount, discount_amount")
-                .eq("invoice_id", inv["id"])
-                .execute()
-                .data
-            )
-            settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in prior)
+            settled = settled_by_invoice.get(inv["id"], 0.0)
             bal = round(float(inv["total_amount"]) - settled, 2)
             if bal > 0.01:
                 tied_balance_total += bal

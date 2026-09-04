@@ -1,0 +1,309 @@
+diff --git a/backend/app/routers/payments.py b/backend/app/routers/payments.py
+index 4b2de23..72be6dd 100644
+--- a/backend/app/routers/payments.py
++++ b/backend/app/routers/payments.py
+@@ -275,16 +275,44 @@ def record_receipt(
+         if payload.invoice_ids
+         else []
+     )
+-    balances: Dict[str, float] = {}
+-    for inv in invoices:
+-        prior_payments = (
++
++    # Every non-cancelled invoice on this lease (not just the ticked ones)
++    # and every payment against any of them, fetched in TWO queries total
++    # -- reused below both for the ticked invoices' balances and for the
++    # opening-balance calculation. Previously this was one extra query PER
++    # invoice (here, and again in the opening-balance block below) -- on a
++    # lease with a year or more of invoice history, that's 20-30+
++    # sequential round-trips on a single request. On Vercel's serverless
++    # cold starts that's exactly what was showing up as "Failed to fetch"
++    # in the browser even though the receipt had already been recorded
++    # successfully server-side a few calls earlier (the same class of bug
++    # already fixed once in security_deposits.py -- see its comment).
++    all_invoices_for_lease = (
++        supabase.table("invoices")
++        .select("id, total_amount")
++        .eq("lease_id", payload.lease_id)
++        .neq("status", "cancelled")
++        .execute()
++        .data
++    )
++    all_invoice_ids = [inv["id"] for inv in all_invoices_for_lease]
++    settled_by_invoice: Dict[str, float] = {}
++    if all_invoice_ids:
++        all_prior_payments = (
+             supabase.table("payments")
+-            .select("amount, discount_amount")
+-            .eq("invoice_id", inv["id"])
++            .select("invoice_id, amount, discount_amount")
++            .in_("invoice_id", all_invoice_ids)
+             .execute()
+             .data
+         )
+-        settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in prior_payments)
++        for p in all_prior_payments:
++            settled_by_invoice[p["invoice_id"]] = settled_by_invoice.get(p["invoice_id"], 0.0) + float(
++                p["amount"]
++            ) + float(p.get("discount_amount") or 0)
++
++    balances: Dict[str, float] = {}
++    for inv in invoices:
++        settled = settled_by_invoice.get(inv["id"], 0.0)
+         balances[inv["id"]] = round(float(inv["total_amount"]) - settled, 2)
+ 
+     # Opening balance -- amounts owed that aren't tied to any specific
+@@ -293,27 +321,13 @@ def record_receipt(
+     # /leases/{id}/receivable-summary, which computes it the same way).
+     # Recomputed fresh here from the ledger rather than trusting whatever
+     # the frontend sent, exactly like every amount below it. Only ever
+-    # used if the box was actually ticked on screen.
++    # used if the box was actually ticked on screen. Reuses the batched
++    # invoice/payment data fetched above -- no extra per-invoice queries.
+     opening_balance = 0.0
+     if payload.apply_to_opening_balance:
+-        all_invoices_for_lease = (
+-            supabase.table("invoices")
+-            .select("id, total_amount")
+-            .eq("lease_id", payload.lease_id)
+-            .neq("status", "cancelled")
+-            .execute()
+-            .data
+-        )
+         tied_balance_total = 0.0
+         for inv in all_invoices_for_lease:
+-            prior = (
+-                supabase.table("payments")
+-                .select("amount, discount_amount")
+-                .eq("invoice_id", inv["id"])
+-                .execute()
+-                .data
+-            )
+-            settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in prior)
++            settled = settled_by_invoice.get(inv["id"], 0.0)
+             bal = round(float(inv["total_amount"]) - settled, 2)
+             if bal > 0.01:
+                 tied_balance_total += bal
+diff --git a/backend/app/services/invoice_pdf.py b/backend/app/services/invoice_pdf.py
+index f8ec1ff..fdbad46 100644
+--- a/backend/app/services/invoice_pdf.py
++++ b/backend/app/services/invoice_pdf.py
+@@ -16,7 +16,7 @@ from reportlab.lib.utils import ImageReader
+ from reportlab.pdfgen import canvas
+ from supabase import Client
+ 
+-from app.services.ledger import get_account_id, get_tenant_account_balance_as_of
++from app.services.ledger import get_account_id, get_lease_account_balance, get_tenant_account_balance_as_of
+ 
+ 
+ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
+@@ -36,12 +36,22 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
+       without this line, rather than failing the whole invoice. Any OTHER
+       kind of error is allowed to surface rather than being hidden, so a
+       real bug shows up instead of silently vanishing from every invoice.
+-    - deposit / deposit paid+pending+refunded amounts: the security
+-      deposit's CURRENT state (from security_deposit_payments, the real
+-      source of truth since partial payments were added), not the legacy
+-      is_received flag -- shown as information only, never added into the
+-      invoice total. It's tracked and settled through its own separate
+-      flow (security_deposits.py), not through invoice payments."""
++    - deposit_held_ledger: the TRUE amount currently held for this lease's
++      security deposit -- read directly off the Security Deposits Held
++      (2100) ledger account, tagged to this lease. This is deliberately
++      NOT just security_deposit_payments summed up: it also picks up a
++      security deposit recorded through a manual journal entry (e.g. an
++      opening balance carried over from before this system was used, Cr
++      2100 tagged to the lease) -- since a manual entry to that same
++      account is indistinguishable, accounting-wise, from a payment taken
++      through the dedicated Security Deposit screen, both belong in this
++      number. deposit_paid/deposit_pending below still come from the
++      dedicated security_deposits table -- they're used only for the
++      paid-vs-agreed breakdown (RECEIVED / PARTIALLY RECEIVED, "Rs X still
++      pending"), which only makes sense when an agreed amount is on file.
++      A lease with no security_deposits row at all but a manual entry
++      against 2100 still shows the held amount -- just without that
++      breakdown, since there's no agreed figure to compare it to."""
+     invoice = supabase.table("invoices").select("*").eq("id", invoice_id).single().execute()
+     if not invoice.data:
+         raise HTTPException(status_code=404, detail="Invoice not found")
+@@ -80,6 +90,19 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
+         deposit_refunded = float(deposit.get("amount_refunded") or 0)
+         deposit_pending = max(float(deposit["amount_received"]) - deposit_paid, 0.0)
+ 
++    deposit_held_ledger = 0.0
++    try:
++        deposits_held_id = get_account_id(supabase, invoice["company_id"], "2100")
++    except ValueError:
++        deposits_held_id = None  # chart of accounts isn't fully set up for this company yet
++    if deposits_held_id:
++        # 2100 is liability-normal (credit increases it), so negate the
++        # asset-convention (debits - credits) result get_lease_account_
++        # balance returns.
++        deposit_held_ledger = -get_lease_account_balance(
++            supabase, invoice["company_id"], deposits_held_id, lease["id"]
++        )
++
+     opening_balance = None
+     try:
+         ar_account_id = get_account_id(supabase, invoice["company_id"], "1100")
+@@ -102,6 +125,7 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
+         "deposit": deposit,
+         "deposit_paid": deposit_paid,
+         "deposit_pending": deposit_pending,
++        "deposit_held_ledger": deposit_held_ledger,
+         "deposit_refunded": deposit_refunded,
+         "opening_balance": opening_balance,
+     }
+@@ -126,6 +150,7 @@ def render_invoice_pdf(ctx: dict) -> bytes:
+     deposit_paid = ctx.get("deposit_paid") or 0.0
+     deposit_pending = ctx.get("deposit_pending") or 0.0
+     deposit_refunded = ctx.get("deposit_refunded") or 0.0
++    deposit_held_ledger = ctx.get("deposit_held_ledger") or 0.0
+     opening_balance = ctx.get("opening_balance")
+ 
+     buffer = io.BytesIO()
+@@ -325,15 +350,18 @@ def render_invoice_pdf(ctx: dict) -> bytes:
+             c.setFillColorRGB(*INK)
+ 
+     # Security deposit -- shown for information on every invoice, not just
+-    # the first, using the CURRENT paid/pending state (security deposits
+-    # can be paid in installments -- see security_deposits.py). It is NOT
+-    # part of the invoice total or "Total receivable" above, and is not
+-    # settled by paying this invoice: it's tracked and receipted through
+-    # its own separate flow, so a tenant/owner always knows its true
+-    # status. Skipped only if nothing has ever been agreed for this lease,
+-    # or the deposit has already been fully refunded and closed out.
+-    deposit_net_held = deposit_paid - deposit_refunded
+-    if deposit and float(deposit.get("amount_received") or 0) > 0 and (deposit_net_held > 0.01 or deposit_pending > 0.01):
++    # the first. The AMOUNT is read straight off the ledger (deposit_held_
++    # ledger, see fetch_invoice_context) so it's correct whether the money
++    # was recorded through the dedicated Security Deposit screen, a manual
++    # journal entry (e.g. an opening balance carried over from before this
++    # system was used), or both -- both post to the same 2100 account, so
++    # the ledger is the one place that can never miss either kind. It is
++    # NOT part of the invoice total or "Total receivable" above, and is
++    # not settled by paying this invoice -- refunds go through the
++    # dedicated flow. Skipped only if nothing is actually held (ledger
++    # balance at/near zero) and nothing is still pending against an agreed
++    # amount.
++    if deposit_held_ledger > 0.01 or deposit_pending > 0.01:
+         y -= 12 * mm
+         c.setStrokeColorRGB(0.86, 0.84, 0.77)
+         c.setLineWidth(0.75)
+@@ -342,26 +370,39 @@ def render_invoice_pdf(ctx: dict) -> bytes:
+         c.setFillColorRGB(*INK)
+         c.setFont("Helvetica", 10)
+         c.drawString(20 * mm, y, "Security deposit (refundable, held separately)")
+-        c.drawRightString(width - 20 * mm, y, f"Rs {max(deposit_net_held, 0):,.0f}")
++        c.drawRightString(width - 20 * mm, y, f"Rs {max(deposit_held_ledger, 0):,.0f}")
+ 
+         y -= 6 * mm
+-        fully_paid = deposit_pending <= 0.01
+-        status_text = "RECEIVED" if fully_paid else "PARTIALLY RECEIVED"
+-        status_color = LEDGER if fully_paid else (0.722, 0.525, 0.180)
+-        c.setFont("Helvetica-Bold", 8)
+-        badge_width = c.stringWidth(status_text, "Helvetica-Bold", 8) + 8 * mm
+-        c.setFillColorRGB(*status_color)
+-        c.roundRect(20 * mm, y - 2.5 * mm, badge_width, 6.5 * mm, 1.2 * mm, fill=1, stroke=0)
+-        c.setFillColorRGB(1, 1, 1)
+-        c.drawCentredString(20 * mm + badge_width / 2, y - 0.2 * mm, status_text)
+-
+-        c.setFillColorRGB(0.4, 0.43, 0.41)
+-        c.setFont("Helvetica", 9)
+-        if fully_paid:
+-            note = "Deposit fully collected — see your security deposit receipt."
++        if deposit and float(deposit.get("amount_received") or 0) > 0:
++            # An agreed amount is on file (the dedicated Security Deposit
++            # screen was used) -- show the paid-vs-agreed breakdown, same
++            # as before.
++            fully_paid = deposit_pending <= 0.01
++            status_text = "RECEIVED" if fully_paid else "PARTIALLY RECEIVED"
++            status_color = LEDGER if fully_paid else (0.722, 0.525, 0.180)
++            c.setFont("Helvetica-Bold", 8)
++            badge_width = c.stringWidth(status_text, "Helvetica-Bold", 8) + 8 * mm
++            c.setFillColorRGB(*status_color)
++            c.roundRect(20 * mm, y - 2.5 * mm, badge_width, 6.5 * mm, 1.2 * mm, fill=1, stroke=0)
++            c.setFillColorRGB(1, 1, 1)
++            c.drawCentredString(20 * mm + badge_width / 2, y - 0.2 * mm, status_text)
++
++            c.setFillColorRGB(0.4, 0.43, 0.41)
++            c.setFont("Helvetica", 9)
++            if fully_paid:
++                note = "Deposit fully collected — see your security deposit receipt."
++            else:
++                note = f"Rs {deposit_pending:,.0f} of the deposit is still pending."
++            c.drawString(20 * mm + badge_width + 4 * mm, y, note)
+         else:
+-            note = f"Rs {deposit_pending:,.0f} of the deposit is still pending."
+-        c.drawString(20 * mm + badge_width + 4 * mm, y, note)
++            # No agreed amount on file -- this is money held purely via a
++            # manual journal entry (e.g. an opening balance), so there's
++            # nothing to compare it against. State that plainly instead of
++            # showing a paid-vs-agreed badge that doesn't apply here.
++            c.setFillColorRGB(0.4, 0.43, 0.41)
++            c.setFont("Helvetica", 9)
++            c.drawString(20 * mm, y, "Recorded via journal entry.")
++
+ 
+     y -= 20 * mm
+     c.setFillColorRGB(0.4, 0.43, 0.41)
+diff --git a/backend/app/services/ledger.py b/backend/app/services/ledger.py
+index 28322be..4996926 100644
+--- a/backend/app/services/ledger.py
++++ b/backend/app/services/ledger.py
+@@ -176,23 +176,22 @@ def resolve_room_owner(supabase: Client, room_id: str) -> Optional[str]:
+     return building.get("owner_id") if building else None
+ 
+ 
+-def get_lease_receivable_balance(supabase: Client, company_id: str, lease_id: str) -> float:
++def get_lease_account_balance(supabase: Client, company_id: str, account_id: str, lease_id: str) -> float:
+     """
+-    The true amount currently owed by a lease (current invoice + any older
+-    unpaid invoices, net of every payment and discount ever posted against
+-    it) -- read directly from the ledger rather than recomputed invoice by
+-    invoice. Every invoice debits Accounts Receivable; every payment and
+-    discount credits it; both are tagged with lease_id. So the balance is
+-    simply (AR debits - AR credits) for this lease -- if advances ever
+-    outweigh what's owed, this naturally goes negative, with nothing extra
+-    to track or keep in sync.
++    (debits - credits) for one account, tagged to one lease -- read
++    straight off journal_lines. Positive for an asset-normal account (e.g.
++    Accounts Receivable) means "owed"; for a liability-normal account (e.g.
++    Security Deposits Held) the caller should negate this to get the
++    amount actually held (credits - debits), same as any accounting
++    ledger. This is the one place that math lives, so an asset-side and a
++    liability-side balance can never quietly drift into two different
++    formulas.
+     """
+-    ar_id = get_account_id(supabase, company_id, "1100")
+     lines = (
+         supabase.table("journal_lines")
+         .select("direction, amount")
+         .eq("company_id", company_id)
+-        .eq("account_id", ar_id)
++        .eq("account_id", account_id)
+         .eq("lease_id", lease_id)
+         .execute()
+         .data
+@@ -202,6 +201,21 @@ def get_lease_receivable_balance(supabase: Client, company_id: str, lease_id: st
+     return round(debits - credits, 2)
+ 
+ 
++def get_lease_receivable_balance(supabase: Client, company_id: str, lease_id: str) -> float:
++    """
++    The true amount currently owed by a lease (current invoice + any older
++    unpaid invoices, net of every payment and discount ever posted against
++    it) -- read directly from the ledger rather than recomputed invoice by
++    invoice. Every invoice debits Accounts Receivable; every payment and
++    discount credits it; both are tagged with lease_id. So the balance is
++    simply (AR debits - AR credits) for this lease -- if advances ever
++    outweigh what's owed, this naturally goes negative, with nothing extra
++    to track or keep in sync.
++    """
++    ar_id = get_account_id(supabase, company_id, "1100")
++    return get_lease_account_balance(supabase, company_id, ar_id, lease_id)
++
++
+ def post_journal_entry(
+     supabase: Client,
+     company_id: str,

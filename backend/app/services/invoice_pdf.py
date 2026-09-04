@@ -16,7 +16,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from supabase import Client
 
-from app.services.ledger import get_account_id, get_tenant_account_balance_as_of
+from app.services.ledger import get_account_id, get_lease_account_balance, get_tenant_account_balance_as_of
 
 
 def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
@@ -36,12 +36,22 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
       without this line, rather than failing the whole invoice. Any OTHER
       kind of error is allowed to surface rather than being hidden, so a
       real bug shows up instead of silently vanishing from every invoice.
-    - deposit / deposit paid+pending+refunded amounts: the security
-      deposit's CURRENT state (from security_deposit_payments, the real
-      source of truth since partial payments were added), not the legacy
-      is_received flag -- shown as information only, never added into the
-      invoice total. It's tracked and settled through its own separate
-      flow (security_deposits.py), not through invoice payments."""
+    - deposit_held_ledger: the TRUE amount currently held for this lease's
+      security deposit -- read directly off the Security Deposits Held
+      (2100) ledger account, tagged to this lease. This is deliberately
+      NOT just security_deposit_payments summed up: it also picks up a
+      security deposit recorded through a manual journal entry (e.g. an
+      opening balance carried over from before this system was used, Cr
+      2100 tagged to the lease) -- since a manual entry to that same
+      account is indistinguishable, accounting-wise, from a payment taken
+      through the dedicated Security Deposit screen, both belong in this
+      number. deposit_paid/deposit_pending below still come from the
+      dedicated security_deposits table -- they're used only for the
+      paid-vs-agreed breakdown (RECEIVED / PARTIALLY RECEIVED, "Rs X still
+      pending"), which only makes sense when an agreed amount is on file.
+      A lease with no security_deposits row at all but a manual entry
+      against 2100 still shows the held amount -- just without that
+      breakdown, since there's no agreed figure to compare it to."""
     invoice = supabase.table("invoices").select("*").eq("id", invoice_id).single().execute()
     if not invoice.data:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -80,6 +90,19 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
         deposit_refunded = float(deposit.get("amount_refunded") or 0)
         deposit_pending = max(float(deposit["amount_received"]) - deposit_paid, 0.0)
 
+    deposit_held_ledger = 0.0
+    try:
+        deposits_held_id = get_account_id(supabase, invoice["company_id"], "2100")
+    except ValueError:
+        deposits_held_id = None  # chart of accounts isn't fully set up for this company yet
+    if deposits_held_id:
+        # 2100 is liability-normal (credit increases it), so negate the
+        # asset-convention (debits - credits) result get_lease_account_
+        # balance returns.
+        deposit_held_ledger = -get_lease_account_balance(
+            supabase, invoice["company_id"], deposits_held_id, lease["id"]
+        )
+
     opening_balance = None
     try:
         ar_account_id = get_account_id(supabase, invoice["company_id"], "1100")
@@ -102,6 +125,7 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
         "deposit": deposit,
         "deposit_paid": deposit_paid,
         "deposit_pending": deposit_pending,
+        "deposit_held_ledger": deposit_held_ledger,
         "deposit_refunded": deposit_refunded,
         "opening_balance": opening_balance,
     }
@@ -126,6 +150,7 @@ def render_invoice_pdf(ctx: dict) -> bytes:
     deposit_paid = ctx.get("deposit_paid") or 0.0
     deposit_pending = ctx.get("deposit_pending") or 0.0
     deposit_refunded = ctx.get("deposit_refunded") or 0.0
+    deposit_held_ledger = ctx.get("deposit_held_ledger") or 0.0
     opening_balance = ctx.get("opening_balance")
 
     buffer = io.BytesIO()
@@ -325,15 +350,18 @@ def render_invoice_pdf(ctx: dict) -> bytes:
             c.setFillColorRGB(*INK)
 
     # Security deposit -- shown for information on every invoice, not just
-    # the first, using the CURRENT paid/pending state (security deposits
-    # can be paid in installments -- see security_deposits.py). It is NOT
-    # part of the invoice total or "Total receivable" above, and is not
-    # settled by paying this invoice: it's tracked and receipted through
-    # its own separate flow, so a tenant/owner always knows its true
-    # status. Skipped only if nothing has ever been agreed for this lease,
-    # or the deposit has already been fully refunded and closed out.
-    deposit_net_held = deposit_paid - deposit_refunded
-    if deposit and float(deposit.get("amount_received") or 0) > 0 and (deposit_net_held > 0.01 or deposit_pending > 0.01):
+    # the first. The AMOUNT is read straight off the ledger (deposit_held_
+    # ledger, see fetch_invoice_context) so it's correct whether the money
+    # was recorded through the dedicated Security Deposit screen, a manual
+    # journal entry (e.g. an opening balance carried over from before this
+    # system was used), or both -- both post to the same 2100 account, so
+    # the ledger is the one place that can never miss either kind. It is
+    # NOT part of the invoice total or "Total receivable" above, and is
+    # not settled by paying this invoice -- refunds go through the
+    # dedicated flow. Skipped only if nothing is actually held (ledger
+    # balance at/near zero) and nothing is still pending against an agreed
+    # amount.
+    if deposit_held_ledger > 0.01 or deposit_pending > 0.01:
         y -= 12 * mm
         c.setStrokeColorRGB(0.86, 0.84, 0.77)
         c.setLineWidth(0.75)
@@ -342,26 +370,39 @@ def render_invoice_pdf(ctx: dict) -> bytes:
         c.setFillColorRGB(*INK)
         c.setFont("Helvetica", 10)
         c.drawString(20 * mm, y, "Security deposit (refundable, held separately)")
-        c.drawRightString(width - 20 * mm, y, f"Rs {max(deposit_net_held, 0):,.0f}")
+        c.drawRightString(width - 20 * mm, y, f"Rs {max(deposit_held_ledger, 0):,.0f}")
 
         y -= 6 * mm
-        fully_paid = deposit_pending <= 0.01
-        status_text = "RECEIVED" if fully_paid else "PARTIALLY RECEIVED"
-        status_color = LEDGER if fully_paid else (0.722, 0.525, 0.180)
-        c.setFont("Helvetica-Bold", 8)
-        badge_width = c.stringWidth(status_text, "Helvetica-Bold", 8) + 8 * mm
-        c.setFillColorRGB(*status_color)
-        c.roundRect(20 * mm, y - 2.5 * mm, badge_width, 6.5 * mm, 1.2 * mm, fill=1, stroke=0)
-        c.setFillColorRGB(1, 1, 1)
-        c.drawCentredString(20 * mm + badge_width / 2, y - 0.2 * mm, status_text)
+        if deposit and float(deposit.get("amount_received") or 0) > 0:
+            # An agreed amount is on file (the dedicated Security Deposit
+            # screen was used) -- show the paid-vs-agreed breakdown, same
+            # as before.
+            fully_paid = deposit_pending <= 0.01
+            status_text = "RECEIVED" if fully_paid else "PARTIALLY RECEIVED"
+            status_color = LEDGER if fully_paid else (0.722, 0.525, 0.180)
+            c.setFont("Helvetica-Bold", 8)
+            badge_width = c.stringWidth(status_text, "Helvetica-Bold", 8) + 8 * mm
+            c.setFillColorRGB(*status_color)
+            c.roundRect(20 * mm, y - 2.5 * mm, badge_width, 6.5 * mm, 1.2 * mm, fill=1, stroke=0)
+            c.setFillColorRGB(1, 1, 1)
+            c.drawCentredString(20 * mm + badge_width / 2, y - 0.2 * mm, status_text)
 
-        c.setFillColorRGB(0.4, 0.43, 0.41)
-        c.setFont("Helvetica", 9)
-        if fully_paid:
-            note = "Deposit fully collected — see your security deposit receipt."
+            c.setFillColorRGB(0.4, 0.43, 0.41)
+            c.setFont("Helvetica", 9)
+            if fully_paid:
+                note = "Deposit fully collected — see your security deposit receipt."
+            else:
+                note = f"Rs {deposit_pending:,.0f} of the deposit is still pending."
+            c.drawString(20 * mm + badge_width + 4 * mm, y, note)
         else:
-            note = f"Rs {deposit_pending:,.0f} of the deposit is still pending."
-        c.drawString(20 * mm + badge_width + 4 * mm, y, note)
+            # No agreed amount on file -- this is money held purely via a
+            # manual journal entry (e.g. an opening balance), so there's
+            # nothing to compare it against. State that plainly instead of
+            # showing a paid-vs-agreed badge that doesn't apply here.
+            c.setFillColorRGB(0.4, 0.43, 0.41)
+            c.setFont("Helvetica", 9)
+            c.drawString(20 * mm, y, "Recorded via journal entry.")
+
 
     y -= 20 * mm
     c.setFillColorRGB(0.4, 0.43, 0.41)

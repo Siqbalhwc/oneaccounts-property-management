@@ -176,6 +176,31 @@ def resolve_room_owner(supabase: Client, room_id: str) -> Optional[str]:
     return building.get("owner_id") if building else None
 
 
+def get_lease_account_balance(supabase: Client, company_id: str, account_id: str, lease_id: str) -> float:
+    """
+    (debits - credits) for one account, tagged to one lease -- read
+    straight off journal_lines. Positive for an asset-normal account (e.g.
+    Accounts Receivable) means "owed"; for a liability-normal account (e.g.
+    Security Deposits Held) the caller should negate this to get the
+    amount actually held (credits - debits), same as any accounting
+    ledger. This is the one place that math lives, so an asset-side and a
+    liability-side balance can never quietly drift into two different
+    formulas.
+    """
+    lines = (
+        supabase.table("journal_lines")
+        .select("direction, amount")
+        .eq("company_id", company_id)
+        .eq("account_id", account_id)
+        .eq("lease_id", lease_id)
+        .execute()
+        .data
+    )
+    debits = sum(float(l["amount"]) for l in lines if l["direction"] == "debit")
+    credits = sum(float(l["amount"]) for l in lines if l["direction"] == "credit")
+    return round(debits - credits, 2)
+
+
 def get_lease_receivable_balance(supabase: Client, company_id: str, lease_id: str) -> float:
     """
     The true amount currently owed by a lease (current invoice + any older
@@ -188,18 +213,7 @@ def get_lease_receivable_balance(supabase: Client, company_id: str, lease_id: st
     to track or keep in sync.
     """
     ar_id = get_account_id(supabase, company_id, "1100")
-    lines = (
-        supabase.table("journal_lines")
-        .select("direction, amount")
-        .eq("company_id", company_id)
-        .eq("account_id", ar_id)
-        .eq("lease_id", lease_id)
-        .execute()
-        .data
-    )
-    debits = sum(float(l["amount"]) for l in lines if l["direction"] == "debit")
-    credits = sum(float(l["amount"]) for l in lines if l["direction"] == "credit")
-    return round(debits - credits, 2)
+    return get_lease_account_balance(supabase, company_id, ar_id, lease_id)
 
 
 def post_journal_entry(
