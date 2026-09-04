@@ -16,7 +16,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from supabase import Client
 
-from app.services.ledger import get_account_id, get_lease_account_balance, get_tenant_account_balance_as_of
+from app.services.ledger import get_account_id, get_tenant_account_balance_as_of
 
 
 def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
@@ -96,11 +96,16 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
     except ValueError:
         deposits_held_id = None  # chart of accounts isn't fully set up for this company yet
     if deposits_held_id:
-        # 2100 is liability-normal (credit increases it), so negate the
-        # asset-convention (debits - credits) result get_lease_account_
-        # balance returns.
-        deposit_held_ledger = -get_lease_account_balance(
-            supabase, invoice["company_id"], deposits_held_id, lease["id"]
+        # Tenant-wide, NOT scoped to just this lease_id -- same reasoning
+        # as the Accounts Receivable "Opening balance" below (and Receive
+        # Payment's opening balance, see leases.py/payments.py): a manual
+        # journal entry for an opening security balance is commonly tagged
+        # to the tenant only, without a specific lease_id set, and this
+        # way it's never silently missed here. 2100 is liability-normal
+        # (credit increases it), so negate the asset-convention (debits -
+        # credits) result get_tenant_account_balance_as_of returns.
+        deposit_held_ledger = -get_tenant_account_balance_as_of(
+            supabase, invoice["company_id"], deposits_held_id, lease["tenant_id"], str(date.today())
         )
 
     opening_balance = None
