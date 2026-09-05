@@ -17,6 +17,7 @@
    per-page or per-component edit.
    ========================================================================== */
 :root {
+  color-scheme: light;
   --ink: 31 45 36;
   --ledger: 47 79 61;
   --ledger-dark: 34 57 44;
@@ -45,6 +46,7 @@
 }
 
 [data-theme="black"] {
+  color-scheme: dark;
   --ink: 237 237 231;
   --ledger: 4 5 4;
   --ledger-dark: 0 0 0;
@@ -69,12 +71,16 @@
 }
 
 [data-theme="navy"] {
+  color-scheme: dark;
   --ink: 231 236 243;
   --ledger: 8 14 26;
   --ledger-dark: 4 8 16;
   --ledger-light: 61 90 130;
-  --paper: 14 21 35;
-  --paper-card: 21 32 51;
+  /* Pulled close to --ledger (the sidebar) so the whole app reads as one
+     cohesive deep navy rather than a dark sidebar next to a noticeably
+     lighter/brighter blue content area. */
+  --paper: 10 16 28;
+  --paper-card: 15 23 38;
   --brass: 212 175 55;
   --brass-dark: 176 141 38;
   --brass-light: 230 204 115;

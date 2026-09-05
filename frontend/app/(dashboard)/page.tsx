@@ -551,7 +551,7 @@ export default function DashboardHome() {
                       color: themeColors.ink,
                     }}
                   />
-                  <Bar dataKey="Income" fill={themeColors.accent} radius={[3, 3, 0, 0]} />
+                  <Bar dataKey="Income" fill={themeColors.brass} radius={[3, 3, 0, 0]} />
                   <Bar dataKey="Expenses" fill={themeColors.stampRed} radius={[3, 3, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
