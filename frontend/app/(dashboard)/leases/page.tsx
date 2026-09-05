@@ -1,14 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, Fragment } from "react";
 import Link from "next/link";
 import { api, Lease, Tenant, Room, Building, SecurityDeposit, SecurityDepositPayment, Account, fetchPdfBlob } from "@/lib/api";
-import { Card, DataTable } from "@/components/ui/Card";
+import { Card } from "@/components/ui/Card";
 import { StampBadge } from "@/components/ui/StampBadge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { HistoryPanel } from "@/components/ui/HistoryPanel";
 import { Field, Input, Select } from "@/components/ui/Field";
+import { ChevronRight, ChevronDown, FileText, Pencil, Printer, Banknote, SlidersHorizontal } from "lucide-react";
 
 type LeaseCharge = {
   id: string;
@@ -38,6 +39,24 @@ export default function LeasesPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+
+  // --- List view: expandable row + optional column visibility ---
+  const [expandedLeaseId, setExpandedLeaseId] = useState<string | null>(null);
+  const [colsMenuOpen, setColsMenuOpen] = useState(false);
+  const [showStartCol, setShowStartCol] = useState(true);
+  const [showEndCol, setShowEndCol] = useState(true);
+  const [showDepositCol, setShowDepositCol] = useState(true);
+  const colsMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (colsMenuRef.current && !colsMenuRef.current.contains(e.target as Node)) {
+        setColsMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   // --- Charges (add / edit amount / end) ---
   const [activeCharges, setActiveCharges] = useState<LeaseCharge[] | null>(null);
@@ -355,81 +374,238 @@ export default function LeasesPage() {
             placeholder="Search by tenant, building, or apartment…"
             className="max-w-xs"
           />
+          <div className="relative" ref={colsMenuRef}>
+            <button
+              type="button"
+              onClick={() => setColsMenuOpen((o) => !o)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-card border border-border text-ink hover:bg-ink/5"
+            >
+              <SlidersHorizontal size={14} />
+              Columns
+              <ChevronDown size={13} />
+            </button>
+            {colsMenuOpen && (
+              <div className="absolute right-0 top-full mt-1.5 z-20 bg-paper-card border border-border rounded-card shadow-card p-2 min-w-[190px]">
+                <p className="text-[10px] uppercase tracking-wider text-ink/45 font-semibold px-2 pt-1 pb-1.5">
+                  Optional columns
+                </p>
+                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showStartCol}
+                    onChange={(e) => setShowStartCol(e.target.checked)}
+                    className="accent-ledger"
+                  />
+                  Start date
+                </label>
+                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showEndCol}
+                    onChange={(e) => setShowEndCol(e.target.checked)}
+                    className="accent-ledger"
+                  />
+                  End date
+                </label>
+                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showDepositCol}
+                    onChange={(e) => setShowDepositCol(e.target.checked)}
+                    className="accent-ledger"
+                  />
+                  Security deposit
+                </label>
+              </div>
+            )}
+          </div>
         </div>
-        <DataTable
-          keyField="id"
-          rows={filteredLeases}
-          emptyMessage="No leases yet — create one to get started."
-          columns={[
-            { header: "Tenant", accessor: (l) => <span className="font-medium">{tenantName(l.tenant_id)}</span> },
-            { header: "Building / Apartment", accessor: (l) => roomAndBuilding(l.room_id) },
-            { header: "Start date", accessor: (l) => l.start_date },
-            { header: "End date", accessor: (l) => l.end_date },
-            { header: "Status", accessor: (l) => <StampBadge status={l.status} /> },
-            {
-              header: "Security deposit",
-              accessor: (l) => {
-                const deposit = depositForLease(l.id);
-                if (!deposit || Number(deposit.amount_received) <= 0) return "—";
-                const paid = deposit.amount_paid ?? (deposit.is_received ? deposit.amount_received : 0);
-                const pending = deposit.amount_pending ?? Math.max(deposit.amount_received - paid, 0);
-                const fullyPaid = pending <= 0.01;
-                return (
-                  <div className="flex items-center gap-2">
-                    <div className="text-sm leading-tight">
-                      <span className="figures">Rs {Number(deposit.amount_received).toLocaleString("en-PK")}</span>
-                      {!fullyPaid && paid > 0 && (
-                        <div className="text-xs text-ink/50 figures">
-                          Rs {paid.toLocaleString("en-PK")} received, Rs {pending.toLocaleString("en-PK")} pending
-                        </div>
+
+        {filteredLeases.length === 0 ? (
+          <div className="py-12 text-center text-sm text-ink/45 border border-dashed border-border rounded-card">
+            No leases yet — create one to get started.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="w-4 pb-2.5 pr-0.5"></th>
+                  <th className="text-left text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 pr-4 whitespace-nowrap">
+                    Tenant
+                  </th>
+                  <th className="text-left text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 pr-4 whitespace-nowrap">
+                    Building / Apartment
+                  </th>
+                  {showStartCol && (
+                    <th className="text-left text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 pr-4 whitespace-nowrap">
+                      Start date
+                    </th>
+                  )}
+                  {showEndCol && (
+                    <th className="text-left text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 pr-4 whitespace-nowrap">
+                      End date
+                    </th>
+                  )}
+                  <th className="text-left text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 pr-4 whitespace-nowrap">
+                    Status
+                  </th>
+                  {showDepositCol && (
+                    <th className="text-left text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 pr-4 whitespace-nowrap">
+                      Security deposit
+                    </th>
+                  )}
+                  <th className="text-right text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 whitespace-nowrap no-print">
+                    Actions
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredLeases.map((l) => {
+                  const deposit = depositForLease(l.id);
+                  const hasDeposit = !!deposit && Number(deposit.amount_received) > 0;
+                  const paid = hasDeposit
+                    ? deposit!.amount_paid ?? (deposit!.is_received ? deposit!.amount_received : 0)
+                    : 0;
+                  const pending = hasDeposit
+                    ? deposit!.amount_pending ?? Math.max(deposit!.amount_received - paid, 0)
+                    : 0;
+                  const fullyPaid = hasDeposit && pending <= 0.01;
+                  const expanded = expandedLeaseId === l.id;
+                  const colSpan =
+                    5 + (showStartCol ? 1 : 0) + (showEndCol ? 1 : 0) + (showDepositCol ? 1 : 0);
+
+                  return (
+                    <Fragment key={l.id}>
+                      <tr
+                        onClick={() => setExpandedLeaseId(expanded ? null : l.id)}
+                        className="border-b border-border/60 cursor-pointer hover:bg-ledger/[0.03]"
+                      >
+                        <td className="py-3 pr-0.5 text-ink/40">
+                          <ChevronRight
+                            size={14}
+                            className={`transition-transform ${expanded ? "rotate-90" : ""}`}
+                          />
+                        </td>
+                        <td className="py-3 pr-4 whitespace-nowrap font-medium">
+                          {tenantName(l.tenant_id)}
+                        </td>
+                        <td className="py-3 pr-4 whitespace-nowrap">{roomAndBuilding(l.room_id)}</td>
+                        {showStartCol && (
+                          <td className="py-3 pr-4 whitespace-nowrap figures">{l.start_date}</td>
+                        )}
+                        {showEndCol && (
+                          <td className="py-3 pr-4 whitespace-nowrap figures">{l.end_date}</td>
+                        )}
+                        <td className="py-3 pr-4 whitespace-nowrap">
+                          <StampBadge status={l.status} />
+                        </td>
+                        {showDepositCol && (
+                          <td className="py-3 pr-4 whitespace-nowrap">
+                            {!hasDeposit ? (
+                              <span className="text-xs text-ink/35">— none —</span>
+                            ) : fullyPaid ? (
+                              <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-ledger/10 text-ledger whitespace-nowrap">
+                                Received
+                              </span>
+                            ) : (
+                              <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-brass/15 text-brass whitespace-nowrap">
+                                {paid > 0 ? "Partial" : "Pending"}
+                              </span>
+                            )}
+                          </td>
+                        )}
+                        <td className="py-3 text-right no-print" onClick={(e) => e.stopPropagation()}>
+                          <div className="flex gap-1 justify-end">
+                            <Link
+                              href={`/leases/${l.id}/settlement`}
+                              title="Settlement"
+                              className={`p-1.5 rounded inline-flex ${
+                                l.status !== "active"
+                                  ? "opacity-30 pointer-events-none"
+                                  : "hover:bg-ledger/5 text-ink/50 hover:text-ink"
+                              }`}
+                            >
+                              <FileText size={16} />
+                            </Link>
+                            <button
+                              onClick={() => openEditModal(l)}
+                              title="Edit lease"
+                              className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink"
+                            >
+                              <Pencil size={16} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                      {expanded && (
+                        <tr className="border-b border-border/60 bg-ledger/[0.02]">
+                          <td colSpan={colSpan} className="px-0 py-0">
+                            <div className="pl-9 pr-4 py-4">
+                              {!hasDeposit ? (
+                                <p className="text-xs text-ink/45">
+                                  No security deposit on this lease.
+                                </p>
+                              ) : (
+                                <div className="flex flex-wrap items-center gap-x-10 gap-y-2">
+                                  <div>
+                                    <p className="text-[10px] uppercase tracking-wider text-ink/45 font-semibold mb-1">
+                                      Deposit agreed
+                                    </p>
+                                    <p className="text-sm figures">
+                                      Rs {Number(deposit!.amount_received).toLocaleString("en-PK")}
+                                    </p>
+                                  </div>
+                                  <div>
+                                    <p className="text-[10px] uppercase tracking-wider text-ink/45 font-semibold mb-1">
+                                      Received so far
+                                    </p>
+                                    <p className="text-sm figures">
+                                      Rs {paid.toLocaleString("en-PK")}
+                                    </p>
+                                  </div>
+                                  <div>
+                                    <p className="text-[10px] uppercase tracking-wider text-ink/45 font-semibold mb-1">
+                                      Pending
+                                    </p>
+                                    <p
+                                      className={`text-sm figures ${
+                                        !fullyPaid ? "text-brass font-medium" : ""
+                                      }`}
+                                    >
+                                      Rs {pending.toLocaleString("en-PK")}
+                                    </p>
+                                  </div>
+                                  <div className="no-print">
+                                    {fullyPaid ? (
+                                      <Button
+                                        variant="secondary"
+                                        onClick={() => handlePrintReceipt(deposit!.id)}
+                                        disabled={printingDepositId === deposit!.id}
+                                      >
+                                        <Printer size={14} className="mr-1.5 inline -mt-0.5" />
+                                        {printingDepositId === deposit!.id ? "Opening…" : "Print receipt"}
+                                      </Button>
+                                    ) : (
+                                      <Button variant="secondary" onClick={() => openReceiveModal(deposit!)}>
+                                        <Banknote size={14} className="mr-1.5 inline -mt-0.5" />
+                                        Record payment
+                                      </Button>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
                       )}
-                    </div>
-                    {fullyPaid ? (
-                      <>
-                        <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-ledger/10 text-ledger whitespace-nowrap">
-                          Fully received
-                        </span>
-                        <Button
-                          variant="ghost"
-                          className="no-print"
-                          onClick={() => handlePrintReceipt(deposit.id)}
-                          disabled={printingDepositId === deposit.id}
-                        >
-                          {printingDepositId === deposit.id ? "Opening…" : "Print receipt"}
-                        </Button>
-                      </>
-                    ) : (
-                      <>
-                        <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-brass/15 text-brass whitespace-nowrap">
-                          {paid > 0 ? "Partially received" : "Pending"}
-                        </span>
-                        <Button variant="secondary" className="no-print" onClick={() => openReceiveModal(deposit)}>
-                          Record payment
-                        </Button>
-                      </>
-                    )}
-                  </div>
-                );
-              },
-            },
-            {
-              header: "",
-              accessor: (l) => (
-                <div className="flex gap-1 justify-end no-print">
-                  <Link href={`/leases/${l.id}/settlement`}>
-                    <Button variant="ghost" disabled={l.status !== "active"}>
-                      Settlement
-                    </Button>
-                  </Link>
-                  <Button variant="ghost" onClick={() => openEditModal(l)}>
-                    Edit lease
-                  </Button>
-                </div>
-              ),
-              align: "right",
-            },
-          ]}
-        />
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </Card>
 
       <Modal open={editModalOpen} onClose={() => setEditModalOpen(false)} title="Edit lease" size="full">
