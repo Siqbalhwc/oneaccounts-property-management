@@ -1,0 +1,936 @@
+diff --git a/frontend/app/(dashboard)/error.tsx b/frontend/app/(dashboard)/error.tsx
+index 80844f9..4543bc3 100644
+--- a/frontend/app/(dashboard)/error.tsx
++++ b/frontend/app/(dashboard)/error.tsx
+@@ -24,7 +24,7 @@ export default function DashboardError({
+       <div className="flex items-center justify-center gap-3 pt-2">
+         <button
+           onClick={reset}
+-          className="text-sm px-4 py-2 rounded-card bg-ledger text-paper hover:bg-ledger-dark transition-colors"
++          className="text-sm px-4 py-2 rounded-card bg-ledger text-sidebar-ink hover:bg-ledger-dark transition-colors"
+         >
+           Try again
+         </button>
+diff --git a/frontend/app/(dashboard)/expenses/page.tsx b/frontend/app/(dashboard)/expenses/page.tsx
+index 8613a43..b1317c2 100644
+--- a/frontend/app/(dashboard)/expenses/page.tsx
++++ b/frontend/app/(dashboard)/expenses/page.tsx
+@@ -372,7 +372,7 @@ export default function ExpensesPage() {
+                 <p className="text-[10px] uppercase tracking-wider text-ink/45 font-semibold px-2 pt-1 pb-1.5">
+                   Optional columns
+                 </p>
+-                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
++                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent/5 cursor-pointer">
+                   <input
+                     type="checkbox"
+                     checked={showGlCol}
+@@ -381,7 +381,7 @@ export default function ExpensesPage() {
+                   />
+                   GL account
+                 </label>
+-                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
++                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent/5 cursor-pointer">
+                   <input
+                     type="checkbox"
+                     checked={showPaidFromCol}
+@@ -390,7 +390,7 @@ export default function ExpensesPage() {
+                   />
+                   Paid from
+                 </label>
+-                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
++                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent/5 cursor-pointer">
+                   <input
+                     type="checkbox"
+                     checked={showRecursCol}
+@@ -399,7 +399,7 @@ export default function ExpensesPage() {
+                   />
+                   Recurs
+                 </label>
+-                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
++                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent/5 cursor-pointer">
+                   <input
+                     type="checkbox"
+                     checked={showBuildingCol}
+@@ -471,7 +471,7 @@ export default function ExpensesPage() {
+                     <Fragment key={e.id}>
+                       <tr
+                         onClick={() => setExpandedExpenseId(expanded ? null : e.id)}
+-                        className="border-b border-border/60 cursor-pointer hover:bg-ledger/[0.03]"
++                        className="border-b border-border/60 cursor-pointer hover:bg-accent/[0.03]"
+                       >
+                         <td className="py-3 pr-0.5 text-ink/40">
+                           <ChevronRight
+@@ -526,7 +526,7 @@ export default function ExpensesPage() {
+                             <button
+                               onClick={() => openEditModal(e)}
+                               title="Edit"
+-                              className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink"
++                              className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink"
+                             >
+                               <Pencil size={16} />
+                             </button>
+@@ -534,7 +534,7 @@ export default function ExpensesPage() {
+                               <button
+                                 onClick={() => openAllocationModal(e)}
+                                 title="Manage split"
+-                                className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink"
++                                className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink"
+                               >
+                                 <SplitSquareHorizontal size={16} />
+                               </button>
+@@ -542,7 +542,7 @@ export default function ExpensesPage() {
+                             <button
+                               onClick={() => openLedgerModal(e)}
+                               title="View ledger"
+-                              className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink"
++                              className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink"
+                             >
+                               <ScrollText size={16} />
+                             </button>
+@@ -550,7 +550,7 @@ export default function ExpensesPage() {
+                         </td>
+                       </tr>
+                       {expanded && (
+-                        <tr className="border-b border-border/60 bg-ledger/[0.02]">
++                        <tr className="border-b border-border/60 bg-accent/[0.02]">
+                           <td colSpan={colSpan} className="px-0 py-0">
+                             <div className="pl-9 pr-4 py-4">
+                               <div className="flex flex-wrap items-start gap-x-10 gap-y-3">
+@@ -603,13 +603,13 @@ export default function ExpensesPage() {
+       <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editingId ? "Edit expense" : "Log expense"}>
+         <form onSubmit={handleSubmit} className="space-y-4">
+           {!editingId && (
+-            <p className="text-xs text-ink/50 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2">
++            <p className="text-xs text-ink/50 bg-accent/5 border border-accent/15 rounded-card px-3 py-2">
+               Logging an expense records a bill your company has already paid —
+               the date you enter is the date it was paid.
+             </p>
+           )}
+           {editingId && (
+-            <p className="text-xs text-ink/50 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2">
++            <p className="text-xs text-ink/50 bg-accent/5 border border-accent/15 rounded-card px-3 py-2">
+               Category, building, amount, and paid-from account are locked
+               once an expense is logged, since they&apos;ve already posted to
+               the ledger. Delete and re-log the expense if any of those need
+diff --git a/frontend/app/(dashboard)/implementation/[id]/page.tsx b/frontend/app/(dashboard)/implementation/[id]/page.tsx
+index 2fbf848..dd02e8f 100644
+--- a/frontend/app/(dashboard)/implementation/[id]/page.tsx
++++ b/frontend/app/(dashboard)/implementation/[id]/page.tsx
+@@ -174,7 +174,7 @@ export default function ImplementationDetailPage() {
+         </div>
+       )}
+       {isRequester && (
+-        <div className="bg-ledger/5 border border-ledger/15 rounded-card px-4 py-3 text-sm">
++        <div className="bg-accent/5 border border-accent/15 rounded-card px-4 py-3 text-sm">
+           Add requirements any time. Your senior approver gives the final Go-Live approval.
+         </div>
+       )}
+diff --git a/frontend/app/(dashboard)/invoices/page.tsx b/frontend/app/(dashboard)/invoices/page.tsx
+index 683c7b0..0e60768 100644
+--- a/frontend/app/(dashboard)/invoices/page.tsx
++++ b/frontend/app/(dashboard)/invoices/page.tsx
+@@ -185,7 +185,7 @@ export default function InvoicesPage() {
+                     <button
+                       onClick={() => router.push(`/receipts/new?lease_id=${i.lease_id}`)}
+                       title="Receive payment"
+-                      className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink"
++                      className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink"
+                     >
+                       <Banknote size={16} />
+                     </button>
+@@ -194,7 +194,7 @@ export default function InvoicesPage() {
+                     onClick={() => handleSendWhatsapp(i.id)}
+                     disabled={sendingWhatsappId === i.id}
+                     title="Send via WhatsApp"
+-                    className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink disabled:opacity-50"
++                    className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink disabled:opacity-50"
+                   >
+                     <WhatsAppIcon size={16} />
+                   </button>
+@@ -202,7 +202,7 @@ export default function InvoicesPage() {
+                     onClick={() => handleViewPdf(i.id)}
+                     disabled={downloadingId === i.id}
+                     title="View / print PDF"
+-                    className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink disabled:opacity-50"
++                    className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink disabled:opacity-50"
+                   >
+                     <Printer size={16} />
+                   </button>
+@@ -246,7 +246,7 @@ export default function InvoicesPage() {
+           </Field>
+           {generateError && <p className="text-sm text-stamp-red">{generateError}</p>}
+           {generateResult && (
+-            <div className="text-sm bg-ledger/5 border border-ledger/20 rounded-card px-3 py-2 space-y-1">
++            <div className="text-sm bg-accent/5 border border-accent/20 rounded-card px-3 py-2 space-y-1">
+               <p className="text-stamp-green font-medium">
+                 {generateResult.created.length} invoice(s) created.
+               </p>
+diff --git a/frontend/app/(dashboard)/journal/[id]/edit/page.tsx b/frontend/app/(dashboard)/journal/[id]/edit/page.tsx
+index 0a1351a..184084e 100644
+--- a/frontend/app/(dashboard)/journal/[id]/edit/page.tsx
++++ b/frontend/app/(dashboard)/journal/[id]/edit/page.tsx
+@@ -229,7 +229,7 @@ export default function EditJournalEntryPage() {
+   return (
+     <div className="max-w-[1400px] mx-auto space-y-6">
+       <div>
+-        <button onClick={() => router.push("/journal")} className="text-sm text-ledger hover:underline mb-2">
++        <button onClick={() => router.push("/journal")} className="text-sm text-accent hover:underline mb-2">
+           ← Back
+         </button>
+         <h1 className="text-2xl font-display font-semibold">Edit journal entry</h1>
+@@ -264,7 +264,7 @@ export default function EditJournalEntryPage() {
+           <div className="overflow-x-auto scrollbar-brass border border-border rounded-card">
+             <table className="w-full min-w-[980px] text-sm border-collapse">
+               <thead>
+-                <tr className="bg-ledger/5 border-b border-border">
++                <tr className="bg-accent/5 border-b border-border">
+                   <th className="sticky left-0 z-10 bg-paper text-left text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 pl-3 pr-2 whitespace-nowrap">
+                     Account
+                   </th>
+@@ -291,7 +291,7 @@ export default function EditJournalEntryPage() {
+               </thead>
+               <tbody>
+                 {lines.map((line, i) => (
+-                  <tr key={i} className="border-b border-border last:border-b-0 hover:bg-ledger/[0.02]">
++                  <tr key={i} className="border-b border-border last:border-b-0 hover:bg-accent/[0.02]">
+                     <td className="sticky left-0 z-10 bg-paper-card shadow-[2px_0_0_rgba(31,45,36,0.04)] py-2 pl-3 pr-2 align-middle min-w-[210px]">
+                       <SearchableSelect
+                         value={line.account_id}
+@@ -369,7 +369,7 @@ export default function EditJournalEntryPage() {
+                 ))}
+                 <tr>
+                   <td colSpan={8} className="py-2.5 pl-3">
+-                    <button type="button" onClick={addLine} className="text-sm font-medium text-ledger hover:underline">
++                    <button type="button" onClick={addLine} className="text-sm font-medium text-accent hover:underline">
+                       + Add a line
+                     </button>
+                   </td>
+@@ -396,7 +396,7 @@ export default function EditJournalEntryPage() {
+             <div
+               className={`mt-3 flex flex-wrap items-center justify-between gap-2 rounded-card px-3.5 py-2.5 text-sm ${
+                 isBalanced
+-                  ? "bg-ledger/5 border border-ledger/20 text-ledger"
++                  ? "bg-accent/5 border border-accent/20 text-accent"
+                   : "bg-stamp-red/10 border border-stamp-red/30 text-stamp-red"
+               }`}
+             >
+diff --git a/frontend/app/(dashboard)/journal/new/page.tsx b/frontend/app/(dashboard)/journal/new/page.tsx
+index ad005f6..a4a696c 100644
+--- a/frontend/app/(dashboard)/journal/new/page.tsx
++++ b/frontend/app/(dashboard)/journal/new/page.tsx
+@@ -190,7 +190,7 @@ export default function NewJournalEntryPage() {
+   return (
+     <div className="max-w-[1400px] mx-auto space-y-6">
+       <div>
+-        <button onClick={() => router.back()} className="text-sm text-ledger hover:underline mb-2">
++        <button onClick={() => router.back()} className="text-sm text-accent hover:underline mb-2">
+           ← Back
+         </button>
+         <h1 className="text-2xl font-display font-semibold">New journal entry</h1>
+@@ -234,7 +234,7 @@ export default function NewJournalEntryPage() {
+           <div className="overflow-x-auto scrollbar-brass border border-border rounded-card">
+             <table className="w-full min-w-[980px] text-sm border-collapse">
+               <thead>
+-                <tr className="bg-ledger/5 border-b border-border">
++                <tr className="bg-accent/5 border-b border-border">
+                   <th className="sticky left-0 z-10 bg-paper text-left text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 pl-3 pr-2 whitespace-nowrap">
+                     Account
+                   </th>
+@@ -262,7 +262,7 @@ export default function NewJournalEntryPage() {
+               <tbody>
+                 {lines.map((line, i) => {
+                   return (
+-                    <tr key={i} className="border-b border-border last:border-b-0 hover:bg-ledger/[0.02]">
++                    <tr key={i} className="border-b border-border last:border-b-0 hover:bg-accent/[0.02]">
+                       <td className="sticky left-0 z-10 bg-paper-card shadow-[2px_0_0_rgba(31,45,36,0.04)] py-2 pl-3 pr-2 align-middle min-w-[210px]">
+                         <SearchableSelect
+                           value={line.account_id}
+@@ -344,7 +344,7 @@ export default function NewJournalEntryPage() {
+                     <button
+                       type="button"
+                       onClick={addLine}
+-                      className="text-sm font-medium text-ledger hover:underline"
++                      className="text-sm font-medium text-accent hover:underline"
+                     >
+                       + Add a line
+                     </button>
+@@ -372,7 +372,7 @@ export default function NewJournalEntryPage() {
+             <div
+               className={`mt-3 flex flex-wrap items-center justify-between gap-2 rounded-card px-3.5 py-2.5 text-sm ${
+                 isBalanced
+-                  ? "bg-ledger/5 border border-ledger/20 text-ledger"
++                  ? "bg-accent/5 border border-accent/20 text-accent"
+                   : "bg-stamp-red/10 border border-stamp-red/30 text-stamp-red"
+               }`}
+             >
+diff --git a/frontend/app/(dashboard)/journal/page.tsx b/frontend/app/(dashboard)/journal/page.tsx
+index b6bbdc3..b216486 100644
+--- a/frontend/app/(dashboard)/journal/page.tsx
++++ b/frontend/app/(dashboard)/journal/page.tsx
+@@ -109,7 +109,7 @@ export default function JournalEntriesPage() {
+         <div className="flex items-center gap-4">
+           <button
+             onClick={() => setShowFilters(!showFilters)}
+-            className="text-sm text-ledger hover:underline whitespace-nowrap"
++            className="text-sm text-accent hover:underline whitespace-nowrap"
+           >
+             {showFilters ? "Hide filters" : `Filter${activeFilterCount ? ` (${activeFilterCount})` : ""}`}
+           </button>
+@@ -196,7 +196,7 @@ export default function JournalEntriesPage() {
+                 e.status === "reversed" ? (
+                   <span className="text-xs text-ink/35">Reversed</span>
+                 ) : (
+-                  <Link href={`/journal/${e.id}/edit`} title="Edit" className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink inline-flex">
++                  <Link href={`/journal/${e.id}/edit`} title="Edit" className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink inline-flex">
+                     <Pencil size={16} />
+                   </Link>
+                 ),
+diff --git a/frontend/app/(dashboard)/leases/[id]/settlement/page.tsx b/frontend/app/(dashboard)/leases/[id]/settlement/page.tsx
+index 052c2f1..0613f40 100644
+--- a/frontend/app/(dashboard)/leases/[id]/settlement/page.tsx
++++ b/frontend/app/(dashboard)/leases/[id]/settlement/page.tsx
+@@ -156,7 +156,7 @@ export default function LeaseSettlementPage() {
+             </h1>
+             <div
+               className={`inline-block px-6 py-4 rounded-card text-lg font-display font-semibold ${
+-                isRefund ? "bg-ledger/10 text-ledger" : "bg-stamp-red/10 text-stamp-red"
++                isRefund ? "bg-accent/10 text-accent" : "bg-stamp-red/10 text-stamp-red"
+               }`}
+             >
+               {isRefund ? "Net refund to tenant" : "Net amount still owed by tenant"}
+@@ -179,7 +179,7 @@ export default function LeaseSettlementPage() {
+   return (
+     <div className="max-w-[1180px] mx-auto space-y-6">
+       <div>
+-        <button onClick={() => router.push("/leases")} className="text-sm text-ledger hover:underline mb-2">
++        <button onClick={() => router.push("/leases")} className="text-sm text-accent hover:underline mb-2">
+           ← Back to leases
+         </button>
+         <h1 className="text-2xl font-display font-semibold">Close lease — settlement</h1>
+@@ -354,9 +354,9 @@ export default function LeaseSettlementPage() {
+                 </div>
+               </Card>
+ 
+-              <Card className="bg-ledger/5 border-ledger/20">
++              <Card className="bg-accent/5 border-accent/20">
+                 <p className="text-sm font-medium">{projectedNet >= 0 ? "Net refund to tenant" : "Net amount still owed by tenant"}</p>
+-                <p className={`text-2xl font-display font-semibold figures mt-1 ${projectedNet >= 0 ? "text-ledger" : "text-stamp-red"}`}>
++                <p className={`text-2xl font-display font-semibold figures mt-1 ${projectedNet >= 0 ? "text-accent" : "text-stamp-red"}`}>
+                   {formatPkr(Math.abs(projectedNet))}
+                 </p>
+                 <p className="text-xs text-ink/50 mt-1">Deposit paid − deductions − discount − amount owed</p>
+diff --git a/frontend/app/(dashboard)/leases/new/page.tsx b/frontend/app/(dashboard)/leases/new/page.tsx
+index e1cac72..c3cb9a4 100644
+--- a/frontend/app/(dashboard)/leases/new/page.tsx
++++ b/frontend/app/(dashboard)/leases/new/page.tsx
+@@ -262,7 +262,7 @@ export default function NewLeasePage() {
+             <div
+               className={`w-6 h-6 rounded-full flex items-center justify-center text-xs figures font-medium shrink-0 ${
+                 i <= step
+-                  ? "bg-ledger text-paper-card"
++                  ? "bg-ledger text-sidebar-ink"
+                   : "bg-paper-card border border-border text-ink/40"
+               }`}
+             >
+@@ -582,7 +582,7 @@ export default function NewLeasePage() {
+                   <span
+                     className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                       depositReceived
+-                        ? "bg-ledger/10 text-ledger"
++                        ? "bg-accent/10 text-accent"
+                         : "bg-brass/15 text-brass"
+                     }`}
+                   >
+diff --git a/frontend/app/(dashboard)/leases/page.tsx b/frontend/app/(dashboard)/leases/page.tsx
+index cd7b1f5..041f23d 100644
+--- a/frontend/app/(dashboard)/leases/page.tsx
++++ b/frontend/app/(dashboard)/leases/page.tsx
+@@ -389,7 +389,7 @@ export default function LeasesPage() {
+                 <p className="text-[10px] uppercase tracking-wider text-ink/45 font-semibold px-2 pt-1 pb-1.5">
+                   Optional columns
+                 </p>
+-                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
++                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent/5 cursor-pointer">
+                   <input
+                     type="checkbox"
+                     checked={showStartCol}
+@@ -398,7 +398,7 @@ export default function LeasesPage() {
+                   />
+                   Start date
+                 </label>
+-                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
++                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent/5 cursor-pointer">
+                   <input
+                     type="checkbox"
+                     checked={showEndCol}
+@@ -407,7 +407,7 @@ export default function LeasesPage() {
+                   />
+                   End date
+                 </label>
+-                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
++                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent/5 cursor-pointer">
+                   <input
+                     type="checkbox"
+                     checked={showDepositCol}
+@@ -479,7 +479,7 @@ export default function LeasesPage() {
+                     <Fragment key={l.id}>
+                       <tr
+                         onClick={() => setExpandedLeaseId(expanded ? null : l.id)}
+-                        className="border-b border-border/60 cursor-pointer hover:bg-ledger/[0.03]"
++                        className="border-b border-border/60 cursor-pointer hover:bg-accent/[0.03]"
+                       >
+                         <td className="py-3 pr-0.5 text-ink/40">
+                           <ChevronRight
+@@ -505,7 +505,7 @@ export default function LeasesPage() {
+                             {!hasDeposit ? (
+                               <span className="text-xs text-ink/35">— none —</span>
+                             ) : fullyPaid ? (
+-                              <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-ledger/10 text-ledger whitespace-nowrap">
++                              <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-accent/10 text-accent whitespace-nowrap">
+                                 Received
+                               </span>
+                             ) : (
+@@ -523,7 +523,7 @@ export default function LeasesPage() {
+                               className={`p-1.5 rounded inline-flex ${
+                                 l.status !== "active"
+                                   ? "opacity-30 pointer-events-none"
+-                                  : "hover:bg-ledger/5 text-ink/50 hover:text-ink"
++                                  : "hover:bg-accent/5 text-ink/50 hover:text-ink"
+                               }`}
+                             >
+                               <FileText size={16} />
+@@ -531,7 +531,7 @@ export default function LeasesPage() {
+                             <button
+                               onClick={() => openEditModal(l)}
+                               title="Edit lease"
+-                              className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink"
++                              className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink"
+                             >
+                               <Pencil size={16} />
+                             </button>
+@@ -539,7 +539,7 @@ export default function LeasesPage() {
+                         </td>
+                       </tr>
+                       {expanded && (
+-                        <tr className="border-b border-border/60 bg-ledger/[0.02]">
++                        <tr className="border-b border-border/60 bg-accent/[0.02]">
+                           <td colSpan={colSpan} className="px-0 py-0">
+                             <div className="pl-9 pr-4 py-4">
+                               {!hasDeposit ? (
+@@ -661,14 +661,14 @@ export default function LeasesPage() {
+             </div>
+ 
+             {chargeImpactMessage && (
+-              <p className="text-xs bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2 text-ink/70">
++              <p className="text-xs bg-accent/5 border border-accent/15 rounded-card px-3 py-2 text-ink/70">
+                 {chargeImpactMessage}
+               </p>
+             )}
+             {chargeError && <p className="text-sm text-stamp-red">{chargeError}</p>}
+ 
+             {addChargeOpen && (
+-              <form onSubmit={handleAddCharge} className="space-y-3 bg-ledger/5 border border-ledger/15 rounded-card p-3">
++              <form onSubmit={handleAddCharge} className="space-y-3 bg-accent/5 border border-accent/15 rounded-card p-3">
+                 <div className="grid grid-cols-2 gap-3">
+                   <Field label="Label">
+                     <Input
+@@ -762,7 +762,7 @@ export default function LeasesPage() {
+                   <form
+                     key={c.id}
+                     onSubmit={handleSaveChargeAmount}
+-                    className="space-y-2 bg-ledger/5 border border-ledger/15 rounded-card p-3"
++                    className="space-y-2 bg-accent/5 border border-accent/15 rounded-card p-3"
+                   >
+                     <p className="text-sm font-medium">{c.label}</p>
+                     <div className="grid grid-cols-2 gap-3">
+@@ -891,7 +891,7 @@ export default function LeasesPage() {
+           )}
+ 
+           {depositPayments && depositPayments.length > 0 && (
+-            <div className="bg-ledger/5 border border-ledger/15 rounded-card p-3 space-y-1">
++            <div className="bg-accent/5 border border-accent/15 rounded-card p-3 space-y-1">
+               <p className="text-xs uppercase tracking-wider text-ink/45 mb-1">Payments so far</p>
+               {depositPayments.map((p) => (
+                 <div key={p.id} className="flex justify-between text-xs text-ink/70">
+diff --git a/frontend/app/(dashboard)/ledger/page.tsx b/frontend/app/(dashboard)/ledger/page.tsx
+index 82247d9..fac7107 100644
+--- a/frontend/app/(dashboard)/ledger/page.tsx
++++ b/frontend/app/(dashboard)/ledger/page.tsx
+@@ -104,7 +104,7 @@ function LedgerPageInner() {
+     <div className="space-y-6">
+       <div className="flex items-start justify-between gap-3">
+         <div>
+-          <button onClick={() => router.back()} className="text-sm text-ledger hover:underline mb-2">
++          <button onClick={() => router.back()} className="text-sm text-accent hover:underline mb-2">
+             ← Back
+           </button>
+           <h1 className="text-2xl font-display font-semibold">
+diff --git a/frontend/app/(dashboard)/owners/page.tsx b/frontend/app/(dashboard)/owners/page.tsx
+index 5007db1..2298fc3 100644
+--- a/frontend/app/(dashboard)/owners/page.tsx
++++ b/frontend/app/(dashboard)/owners/page.tsx
+@@ -219,17 +219,17 @@ export default function OwnersPage() {
+               accessor: (o) => (
+                 <div className="flex gap-1 justify-end no-print">
+                   {balanceFor(o.id) > 0 && (
+-                    <button onClick={() => openPay(o)} title="Pay owner" className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink">
++                    <button onClick={() => openPay(o)} title="Pay owner" className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink">
+                       <Banknote size={16} />
+                     </button>
+                   )}
+-                  <button onClick={() => openLedger(o)} title="View ledger" className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink">
++                  <button onClick={() => openLedger(o)} title="View ledger" className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink">
+                     <ScrollText size={16} />
+                   </button>
+-                  <button onClick={() => openEditModal(o)} title="Edit" className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink">
++                  <button onClick={() => openEditModal(o)} title="Edit" className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink">
+                     <Pencil size={16} />
+                   </button>
+-                  <button onClick={() => handleArchive(o)} title={o.is_archived ? "Unarchive" : "Archive"} className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink">
++                  <button onClick={() => handleArchive(o)} title={o.is_archived ? "Unarchive" : "Archive"} className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink">
+                     {o.is_archived ? <ArchiveRestore size={16} /> : <Archive size={16} />}
+                   </button>
+                 </div>
+diff --git a/frontend/app/(dashboard)/page.tsx b/frontend/app/(dashboard)/page.tsx
+index 0aad11e..fbc2e23 100644
+--- a/frontend/app/(dashboard)/page.tsx
++++ b/frontend/app/(dashboard)/page.tsx
+@@ -92,7 +92,7 @@ export default function DashboardHome() {
+   const { theme } = useTheme();
+   const themeColors = THEME_COLORS[theme];
+   const DONUT_COLORS = {
+-    occupied: themeColors.ledger,
++    occupied: themeColors.accent,
+     vacant: themeColors.brass,
+     maintenance: themeColors.stampRed,
+     reserved: themeColors.stampSlate,
+@@ -426,7 +426,7 @@ export default function DashboardHome() {
+         <KpiTile
+           href="/invoices"
+           icon={<Wallet size={18} />}
+-          iconClassName="bg-ledger/10 text-ledger"
++          iconClassName="bg-accent/10 text-accent"
+           label="Collected this month"
+           value={pkr(collectedAnimated)}
+           loading={collectedLoading}
+@@ -458,7 +458,7 @@ export default function DashboardHome() {
+         <KpiTile
+           href="/reports"
+           icon={<TrendingUp size={18} />}
+-          iconClassName="bg-ledger/10 text-ledger"
++          iconClassName="bg-accent/10 text-accent"
+           label="Net profit"
+           value={pkr(netProfitAnimated)}
+           loading={netProfitLoading}
+@@ -551,7 +551,7 @@ export default function DashboardHome() {
+                       color: themeColors.ink,
+                     }}
+                   />
+-                  <Bar dataKey="Income" fill={themeColors.ledger} radius={[3, 3, 0, 0]} />
++                  <Bar dataKey="Income" fill={themeColors.accent} radius={[3, 3, 0, 0]} />
+                   <Bar dataKey="Expenses" fill={themeColors.stampRed} radius={[3, 3, 0, 0]} />
+                 </BarChart>
+               </ResponsiveContainer>
+@@ -564,7 +564,7 @@ export default function DashboardHome() {
+       <Card
+         title="Invoices awaiting payment"
+         action={
+-          <Link href="/invoices" className="text-xs text-ledger hover:underline">
++          <Link href="/invoices" className="text-xs text-accent hover:underline">
+             View all
+           </Link>
+         }
+@@ -706,7 +706,7 @@ export default function DashboardHome() {
+                   <span className="text-sm w-20 truncate">{b.name}</span>
+                   <div className="flex-1 h-2 bg-border rounded-full overflow-hidden">
+                     <div
+-                      className="h-full bg-ledger rounded-full"
++                      className="h-full bg-accent rounded-full"
+                       style={{ width: `${(b.amount / maxBuildingAmount) * 100}%` }}
+                     />
+                   </div>
+@@ -745,7 +745,7 @@ export default function DashboardHome() {
+                   onClick={() => router.push(a.href)}
+                   className="w-full flex items-start gap-2.5 py-1.5 -mx-1.5 px-1.5 rounded-card hover:bg-brass/[0.07] transition-colors text-left"
+                 >
+-                  <div className="w-6 h-6 rounded-full bg-ledger/8 text-ledger flex items-center justify-center shrink-0 mt-0.5 [&>svg]:w-3 [&>svg]:h-3">
++                  <div className="w-6 h-6 rounded-full bg-accent/8 text-accent flex items-center justify-center shrink-0 mt-0.5 [&>svg]:w-3 [&>svg]:h-3">
+                     {a.icon}
+                   </div>
+                   <div className="flex-1 min-w-0">
+@@ -779,7 +779,7 @@ function MiniStat({
+   color: "ledger" | "brass" | "red";
+ }) {
+   const colorClasses = {
+-    ledger: "bg-ledger/10 text-ledger",
++    ledger: "bg-accent/10 text-accent",
+     brass: "bg-brass/15 text-brass-dark",
+     red: "bg-stamp-red/10 text-stamp-red",
+   }[color];
+diff --git a/frontend/app/(dashboard)/reports/page.tsx b/frontend/app/(dashboard)/reports/page.tsx
+index a21bea9..297d244 100644
+--- a/frontend/app/(dashboard)/reports/page.tsx
++++ b/frontend/app/(dashboard)/reports/page.tsx
+@@ -562,7 +562,7 @@ export default function ReportsPage() {
+       >
+         {refundTarget && (
+           <form onSubmit={handleRefund} className="space-y-4">
+-            <p className="text-xs text-ink/50 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2">
++            <p className="text-xs text-ink/50 bg-accent/5 border border-accent/15 rounded-card px-3 py-2">
+               {tenantName(leaseById(refundTarget.lease_id)?.tenant_id ?? "")} —{" "}
+               {roomLabel(leaseById(refundTarget.lease_id)?.room_id)} — held:{" "}
+               <span className="figures font-medium">{formatPkr(refundTarget.amount_received)}</span>
+diff --git a/frontend/app/(dashboard)/settings/page.tsx b/frontend/app/(dashboard)/settings/page.tsx
+index f5dd271..8b64f86 100644
+--- a/frontend/app/(dashboard)/settings/page.tsx
++++ b/frontend/app/(dashboard)/settings/page.tsx
+@@ -112,7 +112,7 @@ export default function SettingsPage() {
+       </div>
+ 
+       {message && (
+-        <div className="text-sm text-ledger bg-ledger/5 border border-ledger/20 rounded-card px-4 py-2.5">
++        <div className="text-sm text-accent bg-accent/5 border border-accent/20 rounded-card px-4 py-2.5">
+           {message}
+         </div>
+       )}
+@@ -217,7 +217,7 @@ export default function SettingsPage() {
+ 
+       <Modal open={inviteModalOpen} onClose={() => setInviteModalOpen(false)} title="Add teammate">
+         <form onSubmit={handleInvite} className="space-y-4">
+-          <p className="text-xs text-ink/50 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2">
++          <p className="text-xs text-ink/50 bg-accent/5 border border-accent/15 rounded-card px-3 py-2">
+             They&apos;ll join your company only — never anyone else&apos;s. Give them these
+             credentials to sign in with.
+           </p>
+diff --git a/frontend/app/forgot-password/page.tsx b/frontend/app/forgot-password/page.tsx
+index 291337c..3399f11 100644
+--- a/frontend/app/forgot-password/page.tsx
++++ b/frontend/app/forgot-password/page.tsx
+@@ -57,7 +57,7 @@ export default function ForgotPasswordPage() {
+             </div>
+ 
+             {sent ? (
+-              <p className="text-sm text-ink/70 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2.5">
++              <p className="text-sm text-ink/70 bg-accent/5 border border-accent/15 rounded-card px-3 py-2.5">
+                 We've sent a reset link to <span className="font-medium">{email}</span>. It may take a
+                 minute to arrive — check spam if you don't see it.
+               </p>
+diff --git a/frontend/app/globals.css b/frontend/app/globals.css
+index d08dd65..193015b 100644
+--- a/frontend/app/globals.css
++++ b/frontend/app/globals.css
+@@ -36,6 +36,10 @@
+      deliberately NOT derived from --paper, which is the page background
+      and flips dark in Black/Navy. */
+   --sidebar-ink: 245 243 235;
++  /* Foreground/accent role -- separate from --ledger, which is always a
++     dark surface color. Identical to --ledger here so Ledger theme looks
++     exactly as before. */
++  --accent: 47 79 61;
+   --shadow-card: 0 1px 2px rgb(31 45 36 / 0.06), 0 1px 0 rgb(31 45 36 / 0.04);
+   --shadow-shell: 0 4px 8px rgb(31 45 36 / 0.05), 0 18px 40px -14px rgb(31 45 36 / 0.22);
+ }
+@@ -57,6 +61,7 @@
+   --stamp-amber: 224 185 120;
+   --stamp-slate: 163 168 163;
+   --sidebar-ink: 245 243 235;
++  --accent: 150 195 168;
+   /* Soft drop-shadows barely register against near-black, so a crisp 1px
+      outline does the contrast work instead, plus a darker glow for depth. */
+   --shadow-card: 0 0 0 1px rgb(42 45 41), 0 2px 8px rgb(0 0 0 / 0.35);
+@@ -80,6 +85,7 @@
+   --stamp-amber: 212 175 55;
+   --stamp-slate: 150 166 194;
+   --sidebar-ink: 235 240 247;
++  --accent: 138 168 214;
+   --shadow-card: 0 0 0 1px rgb(40 55 84), 0 2px 8px rgb(0 0 0 / 0.35);
+   --shadow-shell: 0 0 0 1px rgb(40 55 84), 0 18px 40px -14px rgb(0 0 0 / 0.6);
+ }
+diff --git a/frontend/app/login/page.tsx b/frontend/app/login/page.tsx
+index d3fedfa..e470c97 100644
+--- a/frontend/app/login/page.tsx
++++ b/frontend/app/login/page.tsx
+@@ -59,7 +59,7 @@ export default function LoginPage() {
+             <div>
+               <div className="flex items-baseline justify-between mb-1.5">
+                 <label className="text-sm font-medium text-ink">Password</label>
+-                <Link href="/forgot-password" className="text-xs text-ledger hover:underline">
++                <Link href="/forgot-password" className="text-xs text-accent hover:underline">
+                   Forgot password?
+                 </Link>
+               </div>
+@@ -79,7 +79,7 @@ export default function LoginPage() {
+ 
+             <p className="text-xs text-center text-ink/45 pt-1">
+               New to Properties Management?{" "}
+-              <Link href="/signup" className="text-ledger hover:underline">
++              <Link href="/signup" className="text-accent hover:underline">
+                 Create an account
+               </Link>
+             </p>
+diff --git a/frontend/app/signup/page.tsx b/frontend/app/signup/page.tsx
+index 31457a9..0ba2d3e 100644
+--- a/frontend/app/signup/page.tsx
++++ b/frontend/app/signup/page.tsx
+@@ -104,7 +104,7 @@ export default function SignupPage() {
+ 
+             <p className="text-xs text-center text-ink/45 pt-1">
+               Already have an account?{" "}
+-              <Link href="/login" className="text-ledger hover:underline">
++              <Link href="/login" className="text-accent hover:underline">
+                 Sign in
+               </Link>
+             </p>
+diff --git a/frontend/components/marketing/BrandPanel.tsx b/frontend/components/marketing/BrandPanel.tsx
+index 5305ef2..3dfb35a 100644
+--- a/frontend/components/marketing/BrandPanel.tsx
++++ b/frontend/components/marketing/BrandPanel.tsx
+@@ -32,7 +32,7 @@ const FEATURES = [
+ export function BrandPanel() {
+   return (
+     <div
+-      className="hidden lg:flex lg:flex-col lg:justify-between lg:w-[42%] shrink-0 bg-ledger text-paper px-10 py-10 relative overflow-hidden"
++      className="hidden lg:flex lg:flex-col lg:justify-between lg:w-[42%] shrink-0 bg-ledger text-sidebar-ink px-10 py-10 relative overflow-hidden"
+       style={{
+         backgroundImage:
+           "repeating-linear-gradient(180deg, rgba(243,241,230,0.05) 0px, rgba(243,241,230,0.05) 1px, transparent 1px, transparent 48px)",
+@@ -43,7 +43,7 @@ export function BrandPanel() {
+           <span className="w-2.5 h-0.5 bg-brass" />
+           <span className="text-[11px] tracking-[0.12em] text-brass font-medium">ONEACCOUNTS</span>
+         </div>
+-        <p className="font-display text-2xl font-semibold leading-tight mt-1.5 mb-1 text-paper-card">
++        <p className="font-display text-2xl font-semibold leading-tight mt-1.5 mb-1 text-sidebar-ink">
+           Properties
+           <br />
+           Management
+@@ -57,16 +57,16 @@ export function BrandPanel() {
+             <div key={title} className="flex gap-3">
+               <Icon size={18} className="text-brass-light mt-0.5 shrink-0" />
+               <div>
+-                <p className="text-[13.5px] font-medium text-paper-card">{title}</p>
+-                <p className="text-xs text-paper/55 mt-0.5 leading-relaxed">{body}</p>
++                <p className="text-[13.5px] font-medium text-sidebar-ink">{title}</p>
++                <p className="text-xs text-sidebar-ink/55 mt-0.5 leading-relaxed">{body}</p>
+               </div>
+             </div>
+           ))}
+         </div>
+       </div>
+ 
+-      <div className="border-t border-paper/15 pt-3">
+-        <p className="text-[11.5px] text-paper/45">
++      <div className="border-t border-sidebar-ink/15 pt-3">
++        <p className="text-[11.5px] text-sidebar-ink/45">
+           Built for the Pakistani rental market — CNIC-based records, PKR
+           formatting, local number validation.
+         </p>
+diff --git a/frontend/components/marketing/ContactFooter.tsx b/frontend/components/marketing/ContactFooter.tsx
+index 06ae03f..0920172 100644
+--- a/frontend/components/marketing/ContactFooter.tsx
++++ b/frontend/components/marketing/ContactFooter.tsx
+@@ -32,7 +32,7 @@ export function ContactFooter() {
+           rel="noopener noreferrer"
+           aria-label="Chat on WhatsApp: 0371 6853677"
+           title="WhatsApp: 0371 6853677"
+-          className="text-ink/40 hover:text-ledger transition-colors"
++          className="text-ink/40 hover:text-accent transition-colors"
+         >
+           <IconPhone size={16} />
+         </a>
+@@ -40,7 +40,7 @@ export function ContactFooter() {
+           href={`mailto:${CONTACT_EMAIL}`}
+           aria-label={`Email ${CONTACT_EMAIL}`}
+           title={CONTACT_EMAIL}
+-          className="text-ink/40 hover:text-ledger transition-colors"
++          className="text-ink/40 hover:text-accent transition-colors"
+         >
+           <IconMail size={16} />
+         </a>
+@@ -50,7 +50,7 @@ export function ContactFooter() {
+           rel="noopener noreferrer"
+           aria-label="OneAccounts by Siqbal on YouTube"
+           title="OneAccounts by Siqbal — YouTube"
+-          className="text-ink/40 hover:text-ledger transition-colors"
++          className="text-ink/40 hover:text-accent transition-colors"
+         >
+           <IconVideo size={16} />
+         </a>
+diff --git a/frontend/components/ui/Button.tsx b/frontend/components/ui/Button.tsx
+index be915ea..8568fd8 100644
+--- a/frontend/components/ui/Button.tsx
++++ b/frontend/components/ui/Button.tsx
+@@ -4,9 +4,9 @@ type Variant = "primary" | "secondary" | "ghost" | "danger";
+ 
+ const variantClasses: Record<Variant, string> = {
+   primary:
+-    "bg-ledger text-paper-card hover:bg-ledger-dark border border-ledger",
++    "bg-ledger text-sidebar-ink hover:bg-ledger-dark border border-ledger",
+   secondary:
+-    "bg-transparent text-ledger border border-ledger hover:bg-ledger/5",
++    "bg-transparent text-accent border border-accent hover:bg-accent/5",
+   ghost: "bg-transparent text-ink hover:bg-ink/5 border border-transparent",
+   danger:
+     "bg-transparent text-stamp-red border border-stamp-red hover:bg-stamp-red/5",
+diff --git a/frontend/components/ui/Card.tsx b/frontend/components/ui/Card.tsx
+index b71d056..dfbef30 100644
+--- a/frontend/components/ui/Card.tsx
++++ b/frontend/components/ui/Card.tsx
+@@ -86,7 +86,7 @@ export function DataTable<T extends Record<string, any>>({
+               key={String(row[keyField])}
+               onClick={() => onRowClick?.(row)}
+               className={`border-b border-border/60 last:border-0 ${
+-                onRowClick ? "group cursor-pointer hover:bg-ledger/[0.03]" : ""
++                onRowClick ? "group cursor-pointer hover:bg-accent/[0.03]" : ""
+               }`}
+             >
+               {columns.map((col) => (
+diff --git a/frontend/components/ui/GanttChart.tsx b/frontend/components/ui/GanttChart.tsx
+index f3d3d5c..c58b8bc 100644
+--- a/frontend/components/ui/GanttChart.tsx
++++ b/frontend/components/ui/GanttChart.tsx
+@@ -58,7 +58,7 @@ export function GanttChart({ stages }: { stages: GanttStage[] }) {
+   }
+ 
+   const statusColor: Record<GanttStage["status"], string> = {
+-    completed: "bg-ledger",
++    completed: "bg-accent",
+     in_progress: "bg-brass",
+     blocked: "bg-stamp-red",
+     not_started: "",
+@@ -122,7 +122,7 @@ export function GanttChart({ stages }: { stages: GanttStage[] }) {
+             Planned
+           </span>
+           <span>
+-            <span className="inline-block w-3.5 h-[9px] rounded mr-1.5 align-middle bg-ledger" />
++            <span className="inline-block w-3.5 h-[9px] rounded mr-1.5 align-middle bg-accent" />
+             Actual — completed
+           </span>
+           <span>
+diff --git a/frontend/components/ui/GlobalSearch.tsx b/frontend/components/ui/GlobalSearch.tsx
+index 8ff4c01..377e67d 100644
+--- a/frontend/components/ui/GlobalSearch.tsx
++++ b/frontend/components/ui/GlobalSearch.tsx
+@@ -93,7 +93,7 @@ export function GlobalSearch() {
+                 href={r.href}
+                 className="flex items-center gap-2.5 px-2.5 py-2 rounded-card hover:bg-paper transition-colors"
+               >
+-                <span className="w-7 h-7 rounded-full bg-ledger/8 text-ledger flex items-center justify-center shrink-0">
++                <span className="w-7 h-7 rounded-full bg-accent/8 text-accent flex items-center justify-center shrink-0">
+                   {r.icon}
+                 </span>
+                 <span className="min-w-0">
+diff --git a/frontend/components/ui/KpiTile.tsx b/frontend/components/ui/KpiTile.tsx
+index 2f4ba39..027b01c 100644
+--- a/frontend/components/ui/KpiTile.tsx
++++ b/frontend/components/ui/KpiTile.tsx
+@@ -49,7 +49,7 @@ export function KpiTile({
+         </p>
+       )}
+ 
+-      <span className="absolute top-4 right-4 w-5 h-5 rounded-full flex items-center justify-center text-ledger opacity-0 -translate-x-0.5 translate-y-0.5 group-hover:opacity-100 group-hover:translate-x-0 group-hover:translate-y-0 group-focus-visible:opacity-100 group-focus-visible:translate-x-0 group-focus-visible:translate-y-0 transition-all">
++      <span className="absolute top-4 right-4 w-5 h-5 rounded-full flex items-center justify-center text-accent opacity-0 -translate-x-0.5 translate-y-0.5 group-hover:opacity-100 group-hover:translate-x-0 group-hover:translate-y-0 group-focus-visible:opacity-100 group-focus-visible:translate-x-0 group-focus-visible:translate-y-0 transition-all">
+         <IconArrowUpRight size={13} />
+       </span>
+     </Link>
+diff --git a/frontend/components/ui/PrintHeader.tsx b/frontend/components/ui/PrintHeader.tsx
+index e24c845..6d7d83d 100644
+--- a/frontend/components/ui/PrintHeader.tsx
++++ b/frontend/components/ui/PrintHeader.tsx
+@@ -8,13 +8,13 @@ import { Company } from "@/lib/api";
+ export function PrintHeader({ company, reportTitle }: { company: Company | null; reportTitle: string }) {
+   if (!company) return null;
+   return (
+-    <div className="hidden print:flex items-center gap-3 pb-4 mb-4 border-b-4 border-ledger">
++    <div className="hidden print:flex items-center gap-3 pb-4 mb-4 border-b-4 border-accent">
+       {company.logo_url && (
+         // eslint-disable-next-line @next/next/no-img-element
+         <img src={company.logo_url} alt={company.name} className="w-14 h-14 object-contain" />
+       )}
+       <div>
+-        <p className="font-display text-xl font-semibold text-ledger">{company.name}</p>
++        <p className="font-display text-xl font-semibold text-accent">{company.name}</p>
+         <p className="text-xs text-ink/50">Property Management — {reportTitle}</p>
+       </div>
+     </div>
+diff --git a/frontend/components/ui/ProgressRing.tsx b/frontend/components/ui/ProgressRing.tsx
+index e881aea..081c062 100644
+--- a/frontend/components/ui/ProgressRing.tsx
++++ b/frontend/components/ui/ProgressRing.tsx
+@@ -29,7 +29,7 @@ export function ProgressRing({
+           cy={size / 2}
+           r={radius}
+           fill="none"
+-          className="stroke-ledger"
++          className="stroke-accent"
+           strokeWidth={stroke}
+           strokeDasharray={circumference}
+           strokeDashoffset={offset}
+diff --git a/frontend/components/ui/SearchableSelect.tsx b/frontend/components/ui/SearchableSelect.tsx
+index a59926f..feb3941 100644
+--- a/frontend/components/ui/SearchableSelect.tsx
++++ b/frontend/components/ui/SearchableSelect.tsx
+@@ -182,8 +182,8 @@ export function SearchableSelect({
+                 }}
+                 onMouseEnter={() => setActiveIndex(i)}
+                 className={`px-3 py-2 text-sm cursor-pointer truncate ${
+-                  i === activeIndex ? "bg-ledger/[0.07]" : ""
+-                } ${opt.value === value ? "font-medium text-ledger" : "text-ink"}`}
++                  i === activeIndex ? "bg-accent/[0.07]" : ""
++                } ${opt.value === value ? "font-medium text-accent" : "text-ink"}`}
+               >
+                 {opt.label}
+               </div>
+diff --git a/frontend/lib/theme.tsx b/frontend/lib/theme.tsx
+index 5b96cf3..3fd08f2 100644
+--- a/frontend/lib/theme.tsx
++++ b/frontend/lib/theme.tsx
+@@ -24,6 +24,7 @@ export const THEME_COLORS: Record<
+   {
+     ink: string;
+     ledger: string;
++    accent: string;
+     brass: string;
+     stampGreen: string;
+     stampRed: string;
+@@ -36,6 +37,7 @@ export const THEME_COLORS: Record<
+   ledger: {
+     ink: "#1F2D24",
+     ledger: "#2F4F3D",
++    accent: "#2F4F3D",
+     brass: "#C89B5C",
+     stampGreen: "#2F4F3D",
+     stampRed: "#A63D40",
+@@ -47,6 +49,7 @@ export const THEME_COLORS: Record<
+   black: {
+     ink: "#EDEDE7",
+     ledger: "#2E3A31",
++    accent: "#96C3A8",
+     brass: "#E0B978",
+     stampGreen: "#8FCDA8",
+     stampRed: "#F09999",
+@@ -58,6 +61,7 @@ export const THEME_COLORS: Record<
+   navy: {
+     ink: "#E7ECF3",
+     ledger: "#3D5A82",
++    accent: "#8AA8D6",
+     brass: "#D4AF37",
+     stampGreen: "#79C5A0",
+     stampRed: "#E68F85",
+diff --git a/frontend/tailwind.config.ts b/frontend/tailwind.config.ts
+index 856f117..d7e6532 100644
+--- a/frontend/tailwind.config.ts
++++ b/frontend/tailwind.config.ts
+@@ -46,6 +46,13 @@ const config: Config = {
+         // Reusing `paper` here was the exact bug that made sidebar text
+         // disappear when Black/Navy were first tried.
+         "sidebar-ink": "rgb(var(--sidebar-ink) / <alpha-value>)",
++        // `ledger` is always a dark surface color in every theme (by design
++        // -- it's the "book cover"), so it works as a background but goes
++        // illegible as foreground text/borders/icons once the page itself
++        // is also dark. `accent` is the same brand green in the Ledger
++        // theme (zero visual change there) but a bright, legible tone in
++        // Black/Navy, for links, badges, active states, and chart fills.
++        accent: "rgb(var(--accent) / <alpha-value>)",
+       },
+       fontFamily: {
+         display: ["var(--font-fraunces)", "Georgia", "serif"],

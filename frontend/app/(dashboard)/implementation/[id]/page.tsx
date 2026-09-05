@@ -174,7 +174,7 @@ export default function ImplementationDetailPage() {
         </div>
       )}
       {isRequester && (
-        <div className="bg-ledger/5 border border-ledger/15 rounded-card px-4 py-3 text-sm">
+        <div className="bg-accent/5 border border-accent/15 rounded-card px-4 py-3 text-sm">
           Add requirements any time. Your senior approver gives the final Go-Live approval.
         </div>
       )}

@@ -58,7 +58,7 @@ export function GanttChart({ stages }: { stages: GanttStage[] }) {
   }
 
   const statusColor: Record<GanttStage["status"], string> = {
-    completed: "bg-ledger",
+    completed: "bg-accent",
     in_progress: "bg-brass",
     blocked: "bg-stamp-red",
     not_started: "",
@@ -122,7 +122,7 @@ export function GanttChart({ stages }: { stages: GanttStage[] }) {
             Planned
           </span>
           <span>
-            <span className="inline-block w-3.5 h-[9px] rounded mr-1.5 align-middle bg-ledger" />
+            <span className="inline-block w-3.5 h-[9px] rounded mr-1.5 align-middle bg-accent" />
             Actual — completed
           </span>
           <span>

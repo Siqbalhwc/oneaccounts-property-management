@@ -36,6 +36,10 @@
      deliberately NOT derived from --paper, which is the page background
      and flips dark in Black/Navy. */
   --sidebar-ink: 245 243 235;
+  /* Foreground/accent role -- separate from --ledger, which is always a
+     dark surface color. Identical to --ledger here so Ledger theme looks
+     exactly as before. */
+  --accent: 47 79 61;
   --shadow-card: 0 1px 2px rgb(31 45 36 / 0.06), 0 1px 0 rgb(31 45 36 / 0.04);
   --shadow-shell: 0 4px 8px rgb(31 45 36 / 0.05), 0 18px 40px -14px rgb(31 45 36 / 0.22);
 }
@@ -57,6 +61,7 @@
   --stamp-amber: 224 185 120;
   --stamp-slate: 163 168 163;
   --sidebar-ink: 245 243 235;
+  --accent: 150 195 168;
   /* Soft drop-shadows barely register against near-black, so a crisp 1px
      outline does the contrast work instead, plus a darker glow for depth. */
   --shadow-card: 0 0 0 1px rgb(42 45 41), 0 2px 8px rgb(0 0 0 / 0.35);
@@ -80,6 +85,7 @@
   --stamp-amber: 212 175 55;
   --stamp-slate: 150 166 194;
   --sidebar-ink: 235 240 247;
+  --accent: 138 168 214;
   --shadow-card: 0 0 0 1px rgb(40 55 84), 0 2px 8px rgb(0 0 0 / 0.35);
   --shadow-shell: 0 0 0 1px rgb(40 55 84), 0 18px 40px -14px rgb(0 0 0 / 0.6);
 }

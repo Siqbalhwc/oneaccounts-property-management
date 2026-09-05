@@ -109,7 +109,7 @@ export default function JournalEntriesPage() {
         <div className="flex items-center gap-4">
           <button
             onClick={() => setShowFilters(!showFilters)}
-            className="text-sm text-ledger hover:underline whitespace-nowrap"
+            className="text-sm text-accent hover:underline whitespace-nowrap"
           >
             {showFilters ? "Hide filters" : `Filter${activeFilterCount ? ` (${activeFilterCount})` : ""}`}
           </button>
@@ -196,7 +196,7 @@ export default function JournalEntriesPage() {
                 e.status === "reversed" ? (
                   <span className="text-xs text-ink/35">Reversed</span>
                 ) : (
-                  <Link href={`/journal/${e.id}/edit`} title="Edit" className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink inline-flex">
+                  <Link href={`/journal/${e.id}/edit`} title="Edit" className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink inline-flex">
                     <Pencil size={16} />
                   </Link>
                 ),

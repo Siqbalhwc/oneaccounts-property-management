@@ -57,7 +57,7 @@ export default function ForgotPasswordPage() {
             </div>
 
             {sent ? (
-              <p className="text-sm text-ink/70 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2.5">
+              <p className="text-sm text-ink/70 bg-accent/5 border border-accent/15 rounded-card px-3 py-2.5">
                 We've sent a reset link to <span className="font-medium">{email}</span>. It may take a
                 minute to arrive — check spam if you don't see it.
               </p>

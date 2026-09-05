@@ -112,7 +112,7 @@ export default function SettingsPage() {
       </div>
 
       {message && (
-        <div className="text-sm text-ledger bg-ledger/5 border border-ledger/20 rounded-card px-4 py-2.5">
+        <div className="text-sm text-accent bg-accent/5 border border-accent/20 rounded-card px-4 py-2.5">
           {message}
         </div>
       )}
@@ -217,7 +217,7 @@ export default function SettingsPage() {
 
       <Modal open={inviteModalOpen} onClose={() => setInviteModalOpen(false)} title="Add teammate">
         <form onSubmit={handleInvite} className="space-y-4">
-          <p className="text-xs text-ink/50 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2">
+          <p className="text-xs text-ink/50 bg-accent/5 border border-accent/15 rounded-card px-3 py-2">
             They&apos;ll join your company only — never anyone else&apos;s. Give them these
             credentials to sign in with.
           </p>

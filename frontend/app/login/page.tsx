@@ -59,7 +59,7 @@ export default function LoginPage() {
             <div>
               <div className="flex items-baseline justify-between mb-1.5">
                 <label className="text-sm font-medium text-ink">Password</label>
-                <Link href="/forgot-password" className="text-xs text-ledger hover:underline">
+                <Link href="/forgot-password" className="text-xs text-accent hover:underline">
                   Forgot password?
                 </Link>
               </div>
@@ -79,7 +79,7 @@ export default function LoginPage() {
 
             <p className="text-xs text-center text-ink/45 pt-1">
               New to Properties Management?{" "}
-              <Link href="/signup" className="text-ledger hover:underline">
+              <Link href="/signup" className="text-accent hover:underline">
                 Create an account
               </Link>
             </p>

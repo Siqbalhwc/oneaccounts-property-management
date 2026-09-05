@@ -46,6 +46,13 @@ const config: Config = {
         // Reusing `paper` here was the exact bug that made sidebar text
         // disappear when Black/Navy were first tried.
         "sidebar-ink": "rgb(var(--sidebar-ink) / <alpha-value>)",
+        // `ledger` is always a dark surface color in every theme (by design
+        // -- it's the "book cover"), so it works as a background but goes
+        // illegible as foreground text/borders/icons once the page itself
+        // is also dark. `accent` is the same brand green in the Ledger
+        // theme (zero visual change there) but a bright, legible tone in
+        // Black/Navy, for links, badges, active states, and chart fills.
+        accent: "rgb(var(--accent) / <alpha-value>)",
       },
       fontFamily: {
         display: ["var(--font-fraunces)", "Georgia", "serif"],

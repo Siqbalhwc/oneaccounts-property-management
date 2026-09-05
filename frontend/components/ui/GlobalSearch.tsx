@@ -93,7 +93,7 @@ export function GlobalSearch() {
                 href={r.href}
                 className="flex items-center gap-2.5 px-2.5 py-2 rounded-card hover:bg-paper transition-colors"
               >
-                <span className="w-7 h-7 rounded-full bg-ledger/8 text-ledger flex items-center justify-center shrink-0">
+                <span className="w-7 h-7 rounded-full bg-accent/8 text-accent flex items-center justify-center shrink-0">
                   {r.icon}
                 </span>
                 <span className="min-w-0">

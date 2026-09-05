@@ -32,7 +32,7 @@ export function ContactFooter() {
           rel="noopener noreferrer"
           aria-label="Chat on WhatsApp: 0371 6853677"
           title="WhatsApp: 0371 6853677"
-          className="text-ink/40 hover:text-ledger transition-colors"
+          className="text-ink/40 hover:text-accent transition-colors"
         >
           <IconPhone size={16} />
         </a>
@@ -40,7 +40,7 @@ export function ContactFooter() {
           href={`mailto:${CONTACT_EMAIL}`}
           aria-label={`Email ${CONTACT_EMAIL}`}
           title={CONTACT_EMAIL}
-          className="text-ink/40 hover:text-ledger transition-colors"
+          className="text-ink/40 hover:text-accent transition-colors"
         >
           <IconMail size={16} />
         </a>
@@ -50,7 +50,7 @@ export function ContactFooter() {
           rel="noopener noreferrer"
           aria-label="OneAccounts by Siqbal on YouTube"
           title="OneAccounts by Siqbal — YouTube"
-          className="text-ink/40 hover:text-ledger transition-colors"
+          className="text-ink/40 hover:text-accent transition-colors"
         >
           <IconVideo size={16} />
         </a>

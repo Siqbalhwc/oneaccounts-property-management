@@ -182,8 +182,8 @@ export function SearchableSelect({
                 }}
                 onMouseEnter={() => setActiveIndex(i)}
                 className={`px-3 py-2 text-sm cursor-pointer truncate ${
-                  i === activeIndex ? "bg-ledger/[0.07]" : ""
-                } ${opt.value === value ? "font-medium text-ledger" : "text-ink"}`}
+                  i === activeIndex ? "bg-accent/[0.07]" : ""
+                } ${opt.value === value ? "font-medium text-accent" : "text-ink"}`}
               >
                 {opt.label}
               </div>

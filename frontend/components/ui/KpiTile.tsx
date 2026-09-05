@@ -49,7 +49,7 @@ export function KpiTile({
         </p>
       )}
 
-      <span className="absolute top-4 right-4 w-5 h-5 rounded-full flex items-center justify-center text-ledger opacity-0 -translate-x-0.5 translate-y-0.5 group-hover:opacity-100 group-hover:translate-x-0 group-hover:translate-y-0 group-focus-visible:opacity-100 group-focus-visible:translate-x-0 group-focus-visible:translate-y-0 transition-all">
+      <span className="absolute top-4 right-4 w-5 h-5 rounded-full flex items-center justify-center text-accent opacity-0 -translate-x-0.5 translate-y-0.5 group-hover:opacity-100 group-hover:translate-x-0 group-hover:translate-y-0 group-focus-visible:opacity-100 group-focus-visible:translate-x-0 group-focus-visible:translate-y-0 transition-all">
         <IconArrowUpRight size={13} />
       </span>
     </Link>

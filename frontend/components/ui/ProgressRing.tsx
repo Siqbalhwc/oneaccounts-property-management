@@ -29,7 +29,7 @@ export function ProgressRing({
           cy={size / 2}
           r={radius}
           fill="none"
-          className="stroke-ledger"
+          className="stroke-accent"
           strokeWidth={stroke}
           strokeDasharray={circumference}
           strokeDashoffset={offset}

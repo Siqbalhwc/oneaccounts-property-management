@@ -262,7 +262,7 @@ export default function NewLeasePage() {
             <div
               className={`w-6 h-6 rounded-full flex items-center justify-center text-xs figures font-medium shrink-0 ${
                 i <= step
-                  ? "bg-ledger text-paper-card"
+                  ? "bg-ledger text-sidebar-ink"
                   : "bg-paper-card border border-border text-ink/40"
               }`}
             >
@@ -582,7 +582,7 @@ export default function NewLeasePage() {
                   <span
                     className={`text-xs px-2 py-0.5 rounded-full font-medium ${
                       depositReceived
-                        ? "bg-ledger/10 text-ledger"
+                        ? "bg-accent/10 text-accent"
                         : "bg-brass/15 text-brass"
                     }`}
                   >

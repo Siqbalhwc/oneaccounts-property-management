@@ -24,7 +24,7 @@ export default function DashboardError({
       <div className="flex items-center justify-center gap-3 pt-2">
         <button
           onClick={reset}
-          className="text-sm px-4 py-2 rounded-card bg-ledger text-paper hover:bg-ledger-dark transition-colors"
+          className="text-sm px-4 py-2 rounded-card bg-ledger text-sidebar-ink hover:bg-ledger-dark transition-colors"
         >
           Try again
         </button>

@@ -389,7 +389,7 @@ export default function LeasesPage() {
                 <p className="text-[10px] uppercase tracking-wider text-ink/45 font-semibold px-2 pt-1 pb-1.5">
                   Optional columns
                 </p>
-                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
+                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent/5 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={showStartCol}
@@ -398,7 +398,7 @@ export default function LeasesPage() {
                   />
                   Start date
                 </label>
-                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
+                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent/5 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={showEndCol}
@@ -407,7 +407,7 @@ export default function LeasesPage() {
                   />
                   End date
                 </label>
-                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
+                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent/5 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={showDepositCol}
@@ -479,7 +479,7 @@ export default function LeasesPage() {
                     <Fragment key={l.id}>
                       <tr
                         onClick={() => setExpandedLeaseId(expanded ? null : l.id)}
-                        className="border-b border-border/60 cursor-pointer hover:bg-ledger/[0.03]"
+                        className="border-b border-border/60 cursor-pointer hover:bg-accent/[0.03]"
                       >
                         <td className="py-3 pr-0.5 text-ink/40">
                           <ChevronRight
@@ -505,7 +505,7 @@ export default function LeasesPage() {
                             {!hasDeposit ? (
                               <span className="text-xs text-ink/35">— none —</span>
                             ) : fullyPaid ? (
-                              <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-ledger/10 text-ledger whitespace-nowrap">
+                              <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-accent/10 text-accent whitespace-nowrap">
                                 Received
                               </span>
                             ) : (
@@ -523,7 +523,7 @@ export default function LeasesPage() {
                               className={`p-1.5 rounded inline-flex ${
                                 l.status !== "active"
                                   ? "opacity-30 pointer-events-none"
-                                  : "hover:bg-ledger/5 text-ink/50 hover:text-ink"
+                                  : "hover:bg-accent/5 text-ink/50 hover:text-ink"
                               }`}
                             >
                               <FileText size={16} />
@@ -531,7 +531,7 @@ export default function LeasesPage() {
                             <button
                               onClick={() => openEditModal(l)}
                               title="Edit lease"
-                              className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink"
+                              className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink"
                             >
                               <Pencil size={16} />
                             </button>
@@ -539,7 +539,7 @@ export default function LeasesPage() {
                         </td>
                       </tr>
                       {expanded && (
-                        <tr className="border-b border-border/60 bg-ledger/[0.02]">
+                        <tr className="border-b border-border/60 bg-accent/[0.02]">
                           <td colSpan={colSpan} className="px-0 py-0">
                             <div className="pl-9 pr-4 py-4">
                               {!hasDeposit ? (
@@ -661,14 +661,14 @@ export default function LeasesPage() {
             </div>
 
             {chargeImpactMessage && (
-              <p className="text-xs bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2 text-ink/70">
+              <p className="text-xs bg-accent/5 border border-accent/15 rounded-card px-3 py-2 text-ink/70">
                 {chargeImpactMessage}
               </p>
             )}
             {chargeError && <p className="text-sm text-stamp-red">{chargeError}</p>}
 
             {addChargeOpen && (
-              <form onSubmit={handleAddCharge} className="space-y-3 bg-ledger/5 border border-ledger/15 rounded-card p-3">
+              <form onSubmit={handleAddCharge} className="space-y-3 bg-accent/5 border border-accent/15 rounded-card p-3">
                 <div className="grid grid-cols-2 gap-3">
                   <Field label="Label">
                     <Input
@@ -762,7 +762,7 @@ export default function LeasesPage() {
                   <form
                     key={c.id}
                     onSubmit={handleSaveChargeAmount}
-                    className="space-y-2 bg-ledger/5 border border-ledger/15 rounded-card p-3"
+                    className="space-y-2 bg-accent/5 border border-accent/15 rounded-card p-3"
                   >
                     <p className="text-sm font-medium">{c.label}</p>
                     <div className="grid grid-cols-2 gap-3">
@@ -891,7 +891,7 @@ export default function LeasesPage() {
           )}
 
           {depositPayments && depositPayments.length > 0 && (
-            <div className="bg-ledger/5 border border-ledger/15 rounded-card p-3 space-y-1">
+            <div className="bg-accent/5 border border-accent/15 rounded-card p-3 space-y-1">
               <p className="text-xs uppercase tracking-wider text-ink/45 mb-1">Payments so far</p>
               {depositPayments.map((p) => (
                 <div key={p.id} className="flex justify-between text-xs text-ink/70">

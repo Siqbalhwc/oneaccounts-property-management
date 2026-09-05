@@ -372,7 +372,7 @@ export default function ExpensesPage() {
                 <p className="text-[10px] uppercase tracking-wider text-ink/45 font-semibold px-2 pt-1 pb-1.5">
                   Optional columns
                 </p>
-                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
+                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent/5 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={showGlCol}
@@ -381,7 +381,7 @@ export default function ExpensesPage() {
                   />
                   GL account
                 </label>
-                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
+                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent/5 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={showPaidFromCol}
@@ -390,7 +390,7 @@ export default function ExpensesPage() {
                   />
                   Paid from
                 </label>
-                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
+                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent/5 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={showRecursCol}
@@ -399,7 +399,7 @@ export default function ExpensesPage() {
                   />
                   Recurs
                 </label>
-                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
+                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-accent/5 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={showBuildingCol}
@@ -471,7 +471,7 @@ export default function ExpensesPage() {
                     <Fragment key={e.id}>
                       <tr
                         onClick={() => setExpandedExpenseId(expanded ? null : e.id)}
-                        className="border-b border-border/60 cursor-pointer hover:bg-ledger/[0.03]"
+                        className="border-b border-border/60 cursor-pointer hover:bg-accent/[0.03]"
                       >
                         <td className="py-3 pr-0.5 text-ink/40">
                           <ChevronRight
@@ -526,7 +526,7 @@ export default function ExpensesPage() {
                             <button
                               onClick={() => openEditModal(e)}
                               title="Edit"
-                              className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink"
+                              className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink"
                             >
                               <Pencil size={16} />
                             </button>
@@ -534,7 +534,7 @@ export default function ExpensesPage() {
                               <button
                                 onClick={() => openAllocationModal(e)}
                                 title="Manage split"
-                                className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink"
+                                className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink"
                               >
                                 <SplitSquareHorizontal size={16} />
                               </button>
@@ -542,7 +542,7 @@ export default function ExpensesPage() {
                             <button
                               onClick={() => openLedgerModal(e)}
                               title="View ledger"
-                              className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink"
+                              className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink"
                             >
                               <ScrollText size={16} />
                             </button>
@@ -550,7 +550,7 @@ export default function ExpensesPage() {
                         </td>
                       </tr>
                       {expanded && (
-                        <tr className="border-b border-border/60 bg-ledger/[0.02]">
+                        <tr className="border-b border-border/60 bg-accent/[0.02]">
                           <td colSpan={colSpan} className="px-0 py-0">
                             <div className="pl-9 pr-4 py-4">
                               <div className="flex flex-wrap items-start gap-x-10 gap-y-3">
@@ -603,13 +603,13 @@ export default function ExpensesPage() {
       <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editingId ? "Edit expense" : "Log expense"}>
         <form onSubmit={handleSubmit} className="space-y-4">
           {!editingId && (
-            <p className="text-xs text-ink/50 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2">
+            <p className="text-xs text-ink/50 bg-accent/5 border border-accent/15 rounded-card px-3 py-2">
               Logging an expense records a bill your company has already paid —
               the date you enter is the date it was paid.
             </p>
           )}
           {editingId && (
-            <p className="text-xs text-ink/50 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2">
+            <p className="text-xs text-ink/50 bg-accent/5 border border-accent/15 rounded-card px-3 py-2">
               Category, building, amount, and paid-from account are locked
               once an expense is logged, since they&apos;ve already posted to
               the ledger. Delete and re-log the expense if any of those need

@@ -156,7 +156,7 @@ export default function LeaseSettlementPage() {
             </h1>
             <div
               className={`inline-block px-6 py-4 rounded-card text-lg font-display font-semibold ${
-                isRefund ? "bg-ledger/10 text-ledger" : "bg-stamp-red/10 text-stamp-red"
+                isRefund ? "bg-accent/10 text-accent" : "bg-stamp-red/10 text-stamp-red"
               }`}
             >
               {isRefund ? "Net refund to tenant" : "Net amount still owed by tenant"}
@@ -179,7 +179,7 @@ export default function LeaseSettlementPage() {
   return (
     <div className="max-w-[1180px] mx-auto space-y-6">
       <div>
-        <button onClick={() => router.push("/leases")} className="text-sm text-ledger hover:underline mb-2">
+        <button onClick={() => router.push("/leases")} className="text-sm text-accent hover:underline mb-2">
           ← Back to leases
         </button>
         <h1 className="text-2xl font-display font-semibold">Close lease — settlement</h1>
@@ -354,9 +354,9 @@ export default function LeaseSettlementPage() {
                 </div>
               </Card>
 
-              <Card className="bg-ledger/5 border-ledger/20">
+              <Card className="bg-accent/5 border-accent/20">
                 <p className="text-sm font-medium">{projectedNet >= 0 ? "Net refund to tenant" : "Net amount still owed by tenant"}</p>
-                <p className={`text-2xl font-display font-semibold figures mt-1 ${projectedNet >= 0 ? "text-ledger" : "text-stamp-red"}`}>
+                <p className={`text-2xl font-display font-semibold figures mt-1 ${projectedNet >= 0 ? "text-accent" : "text-stamp-red"}`}>
                   {formatPkr(Math.abs(projectedNet))}
                 </p>
                 <p className="text-xs text-ink/50 mt-1">Deposit paid − deductions − discount − amount owed</p>

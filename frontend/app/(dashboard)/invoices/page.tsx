@@ -185,7 +185,7 @@ export default function InvoicesPage() {
                     <button
                       onClick={() => router.push(`/receipts/new?lease_id=${i.lease_id}`)}
                       title="Receive payment"
-                      className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink"
+                      className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink"
                     >
                       <Banknote size={16} />
                     </button>
@@ -194,7 +194,7 @@ export default function InvoicesPage() {
                     onClick={() => handleSendWhatsapp(i.id)}
                     disabled={sendingWhatsappId === i.id}
                     title="Send via WhatsApp"
-                    className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink disabled:opacity-50"
+                    className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink disabled:opacity-50"
                   >
                     <WhatsAppIcon size={16} />
                   </button>
@@ -202,7 +202,7 @@ export default function InvoicesPage() {
                     onClick={() => handleViewPdf(i.id)}
                     disabled={downloadingId === i.id}
                     title="View / print PDF"
-                    className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink disabled:opacity-50"
+                    className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink disabled:opacity-50"
                   >
                     <Printer size={16} />
                   </button>
@@ -246,7 +246,7 @@ export default function InvoicesPage() {
           </Field>
           {generateError && <p className="text-sm text-stamp-red">{generateError}</p>}
           {generateResult && (
-            <div className="text-sm bg-ledger/5 border border-ledger/20 rounded-card px-3 py-2 space-y-1">
+            <div className="text-sm bg-accent/5 border border-accent/20 rounded-card px-3 py-2 space-y-1">
               <p className="text-stamp-green font-medium">
                 {generateResult.created.length} invoice(s) created.
               </p>

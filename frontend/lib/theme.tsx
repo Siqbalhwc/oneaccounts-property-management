@@ -24,6 +24,7 @@ export const THEME_COLORS: Record<
   {
     ink: string;
     ledger: string;
+    accent: string;
     brass: string;
     stampGreen: string;
     stampRed: string;
@@ -36,6 +37,7 @@ export const THEME_COLORS: Record<
   ledger: {
     ink: "#1F2D24",
     ledger: "#2F4F3D",
+    accent: "#2F4F3D",
     brass: "#C89B5C",
     stampGreen: "#2F4F3D",
     stampRed: "#A63D40",
@@ -47,6 +49,7 @@ export const THEME_COLORS: Record<
   black: {
     ink: "#EDEDE7",
     ledger: "#2E3A31",
+    accent: "#96C3A8",
     brass: "#E0B978",
     stampGreen: "#8FCDA8",
     stampRed: "#F09999",
@@ -58,6 +61,7 @@ export const THEME_COLORS: Record<
   navy: {
     ink: "#E7ECF3",
     ledger: "#3D5A82",
+    accent: "#8AA8D6",
     brass: "#D4AF37",
     stampGreen: "#79C5A0",
     stampRed: "#E68F85",

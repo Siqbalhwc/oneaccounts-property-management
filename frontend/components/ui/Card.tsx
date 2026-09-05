@@ -86,7 +86,7 @@ export function DataTable<T extends Record<string, any>>({
               key={String(row[keyField])}
               onClick={() => onRowClick?.(row)}
               className={`border-b border-border/60 last:border-0 ${
-                onRowClick ? "group cursor-pointer hover:bg-ledger/[0.03]" : ""
+                onRowClick ? "group cursor-pointer hover:bg-accent/[0.03]" : ""
               }`}
             >
               {columns.map((col) => (

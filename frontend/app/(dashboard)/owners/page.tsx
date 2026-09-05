@@ -219,17 +219,17 @@ export default function OwnersPage() {
               accessor: (o) => (
                 <div className="flex gap-1 justify-end no-print">
                   {balanceFor(o.id) > 0 && (
-                    <button onClick={() => openPay(o)} title="Pay owner" className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink">
+                    <button onClick={() => openPay(o)} title="Pay owner" className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink">
                       <Banknote size={16} />
                     </button>
                   )}
-                  <button onClick={() => openLedger(o)} title="View ledger" className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink">
+                  <button onClick={() => openLedger(o)} title="View ledger" className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink">
                     <ScrollText size={16} />
                   </button>
-                  <button onClick={() => openEditModal(o)} title="Edit" className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink">
+                  <button onClick={() => openEditModal(o)} title="Edit" className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink">
                     <Pencil size={16} />
                   </button>
-                  <button onClick={() => handleArchive(o)} title={o.is_archived ? "Unarchive" : "Archive"} className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink">
+                  <button onClick={() => handleArchive(o)} title={o.is_archived ? "Unarchive" : "Archive"} className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink">
                     {o.is_archived ? <ArchiveRestore size={16} /> : <Archive size={16} />}
                   </button>
                 </div>

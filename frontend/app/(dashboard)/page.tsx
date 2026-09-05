@@ -92,7 +92,7 @@ export default function DashboardHome() {
   const { theme } = useTheme();
   const themeColors = THEME_COLORS[theme];
   const DONUT_COLORS = {
-    occupied: themeColors.ledger,
+    occupied: themeColors.accent,
     vacant: themeColors.brass,
     maintenance: themeColors.stampRed,
     reserved: themeColors.stampSlate,
@@ -426,7 +426,7 @@ export default function DashboardHome() {
         <KpiTile
           href="/invoices"
           icon={<Wallet size={18} />}
-          iconClassName="bg-ledger/10 text-ledger"
+          iconClassName="bg-accent/10 text-accent"
           label="Collected this month"
           value={pkr(collectedAnimated)}
           loading={collectedLoading}
@@ -458,7 +458,7 @@ export default function DashboardHome() {
         <KpiTile
           href="/reports"
           icon={<TrendingUp size={18} />}
-          iconClassName="bg-ledger/10 text-ledger"
+          iconClassName="bg-accent/10 text-accent"
           label="Net profit"
           value={pkr(netProfitAnimated)}
           loading={netProfitLoading}
@@ -551,7 +551,7 @@ export default function DashboardHome() {
                       color: themeColors.ink,
                     }}
                   />
-                  <Bar dataKey="Income" fill={themeColors.ledger} radius={[3, 3, 0, 0]} />
+                  <Bar dataKey="Income" fill={themeColors.accent} radius={[3, 3, 0, 0]} />
                   <Bar dataKey="Expenses" fill={themeColors.stampRed} radius={[3, 3, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
@@ -564,7 +564,7 @@ export default function DashboardHome() {
       <Card
         title="Invoices awaiting payment"
         action={
-          <Link href="/invoices" className="text-xs text-ledger hover:underline">
+          <Link href="/invoices" className="text-xs text-accent hover:underline">
             View all
           </Link>
         }
@@ -706,7 +706,7 @@ export default function DashboardHome() {
                   <span className="text-sm w-20 truncate">{b.name}</span>
                   <div className="flex-1 h-2 bg-border rounded-full overflow-hidden">
                     <div
-                      className="h-full bg-ledger rounded-full"
+                      className="h-full bg-accent rounded-full"
                       style={{ width: `${(b.amount / maxBuildingAmount) * 100}%` }}
                     />
                   </div>
@@ -745,7 +745,7 @@ export default function DashboardHome() {
                   onClick={() => router.push(a.href)}
                   className="w-full flex items-start gap-2.5 py-1.5 -mx-1.5 px-1.5 rounded-card hover:bg-brass/[0.07] transition-colors text-left"
                 >
-                  <div className="w-6 h-6 rounded-full bg-ledger/8 text-ledger flex items-center justify-center shrink-0 mt-0.5 [&>svg]:w-3 [&>svg]:h-3">
+                  <div className="w-6 h-6 rounded-full bg-accent/8 text-accent flex items-center justify-center shrink-0 mt-0.5 [&>svg]:w-3 [&>svg]:h-3">
                     {a.icon}
                   </div>
                   <div className="flex-1 min-w-0">
@@ -779,7 +779,7 @@ function MiniStat({
   color: "ledger" | "brass" | "red";
 }) {
   const colorClasses = {
-    ledger: "bg-ledger/10 text-ledger",
+    ledger: "bg-accent/10 text-accent",
     brass: "bg-brass/15 text-brass-dark",
     red: "bg-stamp-red/10 text-stamp-red",
   }[color];

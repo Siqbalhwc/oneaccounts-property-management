@@ -104,7 +104,7 @@ function LedgerPageInner() {
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <button onClick={() => router.back()} className="text-sm text-ledger hover:underline mb-2">
+          <button onClick={() => router.back()} className="text-sm text-accent hover:underline mb-2">
             ← Back
           </button>
           <h1 className="text-2xl font-display font-semibold">

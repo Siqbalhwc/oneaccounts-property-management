@@ -562,7 +562,7 @@ export default function ReportsPage() {
       >
         {refundTarget && (
           <form onSubmit={handleRefund} className="space-y-4">
-            <p className="text-xs text-ink/50 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2">
+            <p className="text-xs text-ink/50 bg-accent/5 border border-accent/15 rounded-card px-3 py-2">
               {tenantName(leaseById(refundTarget.lease_id)?.tenant_id ?? "")} —{" "}
               {roomLabel(leaseById(refundTarget.lease_id)?.room_id)} — held:{" "}
               <span className="figures font-medium">{formatPkr(refundTarget.amount_received)}</span>

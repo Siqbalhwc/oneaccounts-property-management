@@ -190,7 +190,7 @@ export default function NewJournalEntryPage() {
   return (
     <div className="max-w-[1400px] mx-auto space-y-6">
       <div>
-        <button onClick={() => router.back()} className="text-sm text-ledger hover:underline mb-2">
+        <button onClick={() => router.back()} className="text-sm text-accent hover:underline mb-2">
           ← Back
         </button>
         <h1 className="text-2xl font-display font-semibold">New journal entry</h1>
@@ -234,7 +234,7 @@ export default function NewJournalEntryPage() {
           <div className="overflow-x-auto scrollbar-brass border border-border rounded-card">
             <table className="w-full min-w-[980px] text-sm border-collapse">
               <thead>
-                <tr className="bg-ledger/5 border-b border-border">
+                <tr className="bg-accent/5 border-b border-border">
                   <th className="sticky left-0 z-10 bg-paper text-left text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 pl-3 pr-2 whitespace-nowrap">
                     Account
                   </th>
@@ -262,7 +262,7 @@ export default function NewJournalEntryPage() {
               <tbody>
                 {lines.map((line, i) => {
                   return (
-                    <tr key={i} className="border-b border-border last:border-b-0 hover:bg-ledger/[0.02]">
+                    <tr key={i} className="border-b border-border last:border-b-0 hover:bg-accent/[0.02]">
                       <td className="sticky left-0 z-10 bg-paper-card shadow-[2px_0_0_rgba(31,45,36,0.04)] py-2 pl-3 pr-2 align-middle min-w-[210px]">
                         <SearchableSelect
                           value={line.account_id}
@@ -344,7 +344,7 @@ export default function NewJournalEntryPage() {
                     <button
                       type="button"
                       onClick={addLine}
-                      className="text-sm font-medium text-ledger hover:underline"
+                      className="text-sm font-medium text-accent hover:underline"
                     >
                       + Add a line
                     </button>
@@ -372,7 +372,7 @@ export default function NewJournalEntryPage() {
             <div
               className={`mt-3 flex flex-wrap items-center justify-between gap-2 rounded-card px-3.5 py-2.5 text-sm ${
                 isBalanced
-                  ? "bg-ledger/5 border border-ledger/20 text-ledger"
+                  ? "bg-accent/5 border border-accent/20 text-accent"
                   : "bg-stamp-red/10 border border-stamp-red/30 text-stamp-red"
               }`}
             >
