@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { WhatsAppIcon } from "@/components/ui/WhatsAppIcon";
+import { useTheme, THEME_COLORS } from "@/lib/theme";
 import {
   Wallet,
   Receipt,
@@ -86,10 +87,16 @@ function relativeTime(iso?: string) {
   return d.toLocaleDateString("en-US", { day: "2-digit", month: "short", year: "numeric" });
 }
 
-const DONUT_COLORS = { occupied: "#2F4F3D", vacant: "#C89B5C", maintenance: "#A63D40", reserved: "#565F5A" };
-
 export default function DashboardHome() {
   const router = useRouter();
+  const { theme } = useTheme();
+  const themeColors = THEME_COLORS[theme];
+  const DONUT_COLORS = {
+    occupied: themeColors.ledger,
+    vacant: themeColors.brass,
+    maintenance: themeColors.stampRed,
+    reserved: themeColors.stampSlate,
+  };
   const [buildings, setBuildings] = useState<Building[] | null>(null);
   const [rooms, setRooms] = useState<Room[] | null>(null);
   const [leases, setLeases] = useState<Lease[] | null>(null);
@@ -532,11 +539,20 @@ export default function DashboardHome() {
             <div style={{ width: "100%", height: 180 }}>
               <ResponsiveContainer>
                 <BarChart data={trend}>
-                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#1F2D24" }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fontSize: 10, fill: "#1F2D24" }} axisLine={false} tickLine={false} width={40} />
-                  <Tooltip formatter={(v: number) => pkr(v)} contentStyle={{ fontSize: 12, borderRadius: 6 }} />
-                  <Bar dataKey="Income" fill="#2F4F3D" radius={[3, 3, 0, 0]} />
-                  <Bar dataKey="Expenses" fill="#A63D40" radius={[3, 3, 0, 0]} />
+                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: themeColors.ink }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fontSize: 10, fill: themeColors.ink }} axisLine={false} tickLine={false} width={40} />
+                  <Tooltip
+                    formatter={(v: number) => pkr(v)}
+                    contentStyle={{
+                      fontSize: 12,
+                      borderRadius: 6,
+                      background: themeColors.paperCard,
+                      border: `1px solid ${themeColors.border}`,
+                      color: themeColors.ink,
+                    }}
+                  />
+                  <Bar dataKey="Income" fill={themeColors.ledger} radius={[3, 3, 0, 0]} />
+                  <Bar dataKey="Expenses" fill={themeColors.stampRed} radius={[3, 3, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>

@@ -21,7 +21,7 @@ export function ProgressRing({
           cy={size / 2}
           r={radius}
           fill="none"
-          stroke="#DCD7C4"
+          className="stroke-border"
           strokeWidth={stroke}
         />
         <circle
@@ -29,7 +29,7 @@ export function ProgressRing({
           cy={size / 2}
           r={radius}
           fill="none"
-          stroke="#2F4F3D"
+          className="stroke-ledger"
           strokeWidth={stroke}
           strokeDasharray={circumference}
           strokeDashoffset={offset}

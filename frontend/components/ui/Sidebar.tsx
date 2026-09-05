@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { X } from "lucide-react";
 import { Company } from "@/lib/api";
+import { ThemeSwitcher } from "@/components/ui/ThemeSwitcher";
 import {
   IconDashboard,
   IconProperty,
@@ -152,18 +153,18 @@ export function Sidebar({
       )}
 
       <aside
-        className={`no-print w-60 shrink-0 bg-ledger text-paper flex flex-col fixed lg:sticky top-0 lg:top-4 left-0 h-screen lg:h-[calc(100vh-2rem)] lg:rounded-shell lg:shadow-shell overflow-hidden z-50 transition-transform duration-200 ${
+        className={`no-print w-60 shrink-0 bg-ledger text-sidebar-ink flex flex-col fixed lg:sticky top-0 lg:top-4 left-0 h-screen lg:h-[calc(100vh-2rem)] lg:rounded-shell lg:shadow-shell overflow-hidden z-50 transition-transform duration-200 ${
           mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         }`}
       >
-        <div className="px-5 py-6 border-b border-paper/10 flex items-center justify-between gap-3 shrink-0">
+        <div className="px-5 py-6 border-b border-sidebar-ink/10 flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
             {company?.logo_url ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={company.logo_url}
                 alt={company.name}
-                className="w-9 h-9 rounded-card object-contain bg-paper/10 shrink-0"
+                className="w-9 h-9 rounded-card object-contain bg-sidebar-ink/10 shrink-0"
               />
             ) : (
               <div className="w-9 h-9 rounded-card bg-brass/15 border border-brass/35 text-brass flex items-center justify-center shrink-0">
@@ -174,10 +175,10 @@ export function Sidebar({
               <p className="font-display text-base font-semibold tracking-tight truncate">
                 {company?.name || "Ledger"}
               </p>
-              <p className="text-xs text-paper/50 mt-0.5">Property Management</p>
+              <p className="text-xs text-sidebar-ink/50 mt-0.5">Property Management</p>
             </div>
           </div>
-          <button onClick={onClose} className="lg:hidden text-paper/60 hover:text-paper shrink-0">
+          <button onClick={onClose} className="lg:hidden text-sidebar-ink/60 hover:text-sidebar-ink shrink-0">
             <X size={20} />
           </button>
         </div>
@@ -188,7 +189,7 @@ export function Sidebar({
             href="/"
             onClick={onClose}
             className={`flex items-center gap-2.5 px-2.5 py-2.5 rounded-card text-sm font-medium mb-3 transition-colors ${
-              dashboardActive ? "bg-brass/15 text-paper" : "text-paper hover:bg-paper/5"
+              dashboardActive ? "bg-brass/15 text-sidebar-ink" : "text-sidebar-ink hover:bg-sidebar-ink/5"
             }`}
           >
             <IconDashboard size={16} className="opacity-90 shrink-0" />
@@ -204,7 +205,7 @@ export function Sidebar({
                 <button
                   onClick={() => toggleSection(section.key)}
                   className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-card text-[13px] font-medium transition-colors ${
-                    isOpen ? "text-paper" : "text-paper/80 hover:text-paper hover:bg-paper/5"
+                    isOpen ? "text-sidebar-ink" : "text-sidebar-ink/80 hover:text-sidebar-ink hover:bg-sidebar-ink/5"
                   }`}
                   aria-expanded={isOpen}
                 >
@@ -232,8 +233,8 @@ export function Sidebar({
                           onClick={onClose}
                           className={`flex items-center gap-2.5 pl-8 pr-2.5 py-2 rounded-card text-[13px] relative transition-colors ${
                             active
-                              ? "bg-brass/[0.16] text-paper font-medium"
-                              : "text-paper/65 hover:text-paper hover:bg-paper/5"
+                              ? "bg-brass/[0.16] text-sidebar-ink font-medium"
+                              : "text-sidebar-ink/65 hover:text-sidebar-ink hover:bg-sidebar-ink/5"
                           }`}
                         >
                           <ItemIcon size={13} className="opacity-80 shrink-0" />
@@ -258,8 +259,13 @@ export function Sidebar({
           <IconProperty size={72} />
         </div>
 
-        <div className="px-5 py-4 border-t border-paper/10 shrink-0">
-          <p className="text-[11px] text-paper/40 truncate">{company?.name || ""}</p>
+        <div className="px-5 py-3 border-t border-sidebar-ink/10 shrink-0 flex items-center justify-between gap-2">
+          <span className="text-[9.5px] font-semibold tracking-wide text-sidebar-ink/40">THEME</span>
+          <ThemeSwitcher />
+        </div>
+
+        <div className="px-5 py-3 border-t border-sidebar-ink/10 shrink-0">
+          <p className="text-[11px] text-sidebar-ink/40 truncate">{company?.name || ""}</p>
         </div>
       </aside>
     </>

@@ -2,6 +2,88 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ==========================================================================
+   THEMES
+   Three editions of the same ledger-book idea, not unrelated skins:
+     - ledger (default): the book read in daylight -- cream paper, forest
+       green cover, brass trim.
+     - black: the same book reviewed at night -- a genuinely black surface
+       (not warm charcoal), parchment-colored ink, brass still glowing as
+       the accent.
+     - navy: the book locked in a banker's vault -- deep navy cover, gold
+       trim instead of brass.
+   Every color in the app is one of these variables (via tailwind.config.ts),
+   so switching themes is only ever an attribute change on <html>, never a
+   per-page or per-component edit.
+   ========================================================================== */
+:root {
+  --ink: 31 45 36;
+  --ledger: 47 79 61;
+  --ledger-dark: 34 57 44;
+  --ledger-light: 61 102 80;
+  --paper: 243 241 230;
+  --paper-card: 251 250 245;
+  --brass: 200 155 92;
+  --brass-dark: 166 124 61;
+  --brass-light: 221 187 134;
+  --rule: 139 58 58;
+  --border: 220 215 196;
+  --stamp-green: 47 79 61;
+  --stamp-red: 166 61 64;
+  --stamp-amber: 184 134 46;
+  --stamp-slate: 86 95 90;
+  /* Sidebar is always a dark surface in every theme -- this is fixed and
+     deliberately NOT derived from --paper, which is the page background
+     and flips dark in Black/Navy. */
+  --sidebar-ink: 245 243 235;
+  --shadow-card: 0 1px 2px rgb(31 45 36 / 0.06), 0 1px 0 rgb(31 45 36 / 0.04);
+  --shadow-shell: 0 4px 8px rgb(31 45 36 / 0.05), 0 18px 40px -14px rgb(31 45 36 / 0.22);
+}
+
+[data-theme="black"] {
+  --ink: 237 237 231;
+  --ledger: 4 5 4;
+  --ledger-dark: 0 0 0;
+  --ledger-light: 46 58 49;
+  --paper: 11 12 11;
+  --paper-card: 22 24 22;
+  --brass: 224 185 120;
+  --brass-dark: 201 154 85;
+  --brass-light: 237 211 160;
+  --rule: 217 105 106;
+  --border: 42 45 41;
+  --stamp-green: 143 205 168;
+  --stamp-red: 240 153 153;
+  --stamp-amber: 224 185 120;
+  --stamp-slate: 163 168 163;
+  --sidebar-ink: 245 243 235;
+  /* Soft drop-shadows barely register against near-black, so a crisp 1px
+     outline does the contrast work instead, plus a darker glow for depth. */
+  --shadow-card: 0 0 0 1px rgb(42 45 41), 0 2px 8px rgb(0 0 0 / 0.35);
+  --shadow-shell: 0 0 0 1px rgb(42 45 41), 0 18px 40px -14px rgb(0 0 0 / 0.6);
+}
+
+[data-theme="navy"] {
+  --ink: 231 236 243;
+  --ledger: 8 14 26;
+  --ledger-dark: 4 8 16;
+  --ledger-light: 61 90 130;
+  --paper: 14 21 35;
+  --paper-card: 21 32 51;
+  --brass: 212 175 55;
+  --brass-dark: 176 141 38;
+  --brass-light: 230 204 115;
+  --rule: 210 112 108;
+  --border: 40 55 84;
+  --stamp-green: 121 197 160;
+  --stamp-red: 230 143 133;
+  --stamp-amber: 212 175 55;
+  --stamp-slate: 150 166 194;
+  --sidebar-ink: 235 240 247;
+  --shadow-card: 0 0 0 1px rgb(40 55 84), 0 2px 8px rgb(0 0 0 / 0.35);
+  --shadow-shell: 0 0 0 1px rgb(40 55 84), 0 18px 40px -14px rgb(0 0 0 / 0.6);
+}
+
 @layer base {
   body {
     @apply bg-paper text-ink font-body antialiased;
@@ -14,7 +96,7 @@
   /* Ledger-style thin rule, used as a section divider throughout the app --
      a nod to the red margin rule down the side of a physical ledger page. */
   .ledger-rule {
-    border-top: 2px solid theme("colors.rule");
+    border-top: 2px solid rgb(var(--rule));
     position: relative;
   }
   .ledger-rule::before {
@@ -24,7 +106,7 @@
     left: 0;
     width: 32px;
     height: 2px;
-    background: theme("colors.brass.DEFAULT");
+    background: rgb(var(--brass));
   }
 
   /* Tabular figures for anything numeric: amounts, CNIC, invoice numbers */
@@ -35,7 +117,7 @@
   }
 
   :focus-visible {
-    outline: 2px solid theme("colors.brass.dark");
+    outline: 2px solid rgb(var(--brass-dark));
     outline-offset: 2px;
   }
 }
@@ -69,9 +151,9 @@
     @apply rounded-card animate-shimmer;
     background-image: linear-gradient(
       90deg,
-      color-mix(in srgb, theme("colors.border.DEFAULT") 55%, transparent) 25%,
-      color-mix(in srgb, theme("colors.border.DEFAULT") 90%, transparent) 37%,
-      color-mix(in srgb, theme("colors.border.DEFAULT") 55%, transparent) 63%
+      color-mix(in srgb, rgb(var(--border)) 55%, transparent) 25%,
+      color-mix(in srgb, rgb(var(--border)) 90%, transparent) 37%,
+      color-mix(in srgb, rgb(var(--border)) 55%, transparent) 63%
     );
     background-size: 400% 100%;
   }
@@ -116,22 +198,51 @@
      so it never inherits into (and tints) the table's own text. */
   .scrollbar-brass {
     scrollbar-width: thin;
-    scrollbar-color: theme("colors.brass.DEFAULT") theme("colors.paper.DEFAULT");
+    scrollbar-color: rgb(var(--brass)) rgb(var(--paper));
   }
   .scrollbar-brass::-webkit-scrollbar {
     height: 9px;
   }
   .scrollbar-brass::-webkit-scrollbar-track {
-    background: theme("colors.paper.DEFAULT");
+    background: rgb(var(--paper));
   }
   .scrollbar-brass::-webkit-scrollbar-thumb {
-    background: theme("colors.brass.DEFAULT");
+    background: rgb(var(--brass));
     border-radius: 999px;
-    border: 2px solid theme("colors.paper.DEFAULT");
+    border: 2px solid rgb(var(--paper));
   }
   .scrollbar-brass::-webkit-scrollbar-thumb:hover {
-    background: theme("colors.brass.dark");
+    background: rgb(var(--brass-dark));
   }
+}
+
+/* Default scrollbar for every scrollable element on every page, so no
+   generic grey/white OS scrollbar can appear anywhere regardless of which
+   theme is active. .scrollbar-hide, .scrollbar-thin, and .scrollbar-brass
+   above still take priority wherever they're already used (a more specific
+   selector on the same element wins), so this only fills in the gaps. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--border)) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgb(var(--border));
+  border-radius: 999px;
+  border: 2px solid rgb(var(--paper));
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--brass));
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /* Printing: hide navigation chrome and let the current report/page fill

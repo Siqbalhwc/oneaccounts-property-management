@@ -8,6 +8,7 @@ import { Sidebar } from "@/components/ui/Sidebar";
 import { GlobalSearch } from "@/components/ui/GlobalSearch";
 import { NotificationBell } from "@/components/ui/NotificationBell";
 import { Company } from "@/lib/api";
+import { ThemeProvider } from "@/lib/theme";
 
 type ProfileInfo = {
   full_name: string;
@@ -15,6 +16,7 @@ type ProfileInfo = {
   company_id: string;
   is_platform_admin?: boolean;
   is_suspended?: boolean;
+  theme_preference?: string;
 };
 
 function greeting() {
@@ -54,7 +56,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       // is unchanged.
       const { data: profileRow } = await supabase
         .from("profiles")
-        .select("full_name, role, company_id, is_platform_admin, is_suspended, companies(id, name, address, phone, logo_url)")
+        .select("full_name, role, company_id, is_platform_admin, is_suspended, theme_preference, companies(id, name, address, phone, logo_url)")
         .eq("id", session.user.id)
         .single();
 
@@ -99,30 +101,34 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   if (checking) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-paper">
-        <p className="text-sm text-ink/50">Checking your session…</p>
-      </div>
+      <ThemeProvider initialTheme={profile?.theme_preference}>
+        <div className="min-h-screen flex items-center justify-center bg-paper">
+          <p className="text-sm text-ink/50">Checking your session…</p>
+        </div>
+      </ThemeProvider>
     );
   }
 
   if (profile?.is_suspended || companyBlocked) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-paper px-4">
-        <div className="card p-8 max-w-md text-center space-y-3">
-          <h2 className="font-display text-lg font-semibold text-stamp-red">Access suspended</h2>
-          <p className="text-sm text-ink/60">
-            {profile?.is_suspended
-              ? "Your account has been suspended. Contact your company owner for help."
-              : "Your company's access has been suspended. Contact support for help."}
-          </p>
-          <button
-            onClick={handleSignOut}
-            className="text-xs text-ink/50 hover:text-stamp-red transition-colors"
-          >
-            Sign out
-          </button>
+      <ThemeProvider initialTheme={profile?.theme_preference}>
+        <div className="min-h-screen flex items-center justify-center bg-paper px-4">
+          <div className="card p-8 max-w-md text-center space-y-3">
+            <h2 className="font-display text-lg font-semibold text-stamp-red">Access suspended</h2>
+            <p className="text-sm text-ink/60">
+              {profile?.is_suspended
+                ? "Your account has been suspended. Contact your company owner for help."
+                : "Your company's access has been suspended. Contact support for help."}
+            </p>
+            <button
+              onClick={handleSignOut}
+              className="text-xs text-ink/50 hover:text-stamp-red transition-colors"
+            >
+              Sign out
+            </button>
+          </div>
         </div>
-      </div>
+      </ThemeProvider>
     );
   }
 
@@ -137,6 +143,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const firstName = profile?.full_name?.split(" ")[0] ?? "";
 
   return (
+    <ThemeProvider initialTheme={profile?.theme_preference}>
     <div className="flex items-start gap-4 p-4 min-h-screen">
       <Sidebar
         company={company}
@@ -192,5 +199,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </main>
       </div>
     </div>
+    </ThemeProvider>
   );
 }

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
@@ -23,6 +23,7 @@ class CompanyUpdate(BaseModel):
 class ProfileUpdate(BaseModel):
     full_name: Optional[str] = None
     phone: Optional[str] = None
+    theme_preference: Optional[Literal["ledger", "black", "navy"]] = None
 
 
 @router.get("/company/me")

@@ -1,0 +1,824 @@
+diff --git a/backend/app/routers/company_settings.py b/backend/app/routers/company_settings.py
+index ada34c4..3545310 100644
+--- a/backend/app/routers/company_settings.py
++++ b/backend/app/routers/company_settings.py
+@@ -1,4 +1,4 @@
+-from typing import Optional
++from typing import Literal, Optional
+ 
+ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+ from pydantic import BaseModel
+@@ -23,6 +23,7 @@ class CompanyUpdate(BaseModel):
+ class ProfileUpdate(BaseModel):
+     full_name: Optional[str] = None
+     phone: Optional[str] = None
++    theme_preference: Optional[Literal["ledger", "black", "navy"]] = None
+ 
+ 
+ @router.get("/company/me")
+diff --git a/frontend/app/(dashboard)/layout.tsx b/frontend/app/(dashboard)/layout.tsx
+index eb91ab3..ee1e194 100644
+--- a/frontend/app/(dashboard)/layout.tsx
++++ b/frontend/app/(dashboard)/layout.tsx
+@@ -8,6 +8,7 @@ import { Sidebar } from "@/components/ui/Sidebar";
+ import { GlobalSearch } from "@/components/ui/GlobalSearch";
+ import { NotificationBell } from "@/components/ui/NotificationBell";
+ import { Company } from "@/lib/api";
++import { ThemeProvider } from "@/lib/theme";
+ 
+ type ProfileInfo = {
+   full_name: string;
+@@ -15,6 +16,7 @@ type ProfileInfo = {
+   company_id: string;
+   is_platform_admin?: boolean;
+   is_suspended?: boolean;
++  theme_preference?: string;
+ };
+ 
+ function greeting() {
+@@ -54,7 +56,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
+       // is unchanged.
+       const { data: profileRow } = await supabase
+         .from("profiles")
+-        .select("full_name, role, company_id, is_platform_admin, is_suspended, companies(id, name, address, phone, logo_url)")
++        .select("full_name, role, company_id, is_platform_admin, is_suspended, theme_preference, companies(id, name, address, phone, logo_url)")
+         .eq("id", session.user.id)
+         .single();
+ 
+@@ -99,30 +101,34 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
+ 
+   if (checking) {
+     return (
+-      <div className="min-h-screen flex items-center justify-center bg-paper">
+-        <p className="text-sm text-ink/50">Checking your session…</p>
+-      </div>
++      <ThemeProvider initialTheme={profile?.theme_preference}>
++        <div className="min-h-screen flex items-center justify-center bg-paper">
++          <p className="text-sm text-ink/50">Checking your session…</p>
++        </div>
++      </ThemeProvider>
+     );
+   }
+ 
+   if (profile?.is_suspended || companyBlocked) {
+     return (
+-      <div className="min-h-screen flex items-center justify-center bg-paper px-4">
+-        <div className="card p-8 max-w-md text-center space-y-3">
+-          <h2 className="font-display text-lg font-semibold text-stamp-red">Access suspended</h2>
+-          <p className="text-sm text-ink/60">
+-            {profile?.is_suspended
+-              ? "Your account has been suspended. Contact your company owner for help."
+-              : "Your company's access has been suspended. Contact support for help."}
+-          </p>
+-          <button
+-            onClick={handleSignOut}
+-            className="text-xs text-ink/50 hover:text-stamp-red transition-colors"
+-          >
+-            Sign out
+-          </button>
++      <ThemeProvider initialTheme={profile?.theme_preference}>
++        <div className="min-h-screen flex items-center justify-center bg-paper px-4">
++          <div className="card p-8 max-w-md text-center space-y-3">
++            <h2 className="font-display text-lg font-semibold text-stamp-red">Access suspended</h2>
++            <p className="text-sm text-ink/60">
++              {profile?.is_suspended
++                ? "Your account has been suspended. Contact your company owner for help."
++                : "Your company's access has been suspended. Contact support for help."}
++            </p>
++            <button
++              onClick={handleSignOut}
++              className="text-xs text-ink/50 hover:text-stamp-red transition-colors"
++            >
++              Sign out
++            </button>
++          </div>
+         </div>
+-      </div>
++      </ThemeProvider>
+     );
+   }
+ 
+@@ -137,6 +143,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
+   const firstName = profile?.full_name?.split(" ")[0] ?? "";
+ 
+   return (
++    <ThemeProvider initialTheme={profile?.theme_preference}>
+     <div className="flex items-start gap-4 p-4 min-h-screen">
+       <Sidebar
+         company={company}
+@@ -192,5 +199,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
+         </main>
+       </div>
+     </div>
++    </ThemeProvider>
+   );
+ }
+diff --git a/frontend/app/(dashboard)/page.tsx b/frontend/app/(dashboard)/page.tsx
+index c6200ab..0aad11e 100644
+--- a/frontend/app/(dashboard)/page.tsx
++++ b/frontend/app/(dashboard)/page.tsx
+@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
+ import Link from "next/link";
+ import { useRouter } from "next/navigation";
+ import { WhatsAppIcon } from "@/components/ui/WhatsAppIcon";
++import { useTheme, THEME_COLORS } from "@/lib/theme";
+ import {
+   Wallet,
+   Receipt,
+@@ -86,10 +87,16 @@ function relativeTime(iso?: string) {
+   return d.toLocaleDateString("en-US", { day: "2-digit", month: "short", year: "numeric" });
+ }
+ 
+-const DONUT_COLORS = { occupied: "#2F4F3D", vacant: "#C89B5C", maintenance: "#A63D40", reserved: "#565F5A" };
+-
+ export default function DashboardHome() {
+   const router = useRouter();
++  const { theme } = useTheme();
++  const themeColors = THEME_COLORS[theme];
++  const DONUT_COLORS = {
++    occupied: themeColors.ledger,
++    vacant: themeColors.brass,
++    maintenance: themeColors.stampRed,
++    reserved: themeColors.stampSlate,
++  };
+   const [buildings, setBuildings] = useState<Building[] | null>(null);
+   const [rooms, setRooms] = useState<Room[] | null>(null);
+   const [leases, setLeases] = useState<Lease[] | null>(null);
+@@ -532,11 +539,20 @@ export default function DashboardHome() {
+             <div style={{ width: "100%", height: 180 }}>
+               <ResponsiveContainer>
+                 <BarChart data={trend}>
+-                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#1F2D24" }} axisLine={false} tickLine={false} />
+-                  <YAxis tick={{ fontSize: 10, fill: "#1F2D24" }} axisLine={false} tickLine={false} width={40} />
+-                  <Tooltip formatter={(v: number) => pkr(v)} contentStyle={{ fontSize: 12, borderRadius: 6 }} />
+-                  <Bar dataKey="Income" fill="#2F4F3D" radius={[3, 3, 0, 0]} />
+-                  <Bar dataKey="Expenses" fill="#A63D40" radius={[3, 3, 0, 0]} />
++                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: themeColors.ink }} axisLine={false} tickLine={false} />
++                  <YAxis tick={{ fontSize: 10, fill: themeColors.ink }} axisLine={false} tickLine={false} width={40} />
++                  <Tooltip
++                    formatter={(v: number) => pkr(v)}
++                    contentStyle={{
++                      fontSize: 12,
++                      borderRadius: 6,
++                      background: themeColors.paperCard,
++                      border: `1px solid ${themeColors.border}`,
++                      color: themeColors.ink,
++                    }}
++                  />
++                  <Bar dataKey="Income" fill={themeColors.ledger} radius={[3, 3, 0, 0]} />
++                  <Bar dataKey="Expenses" fill={themeColors.stampRed} radius={[3, 3, 0, 0]} />
+                 </BarChart>
+               </ResponsiveContainer>
+             </div>
+diff --git a/frontend/app/globals.css b/frontend/app/globals.css
+index 9795ac1..d08dd65 100644
+--- a/frontend/app/globals.css
++++ b/frontend/app/globals.css
+@@ -2,6 +2,88 @@
+ @tailwind components;
+ @tailwind utilities;
+ 
++/* ==========================================================================
++   THEMES
++   Three editions of the same ledger-book idea, not unrelated skins:
++     - ledger (default): the book read in daylight -- cream paper, forest
++       green cover, brass trim.
++     - black: the same book reviewed at night -- a genuinely black surface
++       (not warm charcoal), parchment-colored ink, brass still glowing as
++       the accent.
++     - navy: the book locked in a banker's vault -- deep navy cover, gold
++       trim instead of brass.
++   Every color in the app is one of these variables (via tailwind.config.ts),
++   so switching themes is only ever an attribute change on <html>, never a
++   per-page or per-component edit.
++   ========================================================================== */
++:root {
++  --ink: 31 45 36;
++  --ledger: 47 79 61;
++  --ledger-dark: 34 57 44;
++  --ledger-light: 61 102 80;
++  --paper: 243 241 230;
++  --paper-card: 251 250 245;
++  --brass: 200 155 92;
++  --brass-dark: 166 124 61;
++  --brass-light: 221 187 134;
++  --rule: 139 58 58;
++  --border: 220 215 196;
++  --stamp-green: 47 79 61;
++  --stamp-red: 166 61 64;
++  --stamp-amber: 184 134 46;
++  --stamp-slate: 86 95 90;
++  /* Sidebar is always a dark surface in every theme -- this is fixed and
++     deliberately NOT derived from --paper, which is the page background
++     and flips dark in Black/Navy. */
++  --sidebar-ink: 245 243 235;
++  --shadow-card: 0 1px 2px rgb(31 45 36 / 0.06), 0 1px 0 rgb(31 45 36 / 0.04);
++  --shadow-shell: 0 4px 8px rgb(31 45 36 / 0.05), 0 18px 40px -14px rgb(31 45 36 / 0.22);
++}
++
++[data-theme="black"] {
++  --ink: 237 237 231;
++  --ledger: 4 5 4;
++  --ledger-dark: 0 0 0;
++  --ledger-light: 46 58 49;
++  --paper: 11 12 11;
++  --paper-card: 22 24 22;
++  --brass: 224 185 120;
++  --brass-dark: 201 154 85;
++  --brass-light: 237 211 160;
++  --rule: 217 105 106;
++  --border: 42 45 41;
++  --stamp-green: 143 205 168;
++  --stamp-red: 240 153 153;
++  --stamp-amber: 224 185 120;
++  --stamp-slate: 163 168 163;
++  --sidebar-ink: 245 243 235;
++  /* Soft drop-shadows barely register against near-black, so a crisp 1px
++     outline does the contrast work instead, plus a darker glow for depth. */
++  --shadow-card: 0 0 0 1px rgb(42 45 41), 0 2px 8px rgb(0 0 0 / 0.35);
++  --shadow-shell: 0 0 0 1px rgb(42 45 41), 0 18px 40px -14px rgb(0 0 0 / 0.6);
++}
++
++[data-theme="navy"] {
++  --ink: 231 236 243;
++  --ledger: 8 14 26;
++  --ledger-dark: 4 8 16;
++  --ledger-light: 61 90 130;
++  --paper: 14 21 35;
++  --paper-card: 21 32 51;
++  --brass: 212 175 55;
++  --brass-dark: 176 141 38;
++  --brass-light: 230 204 115;
++  --rule: 210 112 108;
++  --border: 40 55 84;
++  --stamp-green: 121 197 160;
++  --stamp-red: 230 143 133;
++  --stamp-amber: 212 175 55;
++  --stamp-slate: 150 166 194;
++  --sidebar-ink: 235 240 247;
++  --shadow-card: 0 0 0 1px rgb(40 55 84), 0 2px 8px rgb(0 0 0 / 0.35);
++  --shadow-shell: 0 0 0 1px rgb(40 55 84), 0 18px 40px -14px rgb(0 0 0 / 0.6);
++}
++
+ @layer base {
+   body {
+     @apply bg-paper text-ink font-body antialiased;
+@@ -14,7 +96,7 @@
+   /* Ledger-style thin rule, used as a section divider throughout the app --
+      a nod to the red margin rule down the side of a physical ledger page. */
+   .ledger-rule {
+-    border-top: 2px solid theme("colors.rule");
++    border-top: 2px solid rgb(var(--rule));
+     position: relative;
+   }
+   .ledger-rule::before {
+@@ -24,7 +106,7 @@
+     left: 0;
+     width: 32px;
+     height: 2px;
+-    background: theme("colors.brass.DEFAULT");
++    background: rgb(var(--brass));
+   }
+ 
+   /* Tabular figures for anything numeric: amounts, CNIC, invoice numbers */
+@@ -35,7 +117,7 @@
+   }
+ 
+   :focus-visible {
+-    outline: 2px solid theme("colors.brass.dark");
++    outline: 2px solid rgb(var(--brass-dark));
+     outline-offset: 2px;
+   }
+ }
+@@ -69,9 +151,9 @@
+     @apply rounded-card animate-shimmer;
+     background-image: linear-gradient(
+       90deg,
+-      color-mix(in srgb, theme("colors.border.DEFAULT") 55%, transparent) 25%,
+-      color-mix(in srgb, theme("colors.border.DEFAULT") 90%, transparent) 37%,
+-      color-mix(in srgb, theme("colors.border.DEFAULT") 55%, transparent) 63%
++      color-mix(in srgb, rgb(var(--border)) 55%, transparent) 25%,
++      color-mix(in srgb, rgb(var(--border)) 90%, transparent) 37%,
++      color-mix(in srgb, rgb(var(--border)) 55%, transparent) 63%
+     );
+     background-size: 400% 100%;
+   }
+@@ -116,24 +198,53 @@
+      so it never inherits into (and tints) the table's own text. */
+   .scrollbar-brass {
+     scrollbar-width: thin;
+-    scrollbar-color: theme("colors.brass.DEFAULT") theme("colors.paper.DEFAULT");
++    scrollbar-color: rgb(var(--brass)) rgb(var(--paper));
+   }
+   .scrollbar-brass::-webkit-scrollbar {
+     height: 9px;
+   }
+   .scrollbar-brass::-webkit-scrollbar-track {
+-    background: theme("colors.paper.DEFAULT");
++    background: rgb(var(--paper));
+   }
+   .scrollbar-brass::-webkit-scrollbar-thumb {
+-    background: theme("colors.brass.DEFAULT");
++    background: rgb(var(--brass));
+     border-radius: 999px;
+-    border: 2px solid theme("colors.paper.DEFAULT");
++    border: 2px solid rgb(var(--paper));
+   }
+   .scrollbar-brass::-webkit-scrollbar-thumb:hover {
+-    background: theme("colors.brass.dark");
++    background: rgb(var(--brass-dark));
+   }
+ }
+ 
++/* Default scrollbar for every scrollable element on every page, so no
++   generic grey/white OS scrollbar can appear anywhere regardless of which
++   theme is active. .scrollbar-hide, .scrollbar-thin, and .scrollbar-brass
++   above still take priority wherever they're already used (a more specific
++   selector on the same element wins), so this only fills in the gaps. */
++* {
++  scrollbar-width: thin;
++  scrollbar-color: rgb(var(--border)) transparent;
++}
++*::-webkit-scrollbar {
++  width: 10px;
++  height: 10px;
++}
++*::-webkit-scrollbar-track {
++  background: transparent;
++}
++*::-webkit-scrollbar-thumb {
++  background: rgb(var(--border));
++  border-radius: 999px;
++  border: 2px solid rgb(var(--paper));
++  background-clip: padding-box;
++}
++*::-webkit-scrollbar-thumb:hover {
++  background: rgb(var(--brass));
++}
++*::-webkit-scrollbar-corner {
++  background: transparent;
++}
++
+ /* Printing: hide navigation chrome and let the current report/page fill
+    the page. Anything meant to disappear when printed gets .no-print. */
+ @media print {
+diff --git a/frontend/app/layout.tsx b/frontend/app/layout.tsx
+index 0ac076e..fdd369b 100644
+--- a/frontend/app/layout.tsx
++++ b/frontend/app/layout.tsx
+@@ -1,6 +1,7 @@
+ import type { Metadata } from "next";
+ import { Fraunces, IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
+ import "./globals.css";
++import { THEME_BLOCKING_SCRIPT } from "@/lib/theme";
+ 
+ const fraunces = Fraunces({
+   subsets: ["latin"],
+@@ -29,6 +30,12 @@ export const metadata: Metadata = {
+ export default function RootLayout({ children }: { children: React.ReactNode }) {
+   return (
+     <html lang="en" className={`${fraunces.variable} ${plexSans.variable} ${plexMono.variable}`}>
++      <head>
++        {/* Runs before hydration so a saved Black/Navy preference applies
++            immediately, instead of flashing the default Ledger theme for a
++            moment on every page load. */}
++        <script dangerouslySetInnerHTML={{ __html: THEME_BLOCKING_SCRIPT }} />
++      </head>
+       <body>{children}</body>
+     </html>
+   );
+diff --git a/frontend/components/ui/ProgressRing.tsx b/frontend/components/ui/ProgressRing.tsx
+index b9ad0b6..e881aea 100644
+--- a/frontend/components/ui/ProgressRing.tsx
++++ b/frontend/components/ui/ProgressRing.tsx
+@@ -21,7 +21,7 @@ export function ProgressRing({
+           cy={size / 2}
+           r={radius}
+           fill="none"
+-          stroke="#DCD7C4"
++          className="stroke-border"
+           strokeWidth={stroke}
+         />
+         <circle
+@@ -29,7 +29,7 @@ export function ProgressRing({
+           cy={size / 2}
+           r={radius}
+           fill="none"
+-          stroke="#2F4F3D"
++          className="stroke-ledger"
+           strokeWidth={stroke}
+           strokeDasharray={circumference}
+           strokeDashoffset={offset}
+diff --git a/frontend/components/ui/Sidebar.tsx b/frontend/components/ui/Sidebar.tsx
+index ca5d6b6..4077998 100644
+--- a/frontend/components/ui/Sidebar.tsx
++++ b/frontend/components/ui/Sidebar.tsx
+@@ -5,6 +5,7 @@ import Link from "next/link";
+ import { usePathname } from "next/navigation";
+ import { X } from "lucide-react";
+ import { Company } from "@/lib/api";
++import { ThemeSwitcher } from "@/components/ui/ThemeSwitcher";
+ import {
+   IconDashboard,
+   IconProperty,
+@@ -152,18 +153,18 @@ export function Sidebar({
+       )}
+ 
+       <aside
+-        className={`no-print w-60 shrink-0 bg-ledger text-paper flex flex-col fixed lg:sticky top-0 lg:top-4 left-0 h-screen lg:h-[calc(100vh-2rem)] lg:rounded-shell lg:shadow-shell overflow-hidden z-50 transition-transform duration-200 ${
++        className={`no-print w-60 shrink-0 bg-ledger text-sidebar-ink flex flex-col fixed lg:sticky top-0 lg:top-4 left-0 h-screen lg:h-[calc(100vh-2rem)] lg:rounded-shell lg:shadow-shell overflow-hidden z-50 transition-transform duration-200 ${
+           mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
+         }`}
+       >
+-        <div className="px-5 py-6 border-b border-paper/10 flex items-center justify-between gap-3 shrink-0">
++        <div className="px-5 py-6 border-b border-sidebar-ink/10 flex items-center justify-between gap-3 shrink-0">
+           <div className="flex items-center gap-3 min-w-0">
+             {company?.logo_url ? (
+               // eslint-disable-next-line @next/next/no-img-element
+               <img
+                 src={company.logo_url}
+                 alt={company.name}
+-                className="w-9 h-9 rounded-card object-contain bg-paper/10 shrink-0"
++                className="w-9 h-9 rounded-card object-contain bg-sidebar-ink/10 shrink-0"
+               />
+             ) : (
+               <div className="w-9 h-9 rounded-card bg-brass/15 border border-brass/35 text-brass flex items-center justify-center shrink-0">
+@@ -174,10 +175,10 @@ export function Sidebar({
+               <p className="font-display text-base font-semibold tracking-tight truncate">
+                 {company?.name || "Ledger"}
+               </p>
+-              <p className="text-xs text-paper/50 mt-0.5">Property Management</p>
++              <p className="text-xs text-sidebar-ink/50 mt-0.5">Property Management</p>
+             </div>
+           </div>
+-          <button onClick={onClose} className="lg:hidden text-paper/60 hover:text-paper shrink-0">
++          <button onClick={onClose} className="lg:hidden text-sidebar-ink/60 hover:text-sidebar-ink shrink-0">
+             <X size={20} />
+           </button>
+         </div>
+@@ -188,7 +189,7 @@ export function Sidebar({
+             href="/"
+             onClick={onClose}
+             className={`flex items-center gap-2.5 px-2.5 py-2.5 rounded-card text-sm font-medium mb-3 transition-colors ${
+-              dashboardActive ? "bg-brass/15 text-paper" : "text-paper hover:bg-paper/5"
++              dashboardActive ? "bg-brass/15 text-sidebar-ink" : "text-sidebar-ink hover:bg-sidebar-ink/5"
+             }`}
+           >
+             <IconDashboard size={16} className="opacity-90 shrink-0" />
+@@ -204,7 +205,7 @@ export function Sidebar({
+                 <button
+                   onClick={() => toggleSection(section.key)}
+                   className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-card text-[13px] font-medium transition-colors ${
+-                    isOpen ? "text-paper" : "text-paper/80 hover:text-paper hover:bg-paper/5"
++                    isOpen ? "text-sidebar-ink" : "text-sidebar-ink/80 hover:text-sidebar-ink hover:bg-sidebar-ink/5"
+                   }`}
+                   aria-expanded={isOpen}
+                 >
+@@ -232,8 +233,8 @@ export function Sidebar({
+                           onClick={onClose}
+                           className={`flex items-center gap-2.5 pl-8 pr-2.5 py-2 rounded-card text-[13px] relative transition-colors ${
+                             active
+-                              ? "bg-brass/[0.16] text-paper font-medium"
+-                              : "text-paper/65 hover:text-paper hover:bg-paper/5"
++                              ? "bg-brass/[0.16] text-sidebar-ink font-medium"
++                              : "text-sidebar-ink/65 hover:text-sidebar-ink hover:bg-sidebar-ink/5"
+                           }`}
+                         >
+                           <ItemIcon size={13} className="opacity-80 shrink-0" />
+@@ -258,8 +259,13 @@ export function Sidebar({
+           <IconProperty size={72} />
+         </div>
+ 
+-        <div className="px-5 py-4 border-t border-paper/10 shrink-0">
+-          <p className="text-[11px] text-paper/40 truncate">{company?.name || ""}</p>
++        <div className="px-5 py-3 border-t border-sidebar-ink/10 shrink-0 flex items-center justify-between gap-2">
++          <span className="text-[9.5px] font-semibold tracking-wide text-sidebar-ink/40">THEME</span>
++          <ThemeSwitcher />
++        </div>
++
++        <div className="px-5 py-3 border-t border-sidebar-ink/10 shrink-0">
++          <p className="text-[11px] text-sidebar-ink/40 truncate">{company?.name || ""}</p>
+         </div>
+       </aside>
+     </>
+diff --git a/frontend/components/ui/ThemeSwitcher.tsx b/frontend/components/ui/ThemeSwitcher.tsx
+new file mode 100644
+index 0000000..04a3d5c
+--- /dev/null
++++ b/frontend/components/ui/ThemeSwitcher.tsx
+@@ -0,0 +1,70 @@
++"use client";
++
++import { useTheme, ThemeName } from "@/lib/theme";
++
++const OPTIONS: { value: ThemeName; label: string; icon: JSX.Element }[] = [
++  {
++    value: "ledger",
++    label: "Ledger",
++    icon: (
++      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
++        <circle cx="12" cy="12" r="5" />
++        <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
++      </svg>
++    ),
++  },
++  {
++    value: "black",
++    label: "Black",
++    icon: (
++      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
++        <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5Z" />
++      </svg>
++    ),
++  },
++  {
++    value: "navy",
++    label: "Navy",
++    icon: (
++      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
++        <circle cx="12" cy="12" r="9" />
++        <path d="M12 7v5l3.5 2" />
++      </svg>
++    ),
++  },
++];
++
++/**
++ * Small icon-only theme switcher, meant to sit in the sidebar footer.
++ * Deliberately compact -- no text labels or color swatches -- so it reads
++ * as a quiet utility control rather than a feature calling attention to
++ * itself. Each button carries a title attribute for a native tooltip.
++ */
++export function ThemeSwitcher() {
++  const { theme, setTheme } = useTheme();
++
++  return (
++    <div className="flex items-center gap-1.5" role="radiogroup" aria-label="Theme">
++      {OPTIONS.map((opt) => {
++        const active = theme === opt.value;
++        return (
++          <button
++            key={opt.value}
++            type="button"
++            role="radio"
++            aria-checked={active}
++            title={opt.label}
++            onClick={() => setTheme(opt.value)}
++            className={`w-[26px] h-[26px] flex items-center justify-center rounded-md border transition-colors ${
++              active
++                ? "border-brass bg-brass/[0.18] text-brass"
++                : "border-sidebar-ink/[0.14] bg-sidebar-ink/5 text-sidebar-ink/55 hover:text-sidebar-ink/90 hover:bg-sidebar-ink/10"
++            }`}
++          >
++            <span className="w-[13px] h-[13px]">{opt.icon}</span>
++          </button>
++        );
++      })}
++    </div>
++  );
++}
+diff --git a/frontend/lib/theme.tsx b/frontend/lib/theme.tsx
+new file mode 100644
+index 0000000..5b96cf3
+--- /dev/null
++++ b/frontend/lib/theme.tsx
+@@ -0,0 +1,160 @@
++"use client";
++
++import { createContext, useCallback, useContext, useEffect, useState } from "react";
++import { api } from "@/lib/api";
++
++export type ThemeName = "ledger" | "black" | "navy";
++
++export const THEME_NAMES: ThemeName[] = ["ledger", "black", "navy"];
++
++export const STORAGE_KEY = "oa-theme";
++
++export function isThemeName(value: unknown): value is ThemeName {
++  return typeof value === "string" && (THEME_NAMES as string[]).includes(value);
++}
++
++/**
++ * Literal color values mirroring the CSS variables in globals.css, for the
++ * handful of places (Recharts, raw SVG stroke/fill) that need an actual
++ * color string rather than a Tailwind class. Keep this in sync with the
++ * :root / [data-theme="..."] blocks in globals.css if a palette changes.
++ */
++export const THEME_COLORS: Record<
++  ThemeName,
++  {
++    ink: string;
++    ledger: string;
++    brass: string;
++    stampGreen: string;
++    stampRed: string;
++    stampAmber: string;
++    stampSlate: string;
++    border: string;
++    paperCard: string;
++  }
++> = {
++  ledger: {
++    ink: "#1F2D24",
++    ledger: "#2F4F3D",
++    brass: "#C89B5C",
++    stampGreen: "#2F4F3D",
++    stampRed: "#A63D40",
++    stampAmber: "#B8862E",
++    stampSlate: "#565F5A",
++    border: "#DCD7C4",
++    paperCard: "#FBFAF5",
++  },
++  black: {
++    ink: "#EDEDE7",
++    ledger: "#2E3A31",
++    brass: "#E0B978",
++    stampGreen: "#8FCDA8",
++    stampRed: "#F09999",
++    stampAmber: "#E0B978",
++    stampSlate: "#A3A8A3",
++    border: "#2A2D29",
++    paperCard: "#161816",
++  },
++  navy: {
++    ink: "#E7ECF3",
++    ledger: "#3D5A82",
++    brass: "#D4AF37",
++    stampGreen: "#79C5A0",
++    stampRed: "#E68F85",
++    stampAmber: "#D4AF37",
++    stampSlate: "#96A6C2",
++    border: "#283755",
++    paperCard: "#152033",
++  },
++};
++
++/**
++ * Inline script string meant to be injected via next/script (beforeInteractive)
++ * or a raw <script> tag in the root layout's <head>, so the correct theme is
++ * set on <html> before first paint -- otherwise the page would flash the
++ * default "ledger" theme for a moment on every load for anyone using Black
++ * or Navy. Runs before React hydrates, so it reads localStorage only (the
++ * account's saved preference from the database arrives a moment later via
++ * ThemeProvider and reconciles if it differs, e.g. on a new device).
++ */
++export const THEME_BLOCKING_SCRIPT = `
++(function () {
++  try {
++    var t = window.localStorage.getItem("${STORAGE_KEY}");
++    if (t === "ledger" || t === "black" || t === "navy") {
++      document.documentElement.setAttribute("data-theme", t);
++    }
++  } catch (e) {}
++})();
++`;
++
++type ThemeContextValue = {
++  theme: ThemeName;
++  setTheme: (t: ThemeName) => void;
++};
++
++const ThemeContext = createContext<ThemeContextValue>({
++  theme: "ledger",
++  setTheme: () => {},
++});
++
++function applyThemeAttribute(theme: ThemeName) {
++  if (typeof document !== "undefined") {
++    document.documentElement.setAttribute("data-theme", theme);
++  }
++}
++
++export function ThemeProvider({
++  initialTheme,
++  children,
++}: {
++  // The account's saved theme_preference, once the profile has loaded from
++  // the database. Undefined/null while still loading or for logged-out
++  // pages -- the browser's own localStorage value (or the "ledger" default)
++  // is used until then.
++  initialTheme?: string | null;
++  children: React.ReactNode;
++}) {
++  const [theme, setThemeState] = useState<ThemeName>(() => {
++    if (isThemeName(initialTheme)) return initialTheme;
++    if (typeof window !== "undefined") {
++      const stored = window.localStorage.getItem(STORAGE_KEY);
++      if (isThemeName(stored)) return stored;
++    }
++    return "ledger";
++  });
++
++  // Once the account's saved preference arrives from the server it wins
++  // over whatever the blocking script guessed from localStorage -- this is
++  // what makes the theme sync across devices rather than staying stuck to
++  // whatever a particular browser last had.
++  useEffect(() => {
++    if (isThemeName(initialTheme) && initialTheme !== theme) {
++      setThemeState(initialTheme);
++    }
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [initialTheme]);
++
++  useEffect(() => {
++    applyThemeAttribute(theme);
++    try {
++      window.localStorage.setItem(STORAGE_KEY, theme);
++    } catch {
++      // Private browsing / storage disabled -- theme still applies for
++      // this session, it just won't be remembered on next visit.
++    }
++  }, [theme]);
++
++  const setTheme = useCallback((t: ThemeName) => {
++    setThemeState(t);
++    // Best-effort save. A failed request just means this choice hasn't
++    // synced to other devices yet -- it still applies immediately here.
++    api.patch("/profile/me", { theme_preference: t }).catch(() => {});
++  }, []);
++
++  return <ThemeContext.Provider value={{ theme, setTheme }}>{children}</ThemeContext.Provider>;
++}
++
++export function useTheme() {
++  return useContext(ThemeContext);
++}
+diff --git a/frontend/tailwind.config.ts b/frontend/tailwind.config.ts
+index 8658b84..856f117 100644
+--- a/frontend/tailwind.config.ts
++++ b/frontend/tailwind.config.ts
+@@ -8,31 +8,44 @@ const config: Config = {
+   theme: {
+     extend: {
+       colors: {
+-        ink: "#1F2D24",
++        // Every color below resolves through a CSS custom property defined
++        // in globals.css (:root and [data-theme="..."] blocks), rather than
++        // a fixed hex value. Switching themes is then just setting a
++        // data-theme attribute on <html> -- no page, component, or class
++        // name anywhere in the app needs to change. The rgb(var(...) /
++        // <alpha-value>) form is required (not plain var()) so opacity
++        // modifiers like bg-brass/15 or text-ink/60 keep working.
++        ink: "rgb(var(--ink) / <alpha-value>)",
+         ledger: {
+-          DEFAULT: "#2F4F3D",
+-          dark: "#22392C",
+-          light: "#3D6650",
++          DEFAULT: "rgb(var(--ledger) / <alpha-value>)",
++          dark: "rgb(var(--ledger-dark) / <alpha-value>)",
++          light: "rgb(var(--ledger-light) / <alpha-value>)",
+         },
+         paper: {
+-          DEFAULT: "#F3F1E6",
+-          card: "#FBFAF5",
++          DEFAULT: "rgb(var(--paper) / <alpha-value>)",
++          card: "rgb(var(--paper-card) / <alpha-value>)",
+         },
+         brass: {
+-          DEFAULT: "#C89B5C",
+-          dark: "#A67C3D",
+-          light: "#DDBB86",
++          DEFAULT: "rgb(var(--brass) / <alpha-value>)",
++          dark: "rgb(var(--brass-dark) / <alpha-value>)",
++          light: "rgb(var(--brass-light) / <alpha-value>)",
+         },
+-        rule: "#8B3A3A",
++        rule: "rgb(var(--rule) / <alpha-value>)",
+         stamp: {
+-          green: "#2F4F3D",
+-          red: "#A63D40",
+-          amber: "#B8862E",
+-          slate: "#565F5A",
++          green: "rgb(var(--stamp-green) / <alpha-value>)",
++          red: "rgb(var(--stamp-red) / <alpha-value>)",
++          amber: "rgb(var(--stamp-amber) / <alpha-value>)",
++          slate: "rgb(var(--stamp-slate) / <alpha-value>)",
+         },
+         border: {
+-          DEFAULT: "#DCD7C4",
++          DEFAULT: "rgb(var(--border) / <alpha-value>)",
+         },
++        // Sidebar background is always a dark surface in every theme, so
++        // its text needs its own fixed-light token -- NOT the `paper`
++        // token, which is the page background and flips dark in Black/Navy.
++        // Reusing `paper` here was the exact bug that made sidebar text
++        // disappear when Black/Navy were first tried.
++        "sidebar-ink": "rgb(var(--sidebar-ink) / <alpha-value>)",
+       },
+       fontFamily: {
+         display: ["var(--font-fraunces)", "Georgia", "serif"],
+@@ -44,8 +57,12 @@ const config: Config = {
+         shell: "16px",
+       },
+       boxShadow: {
+-        card: "0 1px 2px rgba(31,45,36,0.06), 0 1px 0 rgba(31,45,36,0.04)",
+-        shell: "0 4px 8px rgba(31,45,36,0.05), 0 18px 40px -14px rgba(31,45,36,0.22)",
++        // Defined per-theme in globals.css: a soft drop-shadow reads fine
++        // on light paper but is nearly invisible on a dark surface, so the
++        // Black/Navy values swap to a crisp 1px outline plus a stronger,
++        // darker glow instead.
++        card: "var(--shadow-card)",
++        shell: "var(--shadow-shell)",
+       },
+       keyframes: {
+         shimmer: {
