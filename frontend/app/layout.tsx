@@ -22,8 +22,8 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Ledger — Property Management",
-  description: "Buildings, tenants, rent, and ledgers in one place.",
+  title: "OneAccounts | Properties Management",
+  description: "Simple by design. Professional by nature. Buildings, tenants, rent, and ledgers in one place.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
