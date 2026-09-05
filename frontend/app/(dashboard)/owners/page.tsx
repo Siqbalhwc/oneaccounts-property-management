@@ -7,7 +7,7 @@ import { Card, DataTable } from "@/components/ui/Card";
 import { StampBadge } from "@/components/ui/StampBadge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
-import { Field, Input, AmountInput } from "@/components/ui/Field";
+import { Field, Input } from "@/components/ui/Field";
 import { api } from "@/lib/api";
 
 type Owner = {
@@ -48,13 +48,6 @@ export default function OwnersPage() {
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", phone: "", cnic: "", address: "" });
 
-  // Pay flow -- posts straight to the ledger (Dr Due to Owners / Cr Bank),
-  // no separate snapshot table involved.
-  const [payOwner, setPayOwner] = useState<Owner | null>(null);
-  const [paySaving, setPaySaving] = useState(false);
-  const [payError, setPayError] = useState<string | null>(null);
-  const [payForm, setPayForm] = useState({ amount_paid: "", paid_date: "" });
-
   function load() {
     api.get<Owner[]>(`/owners${showArchived ? "?include_archived=true" : ""}`).then(setOwners);
   }
@@ -83,30 +76,10 @@ export default function OwnersPage() {
   }
 
   function openPay(owner: Owner) {
-    setPayError(null);
-    const balance = balanceFor(owner.id);
-    setPayForm({ amount_paid: balance > 0 ? String(balance) : "", paid_date: new Date().toISOString().slice(0, 10) });
-    setPayOwner(owner);
-  }
-
-  async function handlePay(e: React.FormEvent) {
-    e.preventDefault();
-    if (!payOwner) return;
-    setPaySaving(true);
-    setPayError(null);
-    try {
-      await api.post("/owner-ledger/pay-owner", {
-        owner_id: payOwner.id,
-        amount_paid: parseFloat(payForm.amount_paid || "0"),
-        paid_date: payForm.paid_date,
-      });
-      setPayOwner(null);
-      loadBalances();
-    } catch (err: any) {
-      setPayError(err.message);
-    } finally {
-      setPaySaving(false);
-    }
+    // Full page now (like Receive payment) instead of a small popup --
+    // it needs room for the account picker and the rent/expense breakdown
+    // behind the balance, neither of which fit well in a Modal.
+    router.push(`/owners/${owner.id}/pay`);
   }
 
   // A building's default owner, plus any room whose owner_id overrides that
@@ -288,40 +261,6 @@ export default function OwnersPage() {
             </Button>
             <Button type="submit" disabled={saving}>
               {saving ? "Saving…" : editingId ? "Save changes" : "Add owner"}
-            </Button>
-          </div>
-        </form>
-      </Modal>
-
-      <Modal open={!!payOwner} onClose={() => setPayOwner(null)} title={payOwner ? `Pay ${payOwner.name}` : "Pay owner"}>
-        <form onSubmit={handlePay} className="space-y-4">
-          {payOwner && (
-            <p className="text-xs text-ink/50 bg-ledger/5 border border-ledger/15 rounded-card px-3 py-2">
-              Current balance owed: <span className="figures font-medium">{formatPkr(balanceFor(payOwner.id))}</span>
-            </p>
-          )}
-          <Field label="Amount to pay now">
-            <AmountInput
-              required
-              value={payForm.amount_paid}
-              onChange={(e) => setPayForm({ ...payForm, amount_paid: e.target.value })}
-            />
-          </Field>
-          <Field label="Date paid">
-            <Input
-              type="date"
-              required
-              value={payForm.paid_date}
-              onChange={(e) => setPayForm({ ...payForm, paid_date: e.target.value })}
-            />
-          </Field>
-          {payError && <p className="text-sm text-stamp-red">{payError}</p>}
-          <div className="flex justify-end gap-2 pt-2">
-            <Button type="button" variant="ghost" onClick={() => setPayOwner(null)}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={paySaving}>
-              {paySaving ? "Saving…" : "Record payout"}
             </Button>
           </div>
         </form>

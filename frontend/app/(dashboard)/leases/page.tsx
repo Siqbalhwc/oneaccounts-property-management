@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, Fragment } from "react";
+import { useEffect, useRef, useState, Fragment } from "react";
 import Link from "next/link";
 import { api, Lease, Tenant, Room, Building, SecurityDeposit, SecurityDepositPayment, Account, fetchPdfBlob } from "@/lib/api";
 import { Card } from "@/components/ui/Card";
@@ -9,7 +9,6 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { HistoryPanel } from "@/components/ui/HistoryPanel";
 import { Field, Input, Select } from "@/components/ui/Field";
-import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { ChevronRight, ChevronDown, FileText, Pencil, Printer, Banknote, SlidersHorizontal } from "lucide-react";
 
 type LeaseCharge = {
@@ -81,18 +80,6 @@ export default function LeasesPage() {
   // auto-suggested? Once true, typing more of the label won't silently
   // overwrite their choice.
   const [addChargeAccountTouched, setAddChargeAccountTouched] = useState(false);
-
-  // "GL account" options for the searchable dropdown -- label folds in the
-  // account code so typing the code still filters (same convention as the
-  // New Lease wizard and the Journal Entry page), but typing the account
-  // NAME (e.g. "Water") now matches too, since it's part of the same label.
-  const accountOptions = useMemo(
-    () =>
-      accounts
-        .filter((a) => a.account_type === "income")
-        .map((a) => ({ value: a.id, label: `${a.code} · ${a.name}` })),
-    [accounts]
-  );
 
   function existingMappingFor(label: string): ChargeMapping | undefined {
     const trimmed = label.trim().toLowerCase();
@@ -735,16 +722,21 @@ export default function LeasesPage() {
                       : "Type a label above, or pick one from the list — matching labels reuse the same account automatically."
                   }
                 >
-                  <SearchableSelect
+                  <Select
+                    required
                     value={addChargeForm.account_id}
-                    onChange={(v) => {
+                    onChange={(e) => {
                       setAddChargeAccountTouched(true);
-                      setAddChargeForm({ ...addChargeForm, account_id: v });
+                      setAddChargeForm({ ...addChargeForm, account_id: e.target.value });
                     }}
-                    options={accountOptions}
-                    placeholder="Search by account name or code…"
-                    emptyLabel="No accounts match"
-                  />
+                  >
+                    <option value="">Select an account…</option>
+                    {accounts.filter((a) => a.account_type === "income").map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.code} · {a.name}
+                      </option>
+                    ))}
+                  </Select>
                 </Field>
                 <label className="flex items-center gap-2 text-xs text-ink/60">
                   <input

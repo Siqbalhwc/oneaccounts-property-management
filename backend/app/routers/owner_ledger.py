@@ -32,9 +32,14 @@ def owner_balances(
     company_id: str = Depends(get_current_company_id),
 ):
     """
-    Real-time amount owed to each owner, read straight from the Due to
-    Owners (2200) account -- the SAME account/journal_lines the "View
-    ledger" page (/ledger?account_id=<2200>&owner_id=...) already shows.
+    Real-time amount owed to each owner, read straight from every account
+    flagged transfers_to_owner=true (Due to Owners / 2200 is always one of
+    these, but a company can map additional owner-chargeable categories --
+    e.g. "Owner Chargeable Repairs" -- to that same or another such
+    account). This is the SAME set of journal_lines the "View ledger" page
+    (/ledger?account_id=...&owner_id=...) already shows for each account,
+    so rent collected (a credit) and any expense charged to that owner (a
+    debit) both land in one number here -- nothing extra to reconcile.
 
     This is deliberately NOT the old owner_ledger table below (used by
     list_ledger/compute/pay above) -- that table is a one-time-computed
@@ -43,11 +48,22 @@ def owner_balances(
     endpoint can never disagree with the ledger, because it's reading the
     exact same rows.
     """
-    due_to_owners_id = get_account_id(supabase, company_id, "2200")
+    owner_accounts = (
+        supabase.table("chart_of_accounts")
+        .select("id")
+        .eq("company_id", company_id)
+        .eq("transfers_to_owner", True)
+        .execute()
+        .data
+    )
+    account_ids = [a["id"] for a in owner_accounts]
+    if not account_ids:
+        return []
+
     lines = (
         supabase.table("journal_lines")
         .select("owner_id, direction, amount")
-        .eq("account_id", due_to_owners_id)
+        .in_("account_id", account_ids)
         .not_.is_("owner_id", "null")
         .execute()
         .data
@@ -55,6 +71,8 @@ def owner_balances(
     balances: dict[str, float] = {}
     for l in lines:
         oid = l["owner_id"]
+        # Credit increases what's owed (e.g. rent); debit reduces it (e.g.
+        # an expense charged to them, or a payout).
         delta = float(l["amount"]) if l["direction"] == "credit" else -float(l["amount"])
         balances[oid] = balances.get(oid, 0.0) + delta
     return [
@@ -64,12 +82,106 @@ def owner_balances(
     ]
 
 
+@router.get("/breakdown/{owner_id}")
+def owner_balance_breakdown(
+    owner_id: str,
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+):
+    """
+    Every journal line behind an owner's current balance -- rent credits and
+    any owner-chargeable expense debits together, oldest first -- plus a
+    running balance. This is what the new full-page payout screen shows so
+    a payout is never made blind to what it's actually covering. Reads the
+    same transfers_to_owner accounts /balances does, just per-owner and
+    with the underlying lines instead of a single total.
+    """
+    owner_accounts = (
+        supabase.table("chart_of_accounts")
+        .select("id, code, name")
+        .eq("company_id", company_id)
+        .eq("transfers_to_owner", True)
+        .execute()
+        .data
+    )
+    account_ids = [a["id"] for a in owner_accounts]
+    account_by_id = {a["id"]: a for a in owner_accounts}
+    if not account_ids:
+        return {"lines": [], "balance": 0.0}
+
+    lines = (
+        supabase.table("journal_lines")
+        .select("journal_entry_id, account_id, direction, amount, building_id, room_id")
+        .in_("account_id", account_ids)
+        .eq("owner_id", owner_id)
+        .execute()
+        .data
+    )
+    if not lines:
+        return {"lines": [], "balance": 0.0}
+
+    entry_ids = list({l["journal_entry_id"] for l in lines})
+    entries = (
+        supabase.table("journal_entries")
+        .select("id, entry_date, description, source_type")
+        .in_("id", entry_ids)
+        .execute()
+        .data
+    )
+    entry_by_id = {e["id"]: e for e in entries}
+
+    building_ids = list({l["building_id"] for l in lines if l.get("building_id")})
+    buildings = (
+        supabase.table("buildings").select("id, name").in_("id", building_ids).execute().data
+        if building_ids else []
+    )
+    building_name_by_id = {b["id"]: b["name"] for b in buildings}
+
+    room_ids = list({l["room_id"] for l in lines if l.get("room_id")})
+    rooms = (
+        supabase.table("rooms").select("id, room_number").in_("id", room_ids).execute().data
+        if room_ids else []
+    )
+    room_number_by_id = {r["id"]: r["room_number"] for r in rooms}
+
+    rows = []
+    for l in lines:
+        entry = entry_by_id.get(l["journal_entry_id"], {})
+        rows.append(
+            {
+                "entry_date": entry.get("entry_date"),
+                "description": entry.get("description"),
+                "source_type": entry.get("source_type"),
+                "account_name": (account_by_id.get(l["account_id"]) or {}).get("name"),
+                "direction": l["direction"],
+                "amount": float(l["amount"]),
+                "building_name": building_name_by_id.get(l.get("building_id")),
+                "room_number": room_number_by_id.get(l.get("room_id")),
+            }
+        )
+    rows.sort(key=lambda r: r["entry_date"] or "")
+
+    running = 0.0
+    for r in rows:
+        running += r["amount"] if r["direction"] == "credit" else -r["amount"]
+        r["running_balance"] = round(running, 2)
+
+    return {"lines": rows, "balance": round(running, 2)}
+
+
 class PayOwnerDirectRequest(BaseModel):
     owner_id: str
     amount_paid: float
     paid_date: Optional[date] = None
     building_id: Optional[str] = None
-    bank_account_code: str = "1000"
+    # Which account this actually left from (Bank, Cash, a specific bank
+    # account, etc.) -- selected by the user on the payout page, the same
+    # way /payments/receipt requires a real account_id rather than assuming
+    # one. No default: a payout with the wrong account silently corrupts
+    # that account's balance, so it's never guessed.
+    account_id: str
+    payment_method: str = "bank_transfer"  # 'cash' | 'bank_transfer' | 'cheque' | 'other'
+    notes: Optional[str] = None
 
 
 @router.post("/pay-owner")
@@ -79,17 +191,28 @@ def pay_owner_direct(
     company_id: str = Depends(get_current_company_id),
 ):
     """
-    Records a payout straight against an owner's real Due to Owners
-    balance -- Dr Due to Owners / Cr Bank -- without needing a matching
-    row in the legacy owner_ledger snapshot table (see /balances above).
-    This is what the Owners page's "Pay" button now calls.
+    Records a payout straight against an owner's real balance -- Dr Due to
+    Owners (or whichever transfers_to_owner account it's tied to) / Cr
+    whichever account the money actually left from -- without needing a
+    matching row in the legacy owner_ledger snapshot table (see /balances
+    above). This is what the Owners page's full-page "Pay" screen calls.
     """
     if payload.amount_paid <= 0:
         raise HTTPException(status_code=400, detail="Amount must be greater than zero.")
 
+    account = (
+        supabase.table("chart_of_accounts")
+        .select("id")
+        .eq("id", payload.account_id)
+        .eq("company_id", company_id)
+        .single()
+        .execute()
+    )
+    if not account.data:
+        raise HTTPException(status_code=404, detail="Account not found")
+
     paid_date = payload.paid_date or date.today()
     due_to_owners_id = get_account_id(supabase, company_id, "2200")
-    bank_id = get_account_id(supabase, company_id, payload.bank_account_code)
 
     post_journal_entry(
         supabase,
@@ -97,7 +220,7 @@ def pay_owner_direct(
         entry_date=str(paid_date),
         source_type="owner_payout",
         source_id=None,
-        description=f"Owner payout — {str(paid_date)}",
+        description=(payload.notes or f"Owner payout — {str(paid_date)}"),
         lines=[
             {
                 "account_id": due_to_owners_id,
@@ -107,7 +230,7 @@ def pay_owner_direct(
                 "owner_id": payload.owner_id,
             },
             {
-                "account_id": bank_id,
+                "account_id": payload.account_id,
                 "direction": "credit",
                 "amount": payload.amount_paid,
                 "building_id": payload.building_id,

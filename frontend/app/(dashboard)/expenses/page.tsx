@@ -9,10 +9,17 @@ import { api, Building, Account } from "@/lib/api";
 import { ChevronRight, ChevronDown, Pencil, ScrollText, SplitSquareHorizontal, SlidersHorizontal } from "lucide-react";
 
 type ExpenseCategory = { id: string; name: string; account_id?: string };
+// Augmented locally since lib/api.ts's Room/Building types don't declare
+// owner_id -- safe either way, since a plain Room/Building is still
+// assignable to these (same pattern buildings/page.tsx already uses).
+type RoomWithOwner = { id: string; building_id: string; room_number: string; owner_id?: string | null };
+type BuildingWithOwner = Building & { owner_id?: string | null };
+type OwnerRecord = { id: string; name: string };
 type Expense = {
   id: string;
   category_id: string;
   building_id?: string;
+  room_id?: string;
   amount: number;
   expense_date: string;
   description?: string;
@@ -31,7 +38,9 @@ function formatPkr(n: number) {
 export default function ExpensesPage() {
   const [expenses, setExpenses] = useState<Expense[] | null>(null);
   const [categories, setCategories] = useState<ExpenseCategory[] | null>(null);
-  const [buildings, setBuildings] = useState<Building[] | null>(null);
+  const [buildings, setBuildings] = useState<BuildingWithOwner[] | null>(null);
+  const [rooms, setRooms] = useState<RoomWithOwner[] | null>(null);
+  const [owners, setOwners] = useState<OwnerRecord[] | null>(null);
   const [accounts, setAccounts] = useState<Account[] | null>(null);
   const [allocationsSummary, setAllocationsSummary] = useState<AllocationSummaryRow[]>([]);
 
@@ -51,6 +60,7 @@ export default function ExpensesPage() {
   const [form, setForm] = useState({
     category_id: "",
     building_id: "",
+    room_id: "",
     vendor_name: "",
     amount: "",
     expense_date: new Date().toISOString().slice(0, 10),
@@ -88,9 +98,29 @@ export default function ExpensesPage() {
       setCategories(cats);
       setForm((f) => (f.category_id ? f : { ...f, category_id: cats[0]?.id ?? "" }));
     });
-    api.get<Building[]>("/buildings").then(setBuildings);
+    api.get<BuildingWithOwner[]>("/buildings").then(setBuildings);
+    api.get<RoomWithOwner[]>("/rooms").then(setRooms);
+    api.get<OwnerRecord[]>("/owners?include_archived=true").then(setOwners);
     api.get<Account[]>("/chart-of-accounts").then(setAccounts);
   }, []);
+
+  // Whether picking this category charges the expense straight to an
+  // owner's balance (Due to Owners) instead of a normal company expense --
+  // mirrors the backend's own check in expenses.py's _resolve_expense_account.
+  function isOwnerChargeable(categoryId: string): boolean {
+    const cat = categories?.find((c) => c.id === categoryId);
+    if (!cat?.account_id) return false;
+    return !!accounts?.find((a) => a.id === cat.account_id)?.transfers_to_owner;
+  }
+
+  // A room's own owner if set, else its building's default -- same rule
+  // the backend's resolve_room_owner() uses, just for display here.
+  function resolveRoomOwnerName(roomId: string): string {
+    const room = rooms?.find((r) => r.id === roomId);
+    if (!room) return "—";
+    const ownerId = room.owner_id || buildings?.find((b) => b.id === room.building_id)?.owner_id;
+    return owners?.find((o) => o.id === ownerId)?.name ?? "No owner set on this room or building";
+  }
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -108,6 +138,7 @@ export default function ExpensesPage() {
     setForm({
       category_id: categories?.[0]?.id ?? "",
       building_id: "",
+      room_id: "",
       vendor_name: "",
       amount: "",
       expense_date: new Date().toISOString().slice(0, 10),
@@ -124,6 +155,7 @@ export default function ExpensesPage() {
     setForm({
       category_id: expense.category_id,
       building_id: expense.building_id ?? "",
+      room_id: expense.room_id ?? "",
       vendor_name: expense.vendor_name ?? "",
       amount: String(expense.amount),
       expense_date: expense.expense_date,
@@ -153,9 +185,20 @@ export default function ExpensesPage() {
           setSaving(false);
           return;
         }
+        const ownerCharged = isOwnerChargeable(form.category_id);
+        if (ownerCharged && !form.room_id) {
+          setError("This category is charged to an owner — select the room so the correct owner can be found.");
+          setSaving(false);
+          return;
+        }
         await api.post("/expenses", {
           category_id: form.category_id,
-          building_id: form.building_id || undefined,
+          // building_id is only sent for a normal expense -- for an
+          // owner-chargeable one the backend derives it FROM the room, so
+          // there's never a second, independently-set value to drift out
+          // of sync with the room actually picked.
+          building_id: ownerCharged ? undefined : form.building_id || undefined,
+          room_id: ownerCharged ? form.room_id : undefined,
           vendor_name: form.vendor_name || undefined,
           amount: parseFloat(form.amount),
           expense_date: form.expense_date,
@@ -452,7 +495,11 @@ export default function ExpensesPage() {
                         )}
                         {showBuildingCol && (
                           <td className="py-3 pr-4 whitespace-nowrap max-w-[200px] overflow-hidden text-ellipsis">
-                            {e.building_id ? (
+                            {e.room_id ? (
+                              <span className="text-xs text-ink/60">
+                                {buildingName(e.building_id ?? "")} — {rooms?.find((r) => r.id === e.room_id)?.room_number ?? "—"}
+                              </span>
+                            ) : e.building_id ? (
                               <span className="text-xs text-ink/60">{buildingName(e.building_id)}</span>
                             ) : splitSummary(e.id) ? (
                               <span className="text-xs text-ink/60">{splitSummary(e.id)}</span>
@@ -582,20 +629,56 @@ export default function ExpensesPage() {
               ))}
             </Select>
           </Field>
-          <Field label="Building (optional)" hint={editingId ? undefined : "Leave blank for a company-wide expense you can split across buildings below."}>
-            <Select
-              value={form.building_id}
-              disabled={!!editingId}
-              onChange={(e) => setForm({ ...form, building_id: e.target.value })}
-            >
-              <option value="">Company-wide</option>
-              {buildings?.map((b) => (
-                <option key={b.id} value={b.id}>
-                  {b.name}
-                </option>
-              ))}
-            </Select>
-          </Field>
+          {isOwnerChargeable(form.category_id) ? (
+            <>
+              <Field label="Room" hint="Required for an owner-chargeable category, so the correct owner can be found.">
+                <Select
+                  value={form.room_id}
+                  disabled={!!editingId}
+                  onChange={(e) => setForm({ ...form, room_id: e.target.value })}
+                >
+                  <option value="">Select a room…</option>
+                  {rooms?.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {buildings?.find((b) => b.id === r.building_id)?.name ?? "—"} — {r.room_number}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              {form.room_id && (
+                <div className="rounded-card border border-border bg-paper-card/60 px-3 py-2.5 text-sm space-y-1">
+                  <div className="flex justify-between">
+                    <span className="text-ink/50">Building</span>
+                    <span className="font-medium">
+                      {buildings?.find((b) => b.id === rooms?.find((r) => r.id === form.room_id)?.building_id)?.name ?? "—"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-ink/50">Owner</span>
+                    <span className="font-medium">{resolveRoomOwnerName(form.room_id)}</span>
+                  </div>
+                  <p className="text-xs text-ink/45 pt-1">
+                    Derived from the room — not editable here. This expense will reduce what&apos;s owed to this owner instead of posting as a company expense.
+                  </p>
+                </div>
+              )}
+            </>
+          ) : (
+            <Field label="Building (optional)" hint={editingId ? undefined : "Leave blank for a company-wide expense you can split across buildings below."}>
+              <Select
+                value={form.building_id}
+                disabled={!!editingId}
+                onChange={(e) => setForm({ ...form, building_id: e.target.value })}
+              >
+                <option value="">Company-wide</option>
+                {buildings?.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
           {!editingId && (
             <Field label="Recurrence" hint="Monthly expenses act as a template — use 'Generate recurring' each month to create that month's instance.">
               <Select

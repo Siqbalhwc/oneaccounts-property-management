@@ -7,7 +7,7 @@ from supabase import Client
 
 from app.core.deps import get_current_company_id, get_current_user, get_supabase
 from app.crud.generic import write_audit_log
-from app.services.ledger import get_account_id, post_journal_entry
+from app.services.ledger import get_account_id, post_journal_entry, resolve_room_owner
 
 router = APIRouter(prefix="/expenses", tags=["Expenses"])
 
@@ -24,6 +24,7 @@ class SetAllocationsRequest(BaseModel):
 
 class ExpenseCreate(BaseModel):
     building_id: Optional[str] = None  # null = company-wide (e.g. shared across sites via allocation)
+    room_id: Optional[str] = None  # set this to charge the expense to that room's owner (see below)
     category_id: str
     vendor_name: Optional[str] = None
     amount: float
@@ -49,32 +50,94 @@ class GenerateRecurringRequest(BaseModel):
     month: date  # any date within the target month
 
 
-def _post_expense_journal(supabase: Client, company_id: str, expense: dict):
-    """Dr the category's mapped expense account / Cr whichever account it was
-    actually paid from (expense["paid_from_account_id"] -- selected by the
-    user at logging time, e.g. Bank or Cash). Only tagged to a
-    building when the expense has one directly -- a company-wide expense
-    meant to be split across buildings (via cost_allocations) posts
-    untagged here; the split only affects owner_ledger's calculation, not
-    a second set of journal lines (that would double-count it)."""
+def _resolve_expense_account(supabase: Client, company_id: str, category_id: str) -> dict:
+    """Returns {id, transfers_to_owner} for the account a category posts to.
+    Falls back to Other Expense (5900) for a category with no mapping yet."""
     category = (
         supabase.table("expense_categories")
         .select("account_id")
-        .eq("id", expense["category_id"])
+        .eq("id", category_id)
         .single()
         .execute()
         .data
     )
-    account_id = category["account_id"] if category and category.get("account_id") else get_account_id(supabase, company_id, "5900")
+    if category and category.get("account_id"):
+        account = (
+            supabase.table("chart_of_accounts")
+            .select("id, transfers_to_owner")
+            .eq("id", category["account_id"])
+            .single()
+            .execute()
+            .data
+        )
+        if account:
+            return account
+    return {"id": get_account_id(supabase, company_id, "5900"), "transfers_to_owner": False}
+
+
+def _post_expense_journal(supabase: Client, company_id: str, expense: dict):
+    """
+    Two different things can happen here, depending on the category chosen:
+
+    1. NORMAL expense (the category maps to a regular expense account):
+       Dr [category's expense account] / Cr [paid-from account] -- a real
+       company cost, tagged to a building when the expense has one
+       directly. A company-wide expense meant to be split across buildings
+       (via cost_allocations) posts untagged here; the split only affects
+       owner_ledger's calculation, not a second set of journal lines (that
+       would double-count it).
+
+    2. OWNER-CHARGEABLE expense (the category's mapped account has
+       transfers_to_owner = true, e.g. "Owner Chargeable Repairs" -> Due to
+       Owners): this is never the company's own expense -- it's money spent
+       on the owner's behalf, so it posts Dr Due to Owners (tagged to the
+       room's actual owner) / Cr [paid-from account], the same liability
+       account rent already credits. That's what makes it show up as a
+       deduction on that owner's balance and in their ledger drill-down,
+       right alongside their rent. A room is mandatory here (enforced in
+       create_expense below) so the correct owner can be resolved --
+       building_id is always taken FROM the room, never entered separately.
+    """
+    account = _resolve_expense_account(supabase, company_id, expense["category_id"])
+    account_id = account["id"]
     # Falls back to Bank (1000) only for old rows that predate this field --
     # every expense logged going forward always carries its own choice.
     paid_from_id = expense.get("paid_from_account_id") or get_account_id(supabase, company_id, "1000")
 
     fallback_label = "Expense"
+    cat_name_row = supabase.table("expense_categories").select("name").eq("id", expense["category_id"]).single().execute().data
     if not expense.get("description"):
-        cat_name = supabase.table("expense_categories").select("name").eq("id", expense["category_id"]).single().execute().data
         vendor = f" — {expense['vendor_name']}" if expense.get("vendor_name") else ""
-        fallback_label = f"{(cat_name or {}).get('name', 'Expense')}{vendor}"
+        fallback_label = f"{(cat_name_row or {}).get('name', 'Expense')}{vendor}"
+
+    owner_id = None
+    if account.get("transfers_to_owner"):
+        owner_id = resolve_room_owner(supabase, expense["room_id"])
+        if not owner_id:
+            raise HTTPException(
+                status_code=400,
+                detail="This room has no owner configured (on the room or its building), so this expense can't be charged to an owner.",
+            )
+        description = expense.get("description") or f"{(cat_name_row or {}).get('name', 'Owner charge')} — Room"
+        post_journal_entry(
+            supabase,
+            company_id=company_id,
+            entry_date=str(expense["expense_date"]),
+            source_type="expense",
+            source_id=expense["id"],
+            description=description,
+            lines=[
+                {
+                    "account_id": account_id, "direction": "debit", "amount": float(expense["amount"]),
+                    "building_id": expense.get("building_id"), "room_id": expense.get("room_id"), "owner_id": owner_id,
+                },
+                {
+                    "account_id": paid_from_id, "direction": "credit", "amount": float(expense["amount"]),
+                    "building_id": expense.get("building_id"), "room_id": expense.get("room_id"), "owner_id": owner_id,
+                },
+            ],
+        )
+        return
 
     post_journal_entry(
         supabase,
@@ -84,8 +147,8 @@ def _post_expense_journal(supabase: Client, company_id: str, expense: dict):
         source_id=expense["id"],
         description=expense.get("description") or fallback_label,
         lines=[
-            {"account_id": account_id, "direction": "debit", "amount": float(expense["amount"]), "building_id": expense.get("building_id")},
-            {"account_id": paid_from_id, "direction": "credit", "amount": float(expense["amount"]), "building_id": expense.get("building_id")},
+            {"account_id": account_id, "direction": "debit", "amount": float(expense["amount"]), "building_id": expense.get("building_id"), "room_id": expense.get("room_id")},
+            {"account_id": paid_from_id, "direction": "credit", "amount": float(expense["amount"]), "building_id": expense.get("building_id"), "room_id": expense.get("room_id")},
         ],
     )
 
@@ -148,7 +211,22 @@ def create_expense(
     if payload.recurrence not in ("one_time", "monthly"):
         raise HTTPException(status_code=400, detail="recurrence must be 'one_time' or 'monthly'")
 
+    account = _resolve_expense_account(supabase, company_id, payload.category_id)
     row = payload.model_dump()
+    if account.get("transfers_to_owner"):
+        if not row.get("room_id"):
+            raise HTTPException(
+                status_code=400,
+                detail="This category is charged to an owner — select the room so the correct owner can be found.",
+            )
+        # building_id always comes FROM the room here, never entered
+        # separately -- it's shown as read-only info on the form, not a
+        # second thing the user could set inconsistently with the room.
+        room = supabase.table("rooms").select("building_id").eq("id", row["room_id"]).single().execute().data
+        if not room:
+            raise HTTPException(status_code=404, detail="Room not found")
+        row["building_id"] = room["building_id"]
+
     row["expense_date"] = str(row["expense_date"])
     row["company_id"] = company_id
     res = supabase.table("expenses").insert(row).execute()
@@ -241,6 +319,7 @@ def generate_recurring_expenses(
         new_row = {
             "company_id": company_id,
             "building_id": template.get("building_id"),
+            "room_id": template.get("room_id"),
             "category_id": template["category_id"],
             "vendor_name": template.get("vendor_name"),
             "amount": template["amount"],
