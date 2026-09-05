@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { createPortal } from "react-dom";
-import { Card, DataTable } from "@/components/ui/Card";
+import { useEffect, useRef, useState, Fragment } from "react";
+import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Field, Input, AmountInput, Select } from "@/components/ui/Field";
 import { api, Building, Account } from "@/lib/api";
+import { ChevronRight, ChevronDown, Pencil, ScrollText, SplitSquareHorizontal, SlidersHorizontal } from "lucide-react";
 
 type ExpenseCategory = { id: string; name: string; account_id?: string };
 type Expense = {
@@ -34,8 +34,15 @@ export default function ExpensesPage() {
   const [buildings, setBuildings] = useState<Building[] | null>(null);
   const [accounts, setAccounts] = useState<Account[] | null>(null);
   const [allocationsSummary, setAllocationsSummary] = useState<AllocationSummaryRow[]>([]);
-  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
-  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
+
+  // --- List view: expandable row + optional column visibility ---
+  const [expandedExpenseId, setExpandedExpenseId] = useState<string | null>(null);
+  const [colsMenuOpen, setColsMenuOpen] = useState(false);
+  const [showGlCol, setShowGlCol] = useState(true);
+  const [showPaidFromCol, setShowPaidFromCol] = useState(true);
+  const [showRecursCol, setShowRecursCol] = useState(true);
+  const [showBuildingCol, setShowBuildingCol] = useState(true);
+  const colsMenuRef = useRef<HTMLDivElement>(null);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -86,24 +93,14 @@ export default function ExpensesPage() {
   }, []);
 
   useEffect(() => {
-    function closeMenu() {
-      setOpenMenuId(null);
-      setMenuPos(null);
+    function handleClickOutside(e: MouseEvent) {
+      if (colsMenuRef.current && !colsMenuRef.current.contains(e.target as Node)) {
+        setColsMenuOpen(false);
+      }
     }
-    if (openMenuId) {
-      document.addEventListener("click", closeMenu);
-      // The menu is portaled to <body> with a fixed position computed at
-      // open-time, so if the table scrolls/resizes without a re-open, just
-      // close it rather than let it drift away from its row.
-      window.addEventListener("scroll", closeMenu, true);
-      window.addEventListener("resize", closeMenu);
-      return () => {
-        document.removeEventListener("click", closeMenu);
-        window.removeEventListener("scroll", closeMenu, true);
-        window.removeEventListener("resize", closeMenu);
-      };
-    }
-  }, [openMenuId]);
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   function openAddModal() {
     setEditingId(null);
@@ -200,7 +197,6 @@ export default function ExpensesPage() {
   };
 
   async function openLedgerModal(expense: Expense) {
-    setOpenMenuId(null);
     setLedgerTarget(expense);
     setLedgerError(null);
     setLedgerLines(null);
@@ -317,110 +313,244 @@ export default function ExpensesPage() {
       </div>
 
       <Card>
-        <DataTable
-          keyField="id"
-          rows={expenses ?? []}
-          emptyMessage="No expenses logged yet."
-          columns={[
-            { header: "Date", accessor: (e) => e.expense_date },
-            { header: "Category", accessor: (e) => categoryName(e.category_id) },
-            { header: "GL account", accessor: (e) => <span className="text-xs text-ink/50">{accountLabel(e.category_id)}</span> },
-            {
-              header: "Paid from",
-              accessor: (e) => {
-                const acct = accounts?.find((a) => a.id === e.paid_from_account_id);
-                return <span className="text-xs text-ink/50">{acct ? `${acct.code} · ${acct.name}` : "—"}</span>;
-              },
-            },
-            { header: "Vendor", accessor: (e) => e.vendor_name ?? "—" },
-            {
-              header: "Recurs",
-              accessor: (e) =>
-                e.recurrence === "monthly" ? (
-                  <span className="text-xs text-brass-dark font-medium">Monthly</span>
-                ) : (
-                  <span className="text-xs text-ink/40">One-time</span>
-                ),
-            },
-            {
-              header: "Building / Split",
-              accessor: (e) =>
-                e.building_id ? (
-                  <span className="text-xs text-ink/60">{buildingName(e.building_id)}</span>
-                ) : splitSummary(e.id) ? (
-                  <span className="text-xs text-ink/60">{splitSummary(e.id)}</span>
-                ) : (
-                  <span className="text-xs text-stamp-red">Company-wide, not split yet</span>
-                ),
-            },
-            {
-              header: "Amount",
-              accessor: (e) => <span className="figures">{formatPkr(e.amount)}</span>,
-              align: "right",
-            },
-            {
-              header: "",
-              accessor: (e) => (
-                <div className="relative no-print">
-                  <button
-                    onClick={(ev) => {
-                      ev.stopPropagation();
-                      if (openMenuId === e.id) {
-                        setOpenMenuId(null);
-                        setMenuPos(null);
-                        return;
-                      }
-                      const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect();
-                      // Fixed-position menu anchored to the button's own
-                      // screen coordinates, rendered via a portal straight
-                      // into <body> -- so it floats above the table instead
-                      // of being clipped by the table's horizontal-scroll
-                      // wrapper (that clipping is what caused the cramped
-                      // scrollbar look before).
-                      setMenuPos({ top: rect.bottom + 4, left: rect.right - 160 });
-                      setOpenMenuId(e.id);
-                    }}
-                    className="w-6 h-6 flex items-center justify-center rounded hover:bg-ledger/5 text-ink/50"
-                    title="Actions"
-                  >
-                    ›
-                  </button>
-                  {openMenuId === e.id && menuPos && typeof document !== "undefined" &&
-                    createPortal(
-                      <div
-                        onClick={(ev) => ev.stopPropagation()}
-                        style={{ position: "fixed", top: menuPos.top, left: menuPos.left }}
-                        className="z-50 bg-paper border border-border rounded-card shadow-md py-1 w-40"
+        <div className="flex items-center justify-end mb-4 no-print">
+          <div className="relative" ref={colsMenuRef}>
+            <button
+              type="button"
+              onClick={() => setColsMenuOpen((o) => !o)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-card border border-border text-ink hover:bg-ink/5"
+            >
+              <SlidersHorizontal size={14} />
+              Columns
+              <ChevronDown size={13} />
+            </button>
+            {colsMenuOpen && (
+              <div className="absolute right-0 top-full mt-1.5 z-20 bg-paper-card border border-border rounded-card shadow-card p-2 min-w-[190px]">
+                <p className="text-[10px] uppercase tracking-wider text-ink/45 font-semibold px-2 pt-1 pb-1.5">
+                  Optional columns
+                </p>
+                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showGlCol}
+                    onChange={(e) => setShowGlCol(e.target.checked)}
+                    className="accent-ledger"
+                  />
+                  GL account
+                </label>
+                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showPaidFromCol}
+                    onChange={(e) => setShowPaidFromCol(e.target.checked)}
+                    className="accent-ledger"
+                  />
+                  Paid from
+                </label>
+                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showRecursCol}
+                    onChange={(e) => setShowRecursCol(e.target.checked)}
+                    className="accent-ledger"
+                  />
+                  Recurs
+                </label>
+                <label className="flex items-center gap-2 px-2 py-1.5 text-xs rounded hover:bg-ledger/5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showBuildingCol}
+                    onChange={(e) => setShowBuildingCol(e.target.checked)}
+                    className="accent-ledger"
+                  />
+                  Building / Split
+                </label>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {(expenses ?? []).length === 0 ? (
+          <div className="py-12 text-center text-sm text-ink/45 border border-dashed border-border rounded-card">
+            No expenses logged yet.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="w-4 pb-2.5 pr-0.5"></th>
+                  <th className="text-left text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 pr-4 whitespace-nowrap">
+                    Date
+                  </th>
+                  <th className="text-left text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 pr-4 whitespace-nowrap">
+                    Category
+                  </th>
+                  <th className="text-left text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 pr-4 whitespace-nowrap">
+                    Vendor
+                  </th>
+                  {showRecursCol && (
+                    <th className="text-left text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 pr-4 whitespace-nowrap">
+                      Recurs
+                    </th>
+                  )}
+                  {showBuildingCol && (
+                    <th className="text-left text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 pr-4 whitespace-nowrap">
+                      Building / Split
+                    </th>
+                  )}
+                  {showGlCol && (
+                    <th className="text-left text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 pr-4 whitespace-nowrap">
+                      GL account
+                    </th>
+                  )}
+                  {showPaidFromCol && (
+                    <th className="text-left text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 pr-4 whitespace-nowrap">
+                      Paid from
+                    </th>
+                  )}
+                  <th className="text-right text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 pr-4 whitespace-nowrap">
+                    Amount
+                  </th>
+                  <th className="text-right text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 whitespace-nowrap no-print">
+                    Actions
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {(expenses ?? []).map((e) => {
+                  const expanded = expandedExpenseId === e.id;
+                  const colSpan =
+                    6 + (showRecursCol ? 1 : 0) + (showBuildingCol ? 1 : 0) + (showGlCol ? 1 : 0) + (showPaidFromCol ? 1 : 0);
+                  const paidFromAcct = accounts?.find((a) => a.id === e.paid_from_account_id);
+
+                  return (
+                    <Fragment key={e.id}>
+                      <tr
+                        onClick={() => setExpandedExpenseId(expanded ? null : e.id)}
+                        className="border-b border-border/60 cursor-pointer hover:bg-ledger/[0.03]"
                       >
-                        <button
-                          onClick={() => { setOpenMenuId(null); setMenuPos(null); openEditModal(e); }}
-                          className="block w-full text-left px-3 py-1.5 text-sm hover:bg-ledger/5"
-                        >
-                          Edit
-                        </button>
-                        {!e.building_id && (
-                          <button
-                            onClick={() => { setOpenMenuId(null); setMenuPos(null); openAllocationModal(e); }}
-                            className="block w-full text-left px-3 py-1.5 text-sm hover:bg-ledger/5"
-                          >
-                            Manage split
-                          </button>
+                        <td className="py-3 pr-0.5 text-ink/40">
+                          <ChevronRight
+                            size={14}
+                            className={`transition-transform ${expanded ? "rotate-90" : ""}`}
+                          />
+                        </td>
+                        <td className="py-3 pr-4 whitespace-nowrap figures">{e.expense_date}</td>
+                        <td className="py-3 pr-4 whitespace-nowrap">{categoryName(e.category_id)}</td>
+                        <td className="py-3 pr-4 whitespace-nowrap max-w-[180px] overflow-hidden text-ellipsis">
+                          {e.vendor_name ?? "—"}
+                        </td>
+                        {showRecursCol && (
+                          <td className="py-3 pr-4 whitespace-nowrap">
+                            {e.recurrence === "monthly" ? (
+                              <span className="text-xs text-brass-dark font-medium">Monthly</span>
+                            ) : (
+                              <span className="text-xs text-ink/40">One-time</span>
+                            )}
+                          </td>
                         )}
-                        <button
-                          onClick={() => { setOpenMenuId(null); setMenuPos(null); openLedgerModal(e); }}
-                          className="block w-full text-left px-3 py-1.5 text-sm hover:bg-ledger/5"
-                        >
-                          View ledger
-                        </button>
-                      </div>,
-                      document.body
-                    )}
-                </div>
-              ),
-              align: "right",
-            },
-          ]}
-        />
+                        {showBuildingCol && (
+                          <td className="py-3 pr-4 whitespace-nowrap max-w-[200px] overflow-hidden text-ellipsis">
+                            {e.building_id ? (
+                              <span className="text-xs text-ink/60">{buildingName(e.building_id)}</span>
+                            ) : splitSummary(e.id) ? (
+                              <span className="text-xs text-ink/60">{splitSummary(e.id)}</span>
+                            ) : (
+                              <span className="text-xs text-stamp-red">Not split yet</span>
+                            )}
+                          </td>
+                        )}
+                        {showGlCol && (
+                          <td className="py-3 pr-4 whitespace-nowrap max-w-[180px] overflow-hidden text-ellipsis">
+                            <span className="text-xs text-ink/50">{accountLabel(e.category_id)}</span>
+                          </td>
+                        )}
+                        {showPaidFromCol && (
+                          <td className="py-3 pr-4 whitespace-nowrap max-w-[180px] overflow-hidden text-ellipsis">
+                            <span className="text-xs text-ink/50">
+                              {paidFromAcct ? `${paidFromAcct.code} · ${paidFromAcct.name}` : "—"}
+                            </span>
+                          </td>
+                        )}
+                        <td className="py-3 pr-4 text-right whitespace-nowrap figures">{formatPkr(e.amount)}</td>
+                        <td className="py-3 text-right no-print" onClick={(ev) => ev.stopPropagation()}>
+                          <div className="flex gap-1 justify-end">
+                            <button
+                              onClick={() => openEditModal(e)}
+                              title="Edit"
+                              className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink"
+                            >
+                              <Pencil size={16} />
+                            </button>
+                            {!e.building_id && (
+                              <button
+                                onClick={() => openAllocationModal(e)}
+                                title="Manage split"
+                                className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink"
+                              >
+                                <SplitSquareHorizontal size={16} />
+                              </button>
+                            )}
+                            <button
+                              onClick={() => openLedgerModal(e)}
+                              title="View ledger"
+                              className="p-1.5 rounded hover:bg-ledger/5 text-ink/50 hover:text-ink"
+                            >
+                              <ScrollText size={16} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                      {expanded && (
+                        <tr className="border-b border-border/60 bg-ledger/[0.02]">
+                          <td colSpan={colSpan} className="px-0 py-0">
+                            <div className="pl-9 pr-4 py-4">
+                              <div className="flex flex-wrap items-start gap-x-10 gap-y-3">
+                                <div>
+                                  <p className="text-[10px] uppercase tracking-wider text-ink/45 font-semibold mb-1">
+                                    GL account
+                                  </p>
+                                  <p className="text-xs text-ink/70">{accountLabel(e.category_id)}</p>
+                                </div>
+                                <div>
+                                  <p className="text-[10px] uppercase tracking-wider text-ink/45 font-semibold mb-1">
+                                    Paid from
+                                  </p>
+                                  <p className="text-xs text-ink/70">
+                                    {paidFromAcct ? `${paidFromAcct.code} · ${paidFromAcct.name}` : "—"}
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="text-[10px] uppercase tracking-wider text-ink/45 font-semibold mb-1">
+                                    Building / Split
+                                  </p>
+                                  <p className="text-xs text-ink/70">
+                                    {e.building_id
+                                      ? buildingName(e.building_id)
+                                      : splitSummary(e.id) ?? "Company-wide, not split yet"}
+                                  </p>
+                                </div>
+                                {e.description && (
+                                  <div>
+                                    <p className="text-[10px] uppercase tracking-wider text-ink/45 font-semibold mb-1">
+                                      Description
+                                    </p>
+                                    <p className="text-xs text-ink/70">{e.description}</p>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </Card>
 
       <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editingId ? "Edit expense" : "Log expense"}>
