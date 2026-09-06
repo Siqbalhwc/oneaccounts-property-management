@@ -18,6 +18,7 @@ import {
   IconStaff,
   IconAccounting,
   IconJournal,
+  IconLedgerBook,
   IconScale,
   IconTrend,
   IconBalanceSheet,
@@ -66,6 +67,7 @@ const BASE_SECTIONS: NavSection[] = [
     icon: IconAccounting,
     items: [
       { href: "/chart-of-accounts", label: "Chart of accounts", icon: IconAccounting },
+      { href: "/ledger", label: "General ledger", icon: IconLedgerBook },
       { href: "/journal", label: "Journal entries", icon: IconJournal },
       { href: "/trial-balance", label: "Trial balance", icon: IconScale },
       { href: "/profit-and-loss", label: "Profit & loss", icon: IconTrend },

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
 import { Field, Input, Select } from "@/components/ui/Field";
 import { api, Building, Company } from "@/lib/api";
@@ -31,6 +32,7 @@ const today = () => new Date().toISOString().slice(0, 10);
 type View = "total" | "building" | "owner";
 
 export default function ProfitAndLossPage() {
+  const router = useRouter();
   const [company, setCompany] = useState<Company | null>(null);
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [owners, setOwners] = useState<Owner[]>([]);
@@ -119,12 +121,23 @@ export default function ProfitAndLossPage() {
 
   const dateLabel = `${dateFrom} to ${dateTo}`;
 
+  function openLedger(accountId: string, columnKey: string) {
+    const params = new URLSearchParams({ account_id: accountId, date_from: dateFrom, date_to: dateTo });
+    if (view === "building" && columnKey !== "total" && columnKey !== "unassigned") {
+      params.set("building_id", columnKey);
+    }
+    if (view === "owner" && columnKey !== "total" && columnKey !== "unassigned") {
+      params.set("owner_id", columnKey);
+    }
+    router.push(`/ledger?${params.toString()}`);
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-display font-semibold">Profit &amp; loss</h1>
-          <p className="text-sm text-ink/55 mt-1">Income minus expenses for a period.</p>
+          <p className="text-sm text-ink/55 mt-1">Income minus expenses for a period — click any account or figure to see its ledger.</p>
         </div>
       </div>
 
@@ -177,9 +190,17 @@ export default function ProfitAndLossPage() {
               </tr>
               {incomeAccounts.map((a) => (
                 <tr key={a.id} className="border-t border-border/50">
-                  <td className="py-1.5 text-ink/70">{a.name}</td>
+                  <td className="py-1.5 text-ink/70">
+                    <button onClick={() => openLedger(a.id, "total")} className="text-left hover:underline hover:text-accent">
+                      {a.name}
+                    </button>
+                  </td>
                   {columns.map((c) => (
-                    <td key={c.key} className="py-1.5 text-right figures pl-4">{formatPkr(amountFor(a.id, c.key))}</td>
+                    <td key={c.key} className="py-1.5 text-right pl-4">
+                      <button onClick={() => openLedger(a.id, c.key)} className="figures hover:underline hover:text-accent">
+                        {formatPkr(amountFor(a.id, c.key))}
+                      </button>
+                    </td>
                   ))}
                 </tr>
               ))}
@@ -197,9 +218,17 @@ export default function ProfitAndLossPage() {
               </tr>
               {expenseAccounts.map((a) => (
                 <tr key={a.id} className="border-t border-border/50">
-                  <td className="py-1.5 text-ink/70">{a.name}</td>
+                  <td className="py-1.5 text-ink/70">
+                    <button onClick={() => openLedger(a.id, "total")} className="text-left hover:underline hover:text-accent">
+                      {a.name}
+                    </button>
+                  </td>
                   {columns.map((c) => (
-                    <td key={c.key} className="py-1.5 text-right figures pl-4">{formatPkr(amountFor(a.id, c.key))}</td>
+                    <td key={c.key} className="py-1.5 text-right pl-4">
+                      <button onClick={() => openLedger(a.id, c.key)} className="figures hover:underline hover:text-accent">
+                        {formatPkr(amountFor(a.id, c.key))}
+                      </button>
+                    </td>
                   ))}
                 </tr>
               ))}

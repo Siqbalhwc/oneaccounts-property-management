@@ -131,6 +131,15 @@ export function IconJournal(props: IconProps) {
   );
 }
 
+export function IconLedgerBook(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12 6.5c-1.8-1.3-4-1.9-6.5-1.9v13.8c2.5 0 4.7.6 6.5 1.9M12 6.5c1.8-1.3 4-1.9 6.5-1.9v13.8c-2.5 0-4.7.6-6.5 1.9M12 6.5v13.8" />
+      <path d="M8 8.7h2M8 11.6h2M14 8.7h2M14 11.6h2" />
+    </Icon>
+  );
+}
+
 export function IconScale(props: IconProps) {
   return (
     <Icon {...props}>

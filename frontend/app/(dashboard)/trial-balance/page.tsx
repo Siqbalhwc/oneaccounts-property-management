@@ -54,7 +54,9 @@ export default function TrialBalancePage() {
   }, [asOfDate, buildingFilter]);
 
   function openLedger(row: TrialBalanceRow) {
-    router.push(`/ledger?account_id=${row.account_id}&date_to=${asOfDate}`);
+    const params = new URLSearchParams({ account_id: row.account_id, date_to: asOfDate });
+    if (buildingFilter) params.set("building_id", buildingFilter);
+    router.push(`/ledger?${params.toString()}`);
   }
 
   // Build one flat list of heading + account rows, in the standard trial

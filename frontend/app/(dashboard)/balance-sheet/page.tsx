@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
 import { Field, Input, Select } from "@/components/ui/Field";
 import { api, Building } from "@/lib/api";
@@ -18,6 +19,7 @@ function formatPkr(n: number) {
 }
 
 export default function BalanceSheetPage() {
+  const router = useRouter();
   const [rows, setRows] = useState<BalanceSheetRow[] | null>(null);
   const [buildings, setBuildings] = useState<Building[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -49,6 +51,13 @@ export default function BalanceSheetPage() {
   const totalEquity = equity.reduce((s, r) => s + Number(r.balance), 0);
   const balanced = Math.abs(totalAssets - (totalLiabilities + totalEquity)) < 0.01;
 
+  function openLedger(row: BalanceSheetRow) {
+    if (!row.account_id) return; // "Retained Earnings (computed)" has no real account -- nothing to drill into
+    const params = new URLSearchParams({ account_id: row.account_id, date_to: asOfDate });
+    if (buildingFilter) params.set("building_id", buildingFilter);
+    router.push(`/ledger?${params.toString()}`);
+  }
+
   function Section({ title, items, total }: { title: string; items: BalanceSheetRow[]; total: number }) {
     return (
       <div>
@@ -57,10 +66,16 @@ export default function BalanceSheetPage() {
           {items.length === 0 && <p className="text-sm text-ink/40">—</p>}
           {items.map((r) => (
             <div key={r.account_id ?? r.account_code} className="flex justify-between text-sm">
-              <span className="text-ink/70">
-                {r.account_name}
-                {r.account_id === null && <span className="text-ink/35 text-xs"> (computed)</span>}
-              </span>
+              {r.account_id ? (
+                <button onClick={() => openLedger(r)} className="text-left text-ink/70 hover:underline hover:text-accent">
+                  {r.account_name}
+                </button>
+              ) : (
+                <span className="text-ink/70">
+                  {r.account_name}
+                  <span className="text-ink/35 text-xs"> (computed)</span>
+                </span>
+              )}
               <span className="figures">{formatPkr(r.balance)}</span>
             </div>
           ))}
@@ -77,7 +92,9 @@ export default function BalanceSheetPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-display font-semibold">Balance sheet</h1>
-        <p className="text-sm text-ink/55 mt-1">What the company owns, owes, and is worth, as of a date.</p>
+        <p className="text-sm text-ink/55 mt-1">
+          What the company owns, owes, and is worth, as of a date — click any account to see its ledger.
+        </p>
       </div>
 
       {error && (

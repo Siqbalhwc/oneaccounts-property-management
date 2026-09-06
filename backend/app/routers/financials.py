@@ -234,10 +234,15 @@ def get_general_ledger(
     date_to: Optional[date] = Query(None),
     owner_id: Optional[str] = Query(None),
     tenant_id: Optional[str] = Query(None),
+    building_id: Optional[str] = Query(None),
+    room_id: Optional[str] = Query(None),
     supabase: Client = Depends(get_supabase),
 ):
     """Wraps the general_ledger() SQL function -- the running balance is a
-    SQL window function, not accumulated in a Python loop."""
+    SQL window function, not accumulated in a Python loop. Each row also
+    carries source_type/source_id/journal_entry_id so the frontend can
+    resolve a "click a figure" drill-down via /financials/source-document
+    without a second lookup."""
     result = supabase.rpc(
         "general_ledger",
         {
@@ -246,9 +251,87 @@ def get_general_ledger(
             "p_date_to": str(date_to) if date_to else None,
             "p_owner_id": owner_id,
             "p_tenant_id": tenant_id,
+            "p_building_id": building_id,
+            "p_room_id": room_id,
         },
     ).execute()
     return result.data
+
+
+@router.get("/source-document")
+def get_source_document(
+    source_type: str = Query(...),
+    source_id: Optional[str] = Query(None),
+    journal_entry_id: Optional[str] = Query(None),
+    supabase: Client = Depends(get_supabase),
+):
+    """
+    Resolves one ledger line into its printable source document -- the
+    drill-down behind "click a figure" on the General Ledger (and, via it,
+    Trial Balance / Balance Sheet / Profit & Loss). Redirects to an
+    existing document when one already exists for that record (invoice
+    PDF, security deposit receipt); otherwise streams a generic journal
+    voucher built straight from the journal entry itself, since not every
+    source type (payment, expense, salary payment, owner payout, manual
+    adjustment) has its own bespoke document yet.
+
+    source_id's meaning depends on source_type -- see services/ledger.py
+    call sites: it's the invoice/expense/payment/deposit row id for most
+    types, but the LEASE id for the initial "security_deposit" booking
+    (tagged at lease creation, before a dedicated deposit row necessarily
+    exists), and can be NULL entirely for a direct owner payout or a
+    manual adjustment -- those two cases fall through to the generic
+    voucher, using journal_entry_id instead, which is always present.
+    """
+    from fastapi import HTTPException
+    from fastapi.responses import RedirectResponse
+
+    if source_type == "invoice" and source_id:
+        return RedirectResponse(url=f"/api/invoices/{source_id}/pdf")
+
+    if source_type == "security_deposit" and source_id:
+        deposit = (
+            supabase.table("security_deposits")
+            .select("id")
+            .eq("lease_id", source_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if deposit:
+            return RedirectResponse(url=f"/api/security-deposits/{deposit[0]['id']}/receipt-pdf")
+
+    if source_type == "security_deposit_payment" and source_id:
+        payment = (
+            supabase.table("security_deposit_payments")
+            .select("security_deposit_id")
+            .eq("id", source_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if payment:
+            return RedirectResponse(url=f"/api/security-deposits/{payment[0]['security_deposit_id']}/receipt-pdf")
+
+    if source_type == "security_deposit_refund" and source_id:
+        # source_id here IS already the deposit id (see security_deposits.py).
+        return RedirectResponse(url=f"/api/security-deposits/{source_id}/receipt-pdf")
+
+    if not journal_entry_id:
+        raise HTTPException(status_code=400, detail="No journal entry to show for this line.")
+
+    from fastapi.responses import StreamingResponse
+    import io
+
+    from app.services.journal_voucher_pdf import fetch_voucher_context, render_voucher_pdf
+
+    ctx = fetch_voucher_context(supabase, journal_entry_id)
+    pdf_bytes = render_voucher_pdf(ctx)
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="journal_voucher_{journal_entry_id}.pdf"'},
+    )
 
 
 @router.get("/profit-and-loss")

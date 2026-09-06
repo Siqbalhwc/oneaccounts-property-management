@@ -1,0 +1,1035 @@
+diff --git a/009_schema_patch_024_general_ledger_drilldown.sql b/009_schema_patch_024_general_ledger_drilldown.sql
+new file mode 100644
+index 0000000..14d0f26
+--- /dev/null
++++ b/009_schema_patch_024_general_ledger_drilldown.sql
+@@ -0,0 +1,100 @@
++-- ============================================================================
++-- PATCH 024 — general_ledger(): building/apartment filters + drill-down IDs
++-- ============================================================================
++-- What this does, in two parts:
++--
++-- 1. Two new filter parameters, the same way p_owner_id / p_tenant_id
++--    already work: p_building_id and p_room_id. Lets the General Ledger
++--    page narrow an account's movement down to one building or one
++--    apartment, on top of the date/owner/tenant filters it already has.
++--
++-- 2. Two new columns in the result: source_id and journal_entry_id.
++--    These power "click a figure -> see the source document" on the
++--    General Ledger page. journal_entries already stores source_type and
++--    source_id for every entry (that part is not new) -- this just also
++--    returns them from the report, plus the journal entry's own id, so
++--    the frontend can resolve each line to its invoice / receipt / voucher
++--    without a second round trip.
++--
++-- Rebuilt from the EXACT current definition of general_ledger() (the one
++-- added by patch 022, confirmed by reading it straight out of this repo's
++-- own migration history before writing this), with only these additions.
++-- Nothing about how amounts/balances are calculated changes for existing
++-- callers -- a call that doesn't pass the two new filters behaves exactly
++-- as it did before this patch.
++--
++-- Function is dropped and recreated (rather than CREATE OR REPLACE)
++-- because adding parameters changes the signature -- Postgres would
++-- otherwise create a second, overloaded version alongside the old one
++-- instead of truly replacing it, same reasoning as patch 022. Dropped by
++-- name only (no argument list) since general_ledger has exactly one
++-- version today -- if that's no longer true when this runs, Postgres will
++-- raise a clear "not unique" error here instead of silently leaving an
++-- old copy behind, so this is safe to run even if that assumption turns
++-- out to be wrong.
++-- ============================================================================
++
++drop function if exists public.general_ledger;
++
++CREATE OR REPLACE FUNCTION public.general_ledger(
++  p_account_id uuid,
++  p_date_from date DEFAULT NULL::date,
++  p_date_to date DEFAULT NULL::date,
++  p_owner_id uuid DEFAULT NULL::uuid,
++  p_tenant_id uuid DEFAULT NULL::uuid,
++  p_building_id uuid DEFAULT NULL::uuid,
++  p_room_id uuid DEFAULT NULL::uuid
++)
++ RETURNS TABLE(
++   entry_date date, description text, source_type text, source_id uuid,
++   journal_entry_id uuid, direction text, amount numeric,
++   building_name text, room_number text, owner_name text, tenant_name text,
++   running_balance numeric
++ )
++ LANGUAGE sql
++ STABLE
++AS $function$
++  with lines as (
++    select
++      je.entry_date, je.description, je.source_type, je.source_id, je.id as journal_entry_id,
++      jl.direction, jl.amount, coa.account_type,
++      b.name as building_name, r.room_number, o.name as owner_name, t.full_name as tenant_name,
++      jl.created_at
++    from journal_lines jl
++    join journal_entries je on je.id = jl.journal_entry_id
++    join chart_of_accounts coa on coa.id = jl.account_id
++    left join buildings b on b.id = jl.building_id
++    left join rooms r on r.id = jl.room_id
++    left join owners o on o.id = jl.owner_id
++    left join tenants t on t.id = jl.tenant_id
++    where jl.account_id = p_account_id
++      and coa.company_id = auth_company_id()
++      and (p_date_from is null or je.entry_date >= p_date_from)
++      and (p_date_to is null or je.entry_date <= p_date_to)
++      and (p_owner_id is null or jl.owner_id = p_owner_id)
++      and (p_tenant_id is null or jl.tenant_id = p_tenant_id)
++      and (p_building_id is null or jl.building_id = p_building_id)
++      and (p_room_id is null or jl.room_id = p_room_id)
++  )
++  select
++    entry_date, description, source_type, source_id, journal_entry_id, direction, amount,
++    building_name, room_number, owner_name, tenant_name,
++    -- Sign follows each account's own natural balance -- debit-positive for
++    -- assets/expenses, credit-positive for liabilities/equity/income. Without
++    -- this, a payable that's owed would show as a confusing negative number.
++    sum(
++      case
++        when account_type in ('asset', 'expense') then (case when direction = 'debit' then amount else -amount end)
++        else (case when direction = 'credit' then amount else -amount end)
++      end
++    ) over (order by entry_date, created_at rows between unbounded preceding and current row) as running_balance
++  from lines
++  order by entry_date, created_at
++$function$;
++
++grant execute on function public.general_ledger(uuid, date, date, uuid, uuid, uuid, uuid) to authenticated, anon;
++
++-- Confirm: should show the new 7-parameter signature.
++select proname, pg_get_function_identity_arguments(oid) as arguments
++from pg_proc
++where proname = 'general_ledger';
+diff --git a/backend/app/routers/financials.py b/backend/app/routers/financials.py
+index 5fbe576..930e151 100644
+--- a/backend/app/routers/financials.py
++++ b/backend/app/routers/financials.py
+@@ -234,10 +234,15 @@ def get_general_ledger(
+     date_to: Optional[date] = Query(None),
+     owner_id: Optional[str] = Query(None),
+     tenant_id: Optional[str] = Query(None),
++    building_id: Optional[str] = Query(None),
++    room_id: Optional[str] = Query(None),
+     supabase: Client = Depends(get_supabase),
+ ):
+     """Wraps the general_ledger() SQL function -- the running balance is a
+-    SQL window function, not accumulated in a Python loop."""
++    SQL window function, not accumulated in a Python loop. Each row also
++    carries source_type/source_id/journal_entry_id so the frontend can
++    resolve a "click a figure" drill-down via /financials/source-document
++    without a second lookup."""
+     result = supabase.rpc(
+         "general_ledger",
+         {
+@@ -246,11 +251,89 @@ def get_general_ledger(
+             "p_date_to": str(date_to) if date_to else None,
+             "p_owner_id": owner_id,
+             "p_tenant_id": tenant_id,
++            "p_building_id": building_id,
++            "p_room_id": room_id,
+         },
+     ).execute()
+     return result.data
+ 
+ 
++@router.get("/source-document")
++def get_source_document(
++    source_type: str = Query(...),
++    source_id: Optional[str] = Query(None),
++    journal_entry_id: Optional[str] = Query(None),
++    supabase: Client = Depends(get_supabase),
++):
++    """
++    Resolves one ledger line into its printable source document -- the
++    drill-down behind "click a figure" on the General Ledger (and, via it,
++    Trial Balance / Balance Sheet / Profit & Loss). Redirects to an
++    existing document when one already exists for that record (invoice
++    PDF, security deposit receipt); otherwise streams a generic journal
++    voucher built straight from the journal entry itself, since not every
++    source type (payment, expense, salary payment, owner payout, manual
++    adjustment) has its own bespoke document yet.
++
++    source_id's meaning depends on source_type -- see services/ledger.py
++    call sites: it's the invoice/expense/payment/deposit row id for most
++    types, but the LEASE id for the initial "security_deposit" booking
++    (tagged at lease creation, before a dedicated deposit row necessarily
++    exists), and can be NULL entirely for a direct owner payout or a
++    manual adjustment -- those two cases fall through to the generic
++    voucher, using journal_entry_id instead, which is always present.
++    """
++    from fastapi import HTTPException
++    from fastapi.responses import RedirectResponse
++
++    if source_type == "invoice" and source_id:
++        return RedirectResponse(url=f"/api/invoices/{source_id}/pdf")
++
++    if source_type == "security_deposit" and source_id:
++        deposit = (
++            supabase.table("security_deposits")
++            .select("id")
++            .eq("lease_id", source_id)
++            .limit(1)
++            .execute()
++            .data
++        )
++        if deposit:
++            return RedirectResponse(url=f"/api/security-deposits/{deposit[0]['id']}/receipt-pdf")
++
++    if source_type == "security_deposit_payment" and source_id:
++        payment = (
++            supabase.table("security_deposit_payments")
++            .select("security_deposit_id")
++            .eq("id", source_id)
++            .limit(1)
++            .execute()
++            .data
++        )
++        if payment:
++            return RedirectResponse(url=f"/api/security-deposits/{payment[0]['security_deposit_id']}/receipt-pdf")
++
++    if source_type == "security_deposit_refund" and source_id:
++        # source_id here IS already the deposit id (see security_deposits.py).
++        return RedirectResponse(url=f"/api/security-deposits/{source_id}/receipt-pdf")
++
++    if not journal_entry_id:
++        raise HTTPException(status_code=400, detail="No journal entry to show for this line.")
++
++    from fastapi.responses import StreamingResponse
++    import io
++
++    from app.services.journal_voucher_pdf import fetch_voucher_context, render_voucher_pdf
++
++    ctx = fetch_voucher_context(supabase, journal_entry_id)
++    pdf_bytes = render_voucher_pdf(ctx)
++    return StreamingResponse(
++        io.BytesIO(pdf_bytes),
++        media_type="application/pdf",
++        headers={"Content-Disposition": f'inline; filename="journal_voucher_{journal_entry_id}.pdf"'},
++    )
++
++
+ @router.get("/profit-and-loss")
+ def get_profit_and_loss(
+     date_from: date = Query(...),
+diff --git a/backend/app/services/journal_voucher_pdf.py b/backend/app/services/journal_voucher_pdf.py
+new file mode 100644
+index 0000000..5505ea9
+--- /dev/null
++++ b/backend/app/services/journal_voucher_pdf.py
+@@ -0,0 +1,259 @@
++"""
++Generic printable voucher for a single journal entry -- the fallback
++"source document" for any ledger line whose source type doesn't have its
++own bespoke PDF (payment/receipt, expense, salary payment, owner payout,
++manual adjustment). Invoices and security deposits use their own existing
++documents instead (see financials.py's /source-document resolver); this
++covers everything else with one consistent, professional document rather
++than five separate bespoke templates.
++
++Mirrors invoice_pdf.py / deposit_receipt_pdf.py's structure and visual
++style (same letterhead band, same colour palette) so every printable
++document in the app feels like part of one family.
++"""
++
++import io
++import urllib.request
++
++from fastapi import HTTPException
++from reportlab.lib.pagesizes import A4
++from reportlab.lib.units import mm
++from reportlab.lib.utils import ImageReader
++from reportlab.pdfgen import canvas
++from supabase import Client
++
++SOURCE_TYPE_LABELS = {
++    "payment": "Payment Receipt",
++    "receipt": "Payment Receipt",
++    "expense": "Expense Voucher",
++    "salary_payment": "Salary Payment Voucher",
++    "owner_payout": "Owner Payout Voucher",
++    "manual_adjustment": "Journal Voucher",
++    "security_deposit": "Security Deposit Voucher",
++    "security_deposit_payment": "Security Deposit Voucher",
++    "security_deposit_refund": "Security Deposit Refund Voucher",
++}
++
++
++def fetch_voucher_context(supabase: Client, journal_entry_id: str) -> dict:
++    """Fetches everything needed to render a voucher: the journal entry
++    itself, every line on it (with account/building/room/owner/tenant
++    names resolved), and the company (letterhead)."""
++    entry = supabase.table("journal_entries").select("*").eq("id", journal_entry_id).single().execute()
++    if not entry.data:
++        raise HTTPException(status_code=404, detail="Journal entry not found")
++    entry = entry.data
++
++    lines = (
++        supabase.table("journal_lines")
++        .select("*")
++        .eq("journal_entry_id", journal_entry_id)
++        .order("created_at")
++        .execute()
++        .data
++    )
++
++    account_ids = list({l["account_id"] for l in lines if l.get("account_id")})
++    building_ids = list({l["building_id"] for l in lines if l.get("building_id")})
++    room_ids = list({l["room_id"] for l in lines if l.get("room_id")})
++    owner_ids = list({l["owner_id"] for l in lines if l.get("owner_id")})
++    tenant_ids = list({l["tenant_id"] for l in lines if l.get("tenant_id")})
++
++    accounts_by_id = {}
++    if account_ids:
++        fetched = supabase.table("chart_of_accounts").select("id, code, name").in_("id", account_ids).execute().data
++        accounts_by_id = {a["id"]: a for a in fetched}
++
++    buildings_by_id = {}
++    if building_ids:
++        fetched = supabase.table("buildings").select("id, name").in_("id", building_ids).execute().data
++        buildings_by_id = {b["id"]: b for b in fetched}
++
++    rooms_by_id = {}
++    if room_ids:
++        fetched = supabase.table("rooms").select("id, room_number").in_("id", room_ids).execute().data
++        rooms_by_id = {r["id"]: r for r in fetched}
++
++    owners_by_id = {}
++    if owner_ids:
++        fetched = supabase.table("owners").select("id, name").in_("id", owner_ids).execute().data
++        owners_by_id = {o["id"]: o for o in fetched}
++
++    tenants_by_id = {}
++    if tenant_ids:
++        fetched = supabase.table("tenants").select("id, full_name").in_("id", tenant_ids).execute().data
++        tenants_by_id = {t["id"]: t for t in fetched}
++
++    for l in lines:
++        l["account"] = accounts_by_id.get(l.get("account_id"))
++        l["building"] = buildings_by_id.get(l.get("building_id"))
++        l["room"] = rooms_by_id.get(l.get("room_id"))
++        l["owner"] = owners_by_id.get(l.get("owner_id"))
++        l["tenant"] = tenants_by_id.get(l.get("tenant_id"))
++
++    company = supabase.table("companies").select("*").eq("id", entry["company_id"]).single().execute().data
++
++    return {"entry": entry, "lines": lines, "company": company}
++
++
++def render_voucher_pdf(ctx: dict) -> bytes:
++    """Renders the branded journal voucher PDF (bytes) from a context dict
++    built by fetch_voucher_context(). Pure function -- no I/O beyond the
++    logo fetch."""
++    entry, lines, company = ctx["entry"], ctx["lines"], ctx["company"]
++    is_reversed = entry.get("status") == "reversed"
++    title = SOURCE_TYPE_LABELS.get(entry.get("source_type"), "Journal Voucher").upper()
++
++    buffer = io.BytesIO()
++    c = canvas.Canvas(buffer, pagesize=A4)
++    width, height = A4
++
++    LEDGER = (0.184, 0.310, 0.239)
++    BRASS = (0.784, 0.608, 0.361)
++    INK = (0.122, 0.176, 0.141)
++    PAPER = (0.953, 0.949, 0.902)
++    STAMP_RED = (0.545, 0.227, 0.227)
++
++    band_height = 38 * mm
++    c.setFillColorRGB(*LEDGER)
++    c.rect(0, height - band_height, width, band_height, fill=1, stroke=0)
++
++    text_x = 20 * mm
++    if company and company.get("logo_url"):
++        try:
++            with urllib.request.urlopen(company["logo_url"], timeout=5) as resp:
++                logo_bytes = io.BytesIO(resp.read())
++            logo_size = 22 * mm
++            c.drawImage(
++                ImageReader(logo_bytes),
++                20 * mm,
++                height - band_height / 2 - logo_size / 2,
++                width=logo_size,
++                height=logo_size,
++                preserveAspectRatio=True,
++                mask="auto",
++            )
++            text_x = 20 * mm + logo_size + 8 * mm
++        except Exception:
++            pass
++
++    c.setFillColorRGB(1, 1, 1)
++    c.setFont("Helvetica-Bold", 17)
++    c.drawString(text_x, height - 16 * mm, (company or {}).get("name") or "")
++    c.setFont("Helvetica", 9)
++    c.setFillColorRGB(0.9, 0.92, 0.9)
++    line_y = height - 23 * mm
++    if company and company.get("address"):
++        c.drawString(text_x, line_y, company["address"])
++        line_y -= 5 * mm
++    if company and company.get("phone"):
++        c.drawString(text_x, line_y, company["phone"])
++
++    y = height - band_height - 14 * mm
++    c.setFillColorRGB(*INK)
++    c.setFont("Helvetica-Bold", 15)
++    c.drawString(20 * mm, y, title)
++
++    if is_reversed:
++        badge_text = "REVERSED"
++        c.setFont("Helvetica-Bold", 9)
++        badge_width = c.stringWidth(badge_text, "Helvetica-Bold", 9) + 10 * mm
++        badge_x = width - 20 * mm - badge_width
++        c.setFillColorRGB(*STAMP_RED)
++        c.roundRect(badge_x, y - 3 * mm, badge_width, 8 * mm, 1.5 * mm, fill=1, stroke=0)
++        c.setFillColorRGB(1, 1, 1)
++        c.drawCentredString(badge_x + badge_width / 2, y - 0.5 * mm, badge_text)
++
++    y -= 10 * mm
++    c.setStrokeColorRGB(*BRASS)
++    c.setLineWidth(2)
++    c.line(20 * mm, y, 20 * mm + 12 * mm, y)
++    c.setStrokeColorRGB(0.86, 0.84, 0.77)
++    c.setLineWidth(0.75)
++    c.line(20 * mm + 12 * mm, y, width - 20 * mm, y)
++
++    y -= 8 * mm
++    c.setFillColorRGB(*INK)
++    c.setFont("Helvetica", 10)
++    c.drawString(20 * mm, y, f"Date: {entry.get('entry_date')}")
++
++    y -= 6 * mm
++    c.setFillColorRGB(0.3, 0.34, 0.32)
++    c.setFont("Helvetica", 9)
++    c.drawString(20 * mm, y, entry.get("description") or "")
++
++    # Table header
++    y -= 12 * mm
++    c.setFillColorRGB(*PAPER)
++    c.rect(20 * mm, y - 2 * mm, width - 40 * mm, 8 * mm, fill=1, stroke=0)
++    c.setFillColorRGB(*LEDGER)
++    c.setFont("Helvetica-Bold", 8.5)
++    c.drawString(22 * mm, y, "ACCOUNT")
++    c.drawString(95 * mm, y, "TAG")
++    c.drawRightString(width - 60 * mm, y, "DEBIT")
++    c.drawRightString(width - 20 * mm, y, "CREDIT")
++
++    y -= 10 * mm
++    c.setFont("Helvetica", 9.5)
++    total_debit = 0.0
++    total_credit = 0.0
++    for l in lines:
++        acct = l.get("account") or {}
++        acct_label = f"{acct.get('code', '')} · {acct.get('name', '')}".strip(" ·")
++
++        tag_bits = []
++        if l.get("building"):
++            tag_bits.append(l["building"]["name"])
++        if l.get("room"):
++            tag_bits.append(f"Apt {l['room']['room_number']}")
++        if l.get("owner"):
++            tag_bits.append(l["owner"]["name"])
++        if l.get("tenant"):
++            tag_bits.append(l["tenant"]["full_name"])
++        tag_label = ", ".join(tag_bits)
++
++        c.setFillColorRGB(*INK)
++        c.drawString(22 * mm, y, acct_label[:38])
++        c.setFillColorRGB(0.4, 0.43, 0.41)
++        c.setFont("Helvetica", 8.5)
++        c.drawString(95 * mm, y, tag_label[:30])
++        c.setFont("Helvetica", 9.5)
++        c.setFillColorRGB(*INK)
++
++        amount = float(l.get("amount") or 0)
++        if l.get("direction") == "debit":
++            c.drawRightString(width - 60 * mm, y, f"Rs {amount:,.0f}")
++            total_debit += amount
++        else:
++            c.drawRightString(width - 20 * mm, y, f"Rs {amount:,.0f}")
++            total_credit += amount
++
++        y -= 6.5 * mm
++
++    y -= 2 * mm
++    c.setStrokeColorRGB(*INK)
++    c.setLineWidth(0.75)
++    c.line(20 * mm, y, width - 20 * mm, y)
++
++    y -= 8 * mm
++    c.setFont("Helvetica-Bold", 10)
++    c.drawString(22 * mm, y, "Total")
++    c.drawRightString(width - 60 * mm, y, f"Rs {total_debit:,.0f}")
++    c.drawRightString(width - 20 * mm, y, f"Rs {total_credit:,.0f}")
++
++    y -= 20 * mm
++    c.setStrokeColorRGB(0.6, 0.6, 0.6)
++    c.setLineWidth(0.5)
++    c.line(20 * mm, y, 80 * mm, y)
++    c.setFillColorRGB(0.4, 0.43, 0.41)
++    c.setFont("Helvetica", 8)
++    c.drawString(20 * mm, y - 5 * mm, "Authorized signature")
++
++    y -= 16 * mm
++    c.setFont("Helvetica-Oblique", 7.5)
++    c.setFillColorRGB(0.5, 0.53, 0.51)
++    c.drawString(20 * mm, y, "System-generated voucher from the accounting ledger.")
++
++    c.save()
++    buffer.seek(0)
++    return buffer.read()
+diff --git a/frontend/app/(dashboard)/balance-sheet/page.tsx b/frontend/app/(dashboard)/balance-sheet/page.tsx
+index 7fca918..a6e0aa4 100644
+--- a/frontend/app/(dashboard)/balance-sheet/page.tsx
++++ b/frontend/app/(dashboard)/balance-sheet/page.tsx
+@@ -1,6 +1,7 @@
+ "use client";
+ 
+ import { useEffect, useState } from "react";
++import { useRouter } from "next/navigation";
+ import { Card } from "@/components/ui/Card";
+ import { Field, Input, Select } from "@/components/ui/Field";
+ import { api, Building } from "@/lib/api";
+@@ -18,6 +19,7 @@ function formatPkr(n: number) {
+ }
+ 
+ export default function BalanceSheetPage() {
++  const router = useRouter();
+   const [rows, setRows] = useState<BalanceSheetRow[] | null>(null);
+   const [buildings, setBuildings] = useState<Building[] | null>(null);
+   const [error, setError] = useState<string | null>(null);
+@@ -49,6 +51,13 @@ export default function BalanceSheetPage() {
+   const totalEquity = equity.reduce((s, r) => s + Number(r.balance), 0);
+   const balanced = Math.abs(totalAssets - (totalLiabilities + totalEquity)) < 0.01;
+ 
++  function openLedger(row: BalanceSheetRow) {
++    if (!row.account_id) return; // "Retained Earnings (computed)" has no real account -- nothing to drill into
++    const params = new URLSearchParams({ account_id: row.account_id, date_to: asOfDate });
++    if (buildingFilter) params.set("building_id", buildingFilter);
++    router.push(`/ledger?${params.toString()}`);
++  }
++
+   function Section({ title, items, total }: { title: string; items: BalanceSheetRow[]; total: number }) {
+     return (
+       <div>
+@@ -57,10 +66,16 @@ export default function BalanceSheetPage() {
+           {items.length === 0 && <p className="text-sm text-ink/40">—</p>}
+           {items.map((r) => (
+             <div key={r.account_id ?? r.account_code} className="flex justify-between text-sm">
+-              <span className="text-ink/70">
+-                {r.account_name}
+-                {r.account_id === null && <span className="text-ink/35 text-xs"> (computed)</span>}
+-              </span>
++              {r.account_id ? (
++                <button onClick={() => openLedger(r)} className="text-left text-ink/70 hover:underline hover:text-accent">
++                  {r.account_name}
++                </button>
++              ) : (
++                <span className="text-ink/70">
++                  {r.account_name}
++                  <span className="text-ink/35 text-xs"> (computed)</span>
++                </span>
++              )}
+               <span className="figures">{formatPkr(r.balance)}</span>
+             </div>
+           ))}
+@@ -77,7 +92,9 @@ export default function BalanceSheetPage() {
+     <div className="space-y-6">
+       <div>
+         <h1 className="text-2xl font-display font-semibold">Balance sheet</h1>
+-        <p className="text-sm text-ink/55 mt-1">What the company owns, owes, and is worth, as of a date.</p>
++        <p className="text-sm text-ink/55 mt-1">
++          What the company owns, owes, and is worth, as of a date — click any account to see its ledger.
++        </p>
+       </div>
+ 
+       {error && (
+diff --git a/frontend/app/(dashboard)/ledger/page.tsx b/frontend/app/(dashboard)/ledger/page.tsx
+index fac7107..579c97b 100644
+--- a/frontend/app/(dashboard)/ledger/page.tsx
++++ b/frontend/app/(dashboard)/ledger/page.tsx
+@@ -1,18 +1,22 @@
+ "use client";
+ 
+-import { useEffect, useState, Suspense } from "react";
++import { Suspense, useEffect, useMemo, useState } from "react";
+ import { useSearchParams, useRouter } from "next/navigation";
+ import { Card, DataTable } from "@/components/ui/Card";
+-import { Button } from "@/components/ui/Button";
+ import { Field, Input, Select } from "@/components/ui/Field";
+-import { api } from "@/lib/api";
++import { SearchableSelect } from "@/components/ui/SearchableSelect";
++import { api, fetchPdfBlob, Building } from "@/lib/api";
+ 
+-type Account = { id: string; code: string; name: string };
++type Account = { id: string; code: string; name: string; account_type?: string };
+ type Owner = { id: string; name: string };
+ type Tenant = { id: string; full_name: string };
++type Room = { id: string; building_id: string; room_number: string };
+ type LedgerRow = {
+   entry_date: string;
+   description?: string;
++  source_type?: string;
++  source_id?: string | null;
++  journal_entry_id?: string;
+   direction: "debit" | "credit";
+   amount: number;
+   building_name?: string;
+@@ -29,26 +33,37 @@ function formatPkr(n: number) {
+ function LedgerPageInner() {
+   const router = useRouter();
+   const searchParams = useSearchParams();
+-  const accountId = searchParams.get("account_id");
++  const accountId = searchParams.get("account_id") ?? "";
+   const ownerIdParam = searchParams.get("owner_id");
+ 
+-  const [account, setAccount] = useState<Account | null>(null);
++  const [accounts, setAccounts] = useState<Account[] | null>(null);
+   const [owner, setOwner] = useState<Owner | null>(null);
++  const [buildings, setBuildings] = useState<Building[] | null>(null);
++  const [rooms, setRooms] = useState<Room[] | null>(null);
+   const [tenants, setTenants] = useState<Tenant[]>([]);
+   const [tenantId, setTenantId] = useState(searchParams.get("tenant_id") ?? "");
++  const [buildingId, setBuildingId] = useState(searchParams.get("building_id") ?? "");
++  const [roomId, setRoomId] = useState(searchParams.get("room_id") ?? "");
+   const [rows, setRows] = useState<LedgerRow[] | null>(null);
+   const [error, setError] = useState<string | null>(null);
++  const [openingId, setOpeningId] = useState<string | null>(null);
++  const [openError, setOpenError] = useState<string | null>(null);
+ 
+-  const [dateFrom, setDateFrom] = useState("");
+-  const [dateTo, setDateTo] = useState("");
++  const [dateFrom, setDateFrom] = useState(searchParams.get("date_from") ?? "");
++  const [dateTo, setDateTo] = useState(searchParams.get("date_to") ?? "");
+ 
+   function load() {
+-    if (!accountId) return;
++    if (!accountId) {
++      setRows(null);
++      return;
++    }
+     const params = new URLSearchParams();
+     if (dateFrom) params.set("date_from", dateFrom);
+     if (dateTo) params.set("date_to", dateTo);
+     if (ownerIdParam) params.set("owner_id", ownerIdParam);
+     if (tenantId) params.set("tenant_id", tenantId);
++    if (buildingId) params.set("building_id", buildingId);
++    if (roomId) params.set("room_id", roomId);
+     api
+       .get<LedgerRow[]>(`/financials/general-ledger/${accountId}?${params.toString()}`)
+       .then(setRows)
+@@ -58,28 +73,79 @@ function LedgerPageInner() {
+   useEffect(() => {
+     load();
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+-  }, [accountId, ownerIdParam, tenantId, dateFrom, dateTo]);
++  }, [accountId, ownerIdParam, tenantId, buildingId, roomId, dateFrom, dateTo]);
+ 
+   useEffect(() => {
+-    api.get<Account[]>("/chart-of-accounts").then((accounts) => {
+-      setAccount(accounts.find((a) => a.id === accountId) ?? null);
+-    });
++    api.get<Account[]>("/chart-of-accounts").then(setAccounts);
++    api.get<Building[]>("/buildings").then(setBuildings);
++    api.get<Room[]>("/rooms").then(setRooms);
+     api.get<Tenant[]>("/tenants").then(setTenants);
++  }, []);
++
++  useEffect(() => {
+     if (ownerIdParam) {
+       api.get<Owner[]>("/owners").then((owners) => {
+         setOwner(owners.find((o) => o.id === ownerIdParam) ?? null);
+       });
+     }
+-  }, [accountId, ownerIdParam]);
++  }, [ownerIdParam]);
+ 
++  // Every filter change (account, tenant, building, apartment) is pushed
++  // into the URL so the exact view is shareable/bookmarkable, same
++  // pattern the tenant filter already used.
++  function updateParam(key: string, value: string) {
++    const params = new URLSearchParams(searchParams.toString());
++    if (value) params.set(key, value);
++    else params.delete(key);
++    router.replace(`/ledger?${params.toString()}`);
++  }
++
++  function handleAccountChange(value: string) {
++    updateParam("account_id", value);
++  }
+   function handleTenantChange(value: string) {
+     setTenantId(value);
++    updateParam("tenant_id", value);
++  }
++  function handleBuildingChange(value: string) {
++    setBuildingId(value);
++    setRoomId(""); // apartment list depends on building -- clear a stale selection
+     const params = new URLSearchParams(searchParams.toString());
+-    if (value) params.set("tenant_id", value);
+-    else params.delete("tenant_id");
++    if (value) params.set("building_id", value);
++    else params.delete("building_id");
++    params.delete("room_id");
+     router.replace(`/ledger?${params.toString()}`);
+   }
++  function handleRoomChange(value: string) {
++    setRoomId(value);
++    updateParam("room_id", value);
++  }
+ 
++  async function openSourceDocument(row: LedgerRow) {
++    if (!row.source_type) return;
++    const key = `${row.journal_entry_id ?? ""}-${row.source_id ?? ""}-${row.entry_date}`;
++    setOpenError(null);
++    setOpeningId(key);
++    try {
++      const params = new URLSearchParams({ source_type: row.source_type });
++      if (row.source_id) params.set("source_id", row.source_id);
++      if (row.journal_entry_id) params.set("journal_entry_id", row.journal_entry_id);
++      const blob = await fetchPdfBlob(`/financials/source-document?${params.toString()}`);
++      const url = URL.createObjectURL(blob);
++      window.open(url, "_blank");
++    } catch (err: any) {
++      setOpenError(err.message || "Couldn't open the source document.");
++    } finally {
++      setOpeningId(null);
++    }
++  }
++
++  const accountOptions = useMemo(
++    () => (accounts ?? []).map((a) => ({ value: a.id, label: `${a.code} · ${a.name}` })),
++    [accounts]
++  );
++  const account = (accounts ?? []).find((a) => a.id === accountId) ?? null;
++  const roomsForBuilding = (rooms ?? []).filter((r) => !buildingId || r.building_id === buildingId);
+   const selectedTenant = tenants.find((t) => t.id === tenantId);
+ 
+   const totalDebit = (rows ?? []).filter((r) => r.direction === "debit").reduce((s, r) => s + Number(r.amount), 0);
+@@ -87,33 +153,18 @@ function LedgerPageInner() {
+   const closingBalance = rows && rows.length > 0 ? rows[rows.length - 1].running_balance : 0;
+   const rowsWithKey = (rows ?? []).map((r, i) => ({ ...r, _key: i }));
+ 
+-  if (!accountId) {
+-    return (
+-      <div className="space-y-6">
+-        <h1 className="text-2xl font-display font-semibold">Ledger</h1>
+-        <Card>
+-          <p className="text-sm text-ink/50">
+-            No account selected — open this from the Trial Balance or Owners page by clicking an account.
+-          </p>
+-        </Card>
+-      </div>
+-    );
+-  }
+-
+   return (
+     <div className="space-y-6">
+-      <div className="flex items-start justify-between gap-3">
+-        <div>
++      <div>
++        {accountId && (
+           <button onClick={() => router.back()} className="text-sm text-accent hover:underline mb-2">
+             ← Back
+           </button>
+-          <h1 className="text-2xl font-display font-semibold">
+-            {account ? `${account.code} · ${account.name}` : "Ledger"}
+-            {owner && <span className="text-ink/50 font-normal"> — {owner.name}</span>}
+-            {selectedTenant && <span className="text-ink/50 font-normal"> — {selectedTenant.full_name}</span>}
+-          </h1>
+-          <p className="text-sm text-ink/55 mt-1">Full movement on this account, in date order.</p>
+-        </div>
++        )}
++        <h1 className="text-2xl font-display font-semibold">General ledger</h1>
++        <p className="text-sm text-ink/55 mt-1">
++          Full movement on any account, in date order — click a figure to open its source document.
++        </p>
+       </div>
+ 
+       {error && (
+@@ -121,15 +172,50 @@ function LedgerPageInner() {
+           <p className="text-sm text-stamp-red">Couldn&apos;t reach the API — {error}.</p>
+         </Card>
+       )}
++      {openError && (
++        <Card className="border-stamp-red/40">
++          <p className="text-sm text-stamp-red">Couldn&apos;t open that document — {openError}.</p>
++        </Card>
++      )}
+ 
+       <Card>
+-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
++        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
++          <Field label="Account">
++            <SearchableSelect
++              value={accountId}
++              onChange={handleAccountChange}
++              options={accountOptions}
++              placeholder="Search accounts…"
++            />
++          </Field>
+           <Field label="From">
+             <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+           </Field>
+           <Field label="To">
+             <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+           </Field>
++        </div>
++        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
++          <Field label="Building">
++            <Select value={buildingId} onChange={(e) => handleBuildingChange(e.target.value)}>
++              <option value="">All buildings</option>
++              {buildings?.map((b) => (
++                <option key={b.id} value={b.id}>
++                  {b.name}
++                </option>
++              ))}
++            </Select>
++          </Field>
++          <Field label="Apartment">
++            <Select value={roomId} onChange={(e) => handleRoomChange(e.target.value)} disabled={!buildingId}>
++              <option value="">{buildingId ? "All apartments" : "Select a building first"}</option>
++              {roomsForBuilding.map((r) => (
++                <option key={r.id} value={r.id}>
++                  {r.room_number}
++                </option>
++              ))}
++            </Select>
++          </Field>
+           <Field label="Tenant">
+             <Select value={tenantId} onChange={(e) => handleTenantChange(e.target.value)}>
+               <option value="">All tenants</option>
+@@ -143,27 +229,72 @@ function LedgerPageInner() {
+         </div>
+       </Card>
+ 
+-      <Card>
+-        <DataTable
+-          keyField="_key"
+-          rows={rowsWithKey}
+-          emptyMessage="No activity on this account for this period."
+-          columns={[
+-            { header: "Date", accessor: (r) => r.entry_date },
+-            { header: "Description", accessor: (r) => r.description ?? "—" },
+-            { header: "Dr", accessor: (r) => (r.direction === "debit" ? <span className="figures">{formatPkr(r.amount)}</span> : ""), align: "right" },
+-            { header: "Cr", accessor: (r) => (r.direction === "credit" ? <span className="figures">{formatPkr(r.amount)}</span> : ""), align: "right" },
+-            { header: "Balance", accessor: (r) => <span className="figures font-medium">{formatPkr(r.running_balance)}</span>, align: "right" },
+-          ]}
+-        />
+-        {rows && rows.length > 0 && (
+-          <div className="flex flex-wrap justify-end gap-6 pt-3 mt-3 border-t border-border text-sm font-medium">
+-            <span>Total Dr: <span className="figures">{formatPkr(totalDebit)}</span></span>
+-            <span>Total Cr: <span className="figures">{formatPkr(totalCredit)}</span></span>
+-            <span>Closing balance: <span className="figures">{formatPkr(closingBalance)}</span></span>
++      {!accountId ? (
++        <Card>
++          <p className="text-sm text-ink/50">Pick an account above to see its ledger.</p>
++        </Card>
++      ) : (
++        <Card>
++          <div className="mb-3">
++            <h2 className="text-sm font-semibold">
++              {account ? `${account.code} · ${account.name}` : "Ledger"}
++              {owner && <span className="text-ink/50 font-normal"> — {owner.name}</span>}
++              {selectedTenant && <span className="text-ink/50 font-normal"> — {selectedTenant.full_name}</span>}
++            </h2>
+           </div>
+-        )}
+-      </Card>
++          <DataTable
++            keyField="_key"
++            rows={rowsWithKey}
++            emptyMessage="No activity on this account for this period."
++            columns={[
++              { header: "Date", accessor: (r) => r.entry_date },
++              { header: "Description", accessor: (r) => r.description ?? "—" },
++              {
++                header: "Dr",
++                accessor: (r) =>
++                  r.direction === "debit" ? (
++                    <button
++                      onClick={() => openSourceDocument(r)}
++                      disabled={openingId !== null || !r.source_type}
++                      className="figures hover:underline hover:text-accent disabled:no-underline disabled:cursor-default"
++                      title="Open source document"
++                    >
++                      {formatPkr(r.amount)}
++                    </button>
++                  ) : (
++                    ""
++                  ),
++                align: "right",
++              },
++              {
++                header: "Cr",
++                accessor: (r) =>
++                  r.direction === "credit" ? (
++                    <button
++                      onClick={() => openSourceDocument(r)}
++                      disabled={openingId !== null || !r.source_type}
++                      className="figures hover:underline hover:text-accent disabled:no-underline disabled:cursor-default"
++                      title="Open source document"
++                    >
++                      {formatPkr(r.amount)}
++                    </button>
++                  ) : (
++                    ""
++                  ),
++                align: "right",
++              },
++              { header: "Balance", accessor: (r) => <span className="figures font-medium">{formatPkr(r.running_balance)}</span>, align: "right" },
++            ]}
++          />
++          {rows && rows.length > 0 && (
++            <div className="flex flex-wrap justify-end gap-6 pt-3 mt-3 border-t border-border text-sm font-medium">
++              <span>Total Dr: <span className="figures">{formatPkr(totalDebit)}</span></span>
++              <span>Total Cr: <span className="figures">{formatPkr(totalCredit)}</span></span>
++              <span>Closing balance: <span className="figures">{formatPkr(closingBalance)}</span></span>
++            </div>
++          )}
++        </Card>
++      )}
+     </div>
+   );
+ }
+diff --git a/frontend/app/(dashboard)/profit-and-loss/page.tsx b/frontend/app/(dashboard)/profit-and-loss/page.tsx
+index 3d133b2..467025f 100644
+--- a/frontend/app/(dashboard)/profit-and-loss/page.tsx
++++ b/frontend/app/(dashboard)/profit-and-loss/page.tsx
+@@ -1,6 +1,7 @@
+ "use client";
+ 
+ import { useEffect, useState } from "react";
++import { useRouter } from "next/navigation";
+ import { Card } from "@/components/ui/Card";
+ import { Field, Input, Select } from "@/components/ui/Field";
+ import { api, Building, Company } from "@/lib/api";
+@@ -31,6 +32,7 @@ const today = () => new Date().toISOString().slice(0, 10);
+ type View = "total" | "building" | "owner";
+ 
+ export default function ProfitAndLossPage() {
++  const router = useRouter();
+   const [company, setCompany] = useState<Company | null>(null);
+   const [buildings, setBuildings] = useState<Building[]>([]);
+   const [owners, setOwners] = useState<Owner[]>([]);
+@@ -119,12 +121,23 @@ export default function ProfitAndLossPage() {
+ 
+   const dateLabel = `${dateFrom} to ${dateTo}`;
+ 
++  function openLedger(accountId: string, columnKey: string) {
++    const params = new URLSearchParams({ account_id: accountId, date_from: dateFrom, date_to: dateTo });
++    if (view === "building" && columnKey !== "total" && columnKey !== "unassigned") {
++      params.set("building_id", columnKey);
++    }
++    if (view === "owner" && columnKey !== "total" && columnKey !== "unassigned") {
++      params.set("owner_id", columnKey);
++    }
++    router.push(`/ledger?${params.toString()}`);
++  }
++
+   return (
+     <div className="space-y-6">
+       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+         <div>
+           <h1 className="text-2xl font-display font-semibold">Profit &amp; loss</h1>
+-          <p className="text-sm text-ink/55 mt-1">Income minus expenses for a period.</p>
++          <p className="text-sm text-ink/55 mt-1">Income minus expenses for a period — click any account or figure to see its ledger.</p>
+         </div>
+       </div>
+ 
+@@ -177,9 +190,17 @@ export default function ProfitAndLossPage() {
+               </tr>
+               {incomeAccounts.map((a) => (
+                 <tr key={a.id} className="border-t border-border/50">
+-                  <td className="py-1.5 text-ink/70">{a.name}</td>
++                  <td className="py-1.5 text-ink/70">
++                    <button onClick={() => openLedger(a.id, "total")} className="text-left hover:underline hover:text-accent">
++                      {a.name}
++                    </button>
++                  </td>
+                   {columns.map((c) => (
+-                    <td key={c.key} className="py-1.5 text-right figures pl-4">{formatPkr(amountFor(a.id, c.key))}</td>
++                    <td key={c.key} className="py-1.5 text-right pl-4">
++                      <button onClick={() => openLedger(a.id, c.key)} className="figures hover:underline hover:text-accent">
++                        {formatPkr(amountFor(a.id, c.key))}
++                      </button>
++                    </td>
+                   ))}
+                 </tr>
+               ))}
+@@ -197,9 +218,17 @@ export default function ProfitAndLossPage() {
+               </tr>
+               {expenseAccounts.map((a) => (
+                 <tr key={a.id} className="border-t border-border/50">
+-                  <td className="py-1.5 text-ink/70">{a.name}</td>
++                  <td className="py-1.5 text-ink/70">
++                    <button onClick={() => openLedger(a.id, "total")} className="text-left hover:underline hover:text-accent">
++                      {a.name}
++                    </button>
++                  </td>
+                   {columns.map((c) => (
+-                    <td key={c.key} className="py-1.5 text-right figures pl-4">{formatPkr(amountFor(a.id, c.key))}</td>
++                    <td key={c.key} className="py-1.5 text-right pl-4">
++                      <button onClick={() => openLedger(a.id, c.key)} className="figures hover:underline hover:text-accent">
++                        {formatPkr(amountFor(a.id, c.key))}
++                      </button>
++                    </td>
+                   ))}
+                 </tr>
+               ))}
+diff --git a/frontend/app/(dashboard)/trial-balance/page.tsx b/frontend/app/(dashboard)/trial-balance/page.tsx
+index 5332761..7507457 100644
+--- a/frontend/app/(dashboard)/trial-balance/page.tsx
++++ b/frontend/app/(dashboard)/trial-balance/page.tsx
+@@ -54,7 +54,9 @@ export default function TrialBalancePage() {
+   }, [asOfDate, buildingFilter]);
+ 
+   function openLedger(row: TrialBalanceRow) {
+-    router.push(`/ledger?account_id=${row.account_id}&date_to=${asOfDate}`);
++    const params = new URLSearchParams({ account_id: row.account_id, date_to: asOfDate });
++    if (buildingFilter) params.set("building_id", buildingFilter);
++    router.push(`/ledger?${params.toString()}`);
+   }
+ 
+   // Build one flat list of heading + account rows, in the standard trial
+diff --git a/frontend/components/ui/LedgerIcons.tsx b/frontend/components/ui/LedgerIcons.tsx
+index d7a047c..8879fb8 100644
+--- a/frontend/components/ui/LedgerIcons.tsx
++++ b/frontend/components/ui/LedgerIcons.tsx
+@@ -131,6 +131,15 @@ export function IconJournal(props: IconProps) {
+   );
+ }
+ 
++export function IconLedgerBook(props: IconProps) {
++  return (
++    <Icon {...props}>
++      <path d="M12 6.5c-1.8-1.3-4-1.9-6.5-1.9v13.8c2.5 0 4.7.6 6.5 1.9M12 6.5c1.8-1.3 4-1.9 6.5-1.9v13.8c-2.5 0-4.7.6-6.5 1.9M12 6.5v13.8" />
++      <path d="M8 8.7h2M8 11.6h2M14 8.7h2M14 11.6h2" />
++    </Icon>
++  );
++}
++
+ export function IconScale(props: IconProps) {
+   return (
+     <Icon {...props}>
+diff --git a/frontend/components/ui/Sidebar.tsx b/frontend/components/ui/Sidebar.tsx
+index 4077998..c5f3914 100644
+--- a/frontend/components/ui/Sidebar.tsx
++++ b/frontend/components/ui/Sidebar.tsx
+@@ -18,6 +18,7 @@ import {
+   IconStaff,
+   IconAccounting,
+   IconJournal,
++  IconLedgerBook,
+   IconScale,
+   IconTrend,
+   IconBalanceSheet,
+@@ -66,6 +67,7 @@ const BASE_SECTIONS: NavSection[] = [
+     icon: IconAccounting,
+     items: [
+       { href: "/chart-of-accounts", label: "Chart of accounts", icon: IconAccounting },
++      { href: "/ledger", label: "General ledger", icon: IconLedgerBook },
+       { href: "/journal", label: "Journal entries", icon: IconJournal },
+       { href: "/trial-balance", label: "Trial balance", icon: IconScale },
+       { href: "/profit-and-loss", label: "Profit & loss", icon: IconTrend },
