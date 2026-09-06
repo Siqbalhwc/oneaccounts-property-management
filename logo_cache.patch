@@ -1,0 +1,62 @@
+diff --git a/backend/app/services/invoice_pdf.py b/backend/app/services/invoice_pdf.py
+index 12e71fb..df82f8b 100644
+--- a/backend/app/services/invoice_pdf.py
++++ b/backend/app/services/invoice_pdf.py
+@@ -6,6 +6,7 @@ drifting apart over time.
+ """
+ 
+ import io
++import time
+ import urllib.request
+ from datetime import date, timedelta
+ 
+@@ -173,6 +174,39 @@ def _fmt_pkr(amount: float) -> str:
+     return f"Rs {amount:,.0f}"
+ 
+ 
++# In-process cache for company logos, keyed by logo_url. Every invoice PDF
++# used to re-download the logo from the internet, live, on every render --
++# this keeps the bytes around for a few minutes so back-to-back invoices
++# for the same company don't each pay that network round trip again.
++#
++# Bounded to 5 minutes on purpose: logo_url itself does NOT change when a
++# company re-uploads a new logo (company_settings.py uploads to the same
++# storage path with upsert=true), so without an expiry, a cached image
++# could otherwise keep showing the OLD logo indefinitely within one warm
++# server process after a re-upload. 5 minutes means a freshly changed logo
++# shows up again quickly, without needing a redeploy. This cache only
++# lives in memory for as long as one server process stays warm -- it's a
++# pure speed optimization, cleared automatically on the next cold start,
++# never a source of stale data across deploys.
++_LOGO_CACHE_TTL_SECONDS = 300
++_logo_cache: dict[str, tuple[bytes, float]] = {}
++
++
++def _fetch_logo_bytes(logo_url: str) -> bytes:
++    """Returns the logo's raw bytes, from cache if fetched within the last
++    5 minutes, otherwise downloads it fresh (same urllib call, same 5s
++    timeout, same exceptions as before -- the caller's existing
++    try/except around this is unaffected)."""
++    cached = _logo_cache.get(logo_url)
++    now = time.monotonic()
++    if cached and (now - cached[1]) < _LOGO_CACHE_TTL_SECONDS:
++        return cached[0]
++    with urllib.request.urlopen(logo_url, timeout=5) as resp:
++        data = resp.read()
++    _logo_cache[logo_url] = (data, now)
++    return data
++
++
+ def render_invoice_pdf(ctx: dict) -> bytes:
+     """Renders the branded invoice PDF (bytes) from a context dict built by
+     fetch_invoice_context(). Pure function -- no I/O beyond the logo fetch."""
+@@ -209,8 +243,7 @@ def render_invoice_pdf(ctx: dict) -> bytes:
+     text_x = 20 * mm
+     if company.get("logo_url"):
+         try:
+-            with urllib.request.urlopen(company["logo_url"], timeout=5) as resp:
+-                logo_bytes = io.BytesIO(resp.read())
++            logo_bytes = io.BytesIO(_fetch_logo_bytes(company["logo_url"]))
+             logo_size = 22 * mm
+             c.drawImage(
+                 ImageReader(logo_bytes),
