@@ -1,0 +1,116 @@
+diff --git a/frontend/app/(dashboard)/ledger/page.tsx b/frontend/app/(dashboard)/ledger/page.tsx
+index 579c97b..91dabaa 100644
+--- a/frontend/app/(dashboard)/ledger/page.tsx
++++ b/frontend/app/(dashboard)/ledger/page.tsx
+@@ -2,10 +2,13 @@
+ 
+ import { Suspense, useEffect, useMemo, useState } from "react";
+ import { useSearchParams, useRouter } from "next/navigation";
++import { Printer } from "lucide-react";
+ import { Card, DataTable } from "@/components/ui/Card";
++import { Button } from "@/components/ui/Button";
+ import { Field, Input, Select } from "@/components/ui/Field";
+ import { SearchableSelect } from "@/components/ui/SearchableSelect";
+-import { api, fetchPdfBlob, Building } from "@/lib/api";
++import { PrintHeader } from "@/components/ui/PrintHeader";
++import { api, fetchPdfBlob, Building, Company } from "@/lib/api";
+ 
+ type Account = { id: string; code: string; name: string; account_type?: string };
+ type Owner = { id: string; name: string };
+@@ -37,6 +40,7 @@ function LedgerPageInner() {
+   const ownerIdParam = searchParams.get("owner_id");
+ 
+   const [accounts, setAccounts] = useState<Account[] | null>(null);
++  const [company, setCompany] = useState<Company | null>(null);
+   const [owner, setOwner] = useState<Owner | null>(null);
+   const [buildings, setBuildings] = useState<Building[] | null>(null);
+   const [rooms, setRooms] = useState<Room[] | null>(null);
+@@ -80,6 +84,7 @@ function LedgerPageInner() {
+     api.get<Building[]>("/buildings").then(setBuildings);
+     api.get<Room[]>("/rooms").then(setRooms);
+     api.get<Tenant[]>("/tenants").then(setTenants);
++    api.get<Company>("/company/me").then(setCompany);
+   }, []);
+ 
+   useEffect(() => {
+@@ -155,16 +160,44 @@ function LedgerPageInner() {
+ 
+   return (
+     <div className="space-y-6">
+-      <div>
+-        {accountId && (
+-          <button onClick={() => router.back()} className="text-sm text-accent hover:underline mb-2">
+-            ← Back
+-          </button>
+-        )}
+-        <h1 className="text-2xl font-display font-semibold">General ledger</h1>
+-        <p className="text-sm text-ink/55 mt-1">
+-          Full movement on any account, in date order — click a figure to open its source document.
+-        </p>
++      <PrintHeader company={company} reportTitle="General Ledger" />
++
++      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
++        <div>
++          {accountId && (
++            <button onClick={() => router.back()} className="text-sm text-accent hover:underline mb-2 no-print">
++              ← Back
++            </button>
++          )}
++          <h1 className="text-2xl font-display font-semibold">General ledger</h1>
++          <p className="text-sm text-ink/55 mt-1">
++            Full movement on any account, in date order — click a figure to open its source document.
++          </p>
++          {/* Print-only summary, since the filter card itself is hidden when printing. */}
++          <p className="hidden print:block text-sm font-medium mt-2">
++            {account ? `${account.code} · ${account.name}` : ""}
++            {owner && ` — ${owner.name}`}
++            {selectedTenant && ` — ${selectedTenant.full_name}`}
++            {buildingId && ` — ${buildings?.find((b) => b.id === buildingId)?.name ?? ""}`}
++            {roomId && ` — Apt ${roomsForBuilding.find((r) => r.id === roomId)?.room_number ?? ""}`}
++            {(dateFrom || dateTo) && ` — ${dateFrom || "start"} to ${dateTo || "today"}`}
++          </p>
++        </div>
++        <div className="flex items-end gap-3 no-print">
++          <div className="w-36">
++            <Field label="From">
++              <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
++            </Field>
++          </div>
++          <div className="w-36">
++            <Field label="To">
++              <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
++            </Field>
++          </div>
++          <Button variant="secondary" onClick={() => window.print()} disabled={!accountId}>
++            <Printer size={15} /> Print
++          </Button>
++        </div>
+       </div>
+ 
+       {error && (
+@@ -178,8 +211,8 @@ function LedgerPageInner() {
+         </Card>
+       )}
+ 
+-      <Card>
+-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
++      <Card className="no-print">
++        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+           <Field label="Account">
+             <SearchableSelect
+               value={accountId}
+@@ -188,14 +221,6 @@ function LedgerPageInner() {
+               placeholder="Search accounts…"
+             />
+           </Field>
+-          <Field label="From">
+-            <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+-          </Field>
+-          <Field label="To">
+-            <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+-          </Field>
+-        </div>
+-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
+           <Field label="Building">
+             <Select value={buildingId} onChange={(e) => handleBuildingChange(e.target.value)}>
+               <option value="">All buildings</option>
