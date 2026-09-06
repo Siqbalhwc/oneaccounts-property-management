@@ -40,12 +40,18 @@ class LeaseCreate(BaseModel):
     security_deposit_date_received: date
     # Whether the deposit was actually collected at signing. When False,
     # no journal entry is posted here -- use POST
-    # /security-deposits/{id}/receive later, once it's actually collected.
-    security_deposit_is_received: bool = True
-    # Which asset account (Bank, Cash, etc.) the deposit was received into --
-    # required only when security_deposit_is_received is True and the
-    # deposit amount is > 0. Different companies use different account
-    # codes, so this is never assumed/hardcoded.
+    # /security-deposits/{id}/payments later, once it's actually collected
+    # (from the Leases list page, which also prints the receipt). Defaults
+    # to False now -- the New Lease form only asks for the deposit amount;
+    # receiving it, picking which bank/cash account it landed in, and
+    # printing the receipt all happen in one place (Leases list) instead of
+    # being split across two forms.
+    security_deposit_is_received: bool = False
+    # Which account the deposit was received into -- required only when
+    # security_deposit_is_received is True and the deposit amount is > 0.
+    # Different companies use different account codes, so this is never
+    # assumed/hardcoded. Kept for API completeness/backward compatibility;
+    # the New Lease form itself no longer sends this as True.
     security_deposit_received_account_id: str | None = None
 
 

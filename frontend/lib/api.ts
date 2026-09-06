@@ -170,6 +170,7 @@ export type Account = {
   name: string;
   account_type: string;
   transfers_to_owner: boolean;
+  is_cash_or_bank?: boolean;
 };
 
 export type SecurityDeposit = {

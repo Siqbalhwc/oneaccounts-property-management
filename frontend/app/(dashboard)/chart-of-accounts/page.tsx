@@ -14,6 +14,7 @@ type Account = {
   account_type: "asset" | "liability" | "equity" | "income" | "expense";
   transfers_to_owner: boolean;
   is_system: boolean;
+  is_cash_or_bank: boolean;
 };
 
 type ChargeMapping = {
@@ -43,7 +44,9 @@ export default function ChartOfAccountsPage() {
     name: "",
     account_type: "expense" as Account["account_type"],
     transfers_to_owner: false,
+    is_cash_or_bank: false,
   });
+  const [togglingId, setTogglingId] = useState<string | null>(null);
 
   const [mappingModalOpen, setMappingModalOpen] = useState(false);
   const [mappingSaving, setMappingSaving] = useState(false);
@@ -74,12 +77,24 @@ export default function ChartOfAccountsPage() {
     try {
       await api.post("/chart-of-accounts", accountForm);
       setAccountModalOpen(false);
-      setAccountForm({ code: "", name: "", account_type: "expense", transfers_to_owner: false });
+      setAccountForm({ code: "", name: "", account_type: "expense", transfers_to_owner: false, is_cash_or_bank: false });
       load();
     } catch (err: any) {
       setAccountError(err.message);
     } finally {
       setAccountSaving(false);
+    }
+  }
+
+  async function toggleCashOrBank(account: Account) {
+    setTogglingId(account.id);
+    try {
+      await api.patch(`/chart-of-accounts/${account.id}`, { is_cash_or_bank: !account.is_cash_or_bank });
+      load();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setTogglingId(null);
     }
   }
 
@@ -139,6 +154,24 @@ export default function ChartOfAccountsPage() {
                   <span className="text-stamp-green text-xs font-medium">Yes</span>
                 ) : (
                   <span className="text-ink/40 text-xs">No</span>
+                ),
+            },
+            {
+              header: "Bank / cash account",
+              accessor: (a) =>
+                a.account_type === "asset" ? (
+                  <button
+                    onClick={() => toggleCashOrBank(a)}
+                    disabled={togglingId !== null}
+                    className={`text-xs font-medium hover:underline ${
+                      a.is_cash_or_bank ? "text-stamp-green" : "text-ink/40"
+                    }`}
+                    title="Click to toggle"
+                  >
+                    {togglingId === a.id ? "…" : a.is_cash_or_bank ? "Yes" : "No"}
+                  </button>
+                ) : (
+                  <span className="text-ink/25 text-xs">—</span>
                 ),
             },
             {
@@ -221,6 +254,20 @@ export default function ChartOfAccountsPage() {
               <option value="yes">Yes — belongs to the building owner</option>
             </Select>
           </Field>
+          {accountForm.account_type === "asset" && (
+            <Field
+              label="Bank / cash account?"
+              hint="Only for a real bank or cash account — not for Accounts Receivable or similar. Controls whether this shows up as an option when recording money actually received (e.g. a security deposit receipt)."
+            >
+              <Select
+                value={accountForm.is_cash_or_bank ? "yes" : "no"}
+                onChange={(e) => setAccountForm({ ...accountForm, is_cash_or_bank: e.target.value === "yes" })}
+              >
+                <option value="no">No</option>
+                <option value="yes">Yes</option>
+              </Select>
+            </Field>
+          )}
           {accountError && <p className="text-sm text-stamp-red">{accountError}</p>}
           <div className="flex justify-end gap-2 pt-2">
             <Button type="button" variant="ghost" onClick={() => setAccountModalOpen(false)}>

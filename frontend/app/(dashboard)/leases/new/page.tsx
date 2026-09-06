@@ -63,8 +63,6 @@ export default function NewLeasePage() {
   // Step 3
   const [depositAmount, setDepositAmount] = useState("");
   const [depositDate, setDepositDate] = useState("");
-  const [depositReceived, setDepositReceived] = useState(true);
-  const [depositAccountId, setDepositAccountId] = useState("");
 
   // The deposit date field visually defaults to the lease start date, but
   // the underlying STATE stayed empty until this fired -- which is exactly
@@ -206,8 +204,8 @@ export default function NewLeasePage() {
         })),
         security_deposit_amount: parseFloat(depositAmount || "0"),
         security_deposit_date_received: depositDate || startDate,
-        security_deposit_is_received: depositReceived,
-        security_deposit_received_account_id: depositReceived ? depositAccountId || null : null,
+        security_deposit_is_received: false,
+        security_deposit_received_account_id: null,
       });
       router.push("/leases");
     } catch (e: any) {
@@ -241,10 +239,7 @@ export default function NewLeasePage() {
     return { isProrated, days: daysActive, daysInMonth, lineItems, currentSubtotal };
   }
   const billPreview = computeBillPreview();
-  const canProceedStep2 =
-    depositAmount &&
-    depositDate &&
-    (parseFloat(depositAmount) <= 0 || !depositReceived || depositAccountId);
+  const canProceedStep2 = depositAmount && depositDate;
 
   return (
     <div className="max-w-5xl space-y-6">
@@ -449,49 +444,13 @@ export default function NewLeasePage() {
                 placeholder="e.g. 40000"
               />
             </Field>
-            <Field label={depositReceived ? "Date received" : "Date agreed"} hint="Defaults to the lease start date.">
+            <Field label="Date agreed" hint="Defaults to the lease start date.">
               <Input
                 type="date"
                 value={depositDate || startDate}
                 onChange={(e) => setDepositDate(e.target.value)}
               />
             </Field>
-
-            {parseFloat(depositAmount || "0") > 0 && (
-              <Field label="Has the deposit been collected yet?">
-                <div className="flex gap-2">
-                  <Button
-                    type="button"
-                    variant={depositReceived ? "primary" : "secondary"}
-                    onClick={() => setDepositReceived(true)}
-                  >
-                    Yes, collected already
-                  </Button>
-                  <Button
-                    type="button"
-                    variant={!depositReceived ? "primary" : "secondary"}
-                    onClick={() => setDepositReceived(false)}
-                  >
-                    Not yet — pending
-                  </Button>
-                </div>
-              </Field>
-            )}
-
-            {parseFloat(depositAmount || "0") > 0 && depositReceived && (
-              <Field label="Received into which account?">
-                <Select value={depositAccountId} onChange={(e) => setDepositAccountId(e.target.value)}>
-                  <option value="">Select account…</option>
-                  {accounts
-                    .filter((a) => a.account_type === "asset")
-                    .map((a) => (
-                      <option key={a.id} value={a.id}>
-                        {a.code} · {a.name}
-                      </option>
-                    ))}
-                </Select>
-              </Field>
-            )}
 
             <p className="text-xs text-ink/50">
               This is held against damages or unpaid dues, and refunded (in full
@@ -500,9 +459,7 @@ export default function NewLeasePage() {
               per-lease, so every deposit in your books stays on one
               consistent, auditable liability line.
               {parseFloat(depositAmount || "0") > 0 &&
-                (depositReceived
-                  ? " The journal entry for this deposit posts immediately, once the lease is created."
-                  : " Since it isn't collected yet, nothing posts to your books until you record the receipt later from the Leases list.")}
+                " Nothing posts to your books yet — once you've actually collected it, record the receipt (and pick which bank/cash account it landed in) from the Leases list, which also prints the receipt for the tenant."}
             </p>
           </div>
         )}
@@ -579,22 +536,11 @@ export default function NewLeasePage() {
                   {formatPkr(parseFloat(depositAmount || "0"))}
                 </p>
                 {parseFloat(depositAmount || "0") > 0 && (
-                  <span
-                    className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                      depositReceived
-                        ? "bg-accent/10 text-accent"
-                        : "bg-brass/15 text-brass"
-                    }`}
-                  >
-                    {depositReceived ? "Received" : "Pending"}
+                  <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-brass/15 text-brass">
+                    Pending
                   </span>
                 )}
               </div>
-              {parseFloat(depositAmount || "0") > 0 && depositReceived && depositAccountId && (
-                <p className="text-xs text-ink/45 mt-1">
-                  Into: {accounts.find((a) => a.id === depositAccountId)?.name ?? ""}
-                </p>
-              )}
             </div>
 
             <div className="bg-brass/10 border border-brass/25 rounded-card px-3 py-2.5 flex items-center justify-between">

@@ -17,6 +17,13 @@ class AccountCreate(BaseModel):
     name: str
     account_type: str  # asset | liability | equity | income | expense
     transfers_to_owner: bool = False
+    # Only meaningful for asset accounts -- marks this as an actual bank/cash
+    # account, as opposed to e.g. Accounts Receivable (also an asset, but
+    # never a place money is actually "received into"). Used to build the
+    # account picker on the security deposit receipt flow (and similar
+    # "which account did this land in" pickers), so a receivable-type
+    # account can never be mistaken for a real bank/cash account there.
+    is_cash_or_bank: bool = False
 
 
 @router.post("", status_code=201)
@@ -34,6 +41,35 @@ def create_account(
     row["company_id"] = company_id
     row["is_system"] = False
     res = supabase.table("chart_of_accounts").insert(row).execute()
+    return res.data[0]
+
+
+class AccountUpdate(BaseModel):
+    is_cash_or_bank: bool
+
+
+@router.patch("/{account_id}")
+def update_account(
+    account_id: str,
+    payload: AccountUpdate,
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+    _perm: None = Depends(require_owner_or_admin),
+):
+    """Toggles the is_cash_or_bank flag on an existing account (including
+    system-seeded ones like the default Bank/Cash account) -- the only
+    field this exposes for now, since every other account property is
+    fixed once created (changing an account's type/code after it already
+    has posted journal lines would make historical reports inconsistent)."""
+    res = (
+        supabase.table("chart_of_accounts")
+        .update({"is_cash_or_bank": payload.is_cash_or_bank})
+        .eq("id", account_id)
+        .eq("company_id", company_id)
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Account not found")
     return res.data[0]
 
 

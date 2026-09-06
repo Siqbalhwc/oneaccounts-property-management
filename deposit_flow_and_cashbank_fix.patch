@@ -1,0 +1,370 @@
+diff --git a/011_schema_patch_026_cash_bank_account_flag.sql b/011_schema_patch_026_cash_bank_account_flag.sql
+new file mode 100644
+index 0000000..7cb4bce
+--- /dev/null
++++ b/011_schema_patch_026_cash_bank_account_flag.sql
+@@ -0,0 +1,36 @@
++-- ============================================================================
++-- PATCH 026 — chart_of_accounts.is_cash_or_bank
++-- ============================================================================
++-- "Which account was this actually received into" pickers (security
++-- deposit receipts, and similar spots) were filtering by account_type =
++-- 'asset' -- but Accounts Receivable is ALSO an asset account, so it was
++-- selectable there even though it's never a place real money lands. This
++-- adds an explicit flag so only genuine bank/cash accounts show up in
++-- those pickers, regardless of what else is filed under "asset".
++--
++-- Defaults to false for every existing account (nothing is auto-guessed)
++-- except the single account with code '1000', which every company's
++-- default chart of accounts seeds as "Bank / Cash" -- that one is safe to
++-- flag automatically since it's a fixed part of the standard setup, not a
++-- user-typed custom account. Any other real bank accounts you've since
++-- added yourself (a specific bank name, a JazzCash account, etc.) need a
++-- one-time manual flip -- from the Chart of Accounts page, click "No"
++-- next to that account under "Bank / cash account" to mark it "Yes".
++-- This is deliberate: guessing from account codes/names for anything
++-- beyond the fixed default risks flagging the wrong account in some
++-- company's custom chart, which would be worse than asking you to confirm
++-- it once yourself.
++-- ============================================================================
++
++alter table public.chart_of_accounts
++  add column if not exists is_cash_or_bank boolean not null default false;
++
++update public.chart_of_accounts
++set is_cash_or_bank = true
++where code = '1000' and is_system = true;
++
++-- Confirm: lists every account now flagged as a bank/cash account, per company.
++select company_id, code, name, is_cash_or_bank
++from public.chart_of_accounts
++where is_cash_or_bank = true
++order by company_id, code;
+diff --git a/backend/app/routers/chart_of_accounts.py b/backend/app/routers/chart_of_accounts.py
+index de495b5..76e1a65 100644
+--- a/backend/app/routers/chart_of_accounts.py
++++ b/backend/app/routers/chart_of_accounts.py
+@@ -17,6 +17,13 @@ class AccountCreate(BaseModel):
+     name: str
+     account_type: str  # asset | liability | equity | income | expense
+     transfers_to_owner: bool = False
++    # Only meaningful for asset accounts -- marks this as an actual bank/cash
++    # account, as opposed to e.g. Accounts Receivable (also an asset, but
++    # never a place money is actually "received into"). Used to build the
++    # account picker on the security deposit receipt flow (and similar
++    # "which account did this land in" pickers), so a receivable-type
++    # account can never be mistaken for a real bank/cash account there.
++    is_cash_or_bank: bool = False
+ 
+ 
+ @router.post("", status_code=201)
+@@ -37,6 +44,35 @@ def create_account(
+     return res.data[0]
+ 
+ 
++class AccountUpdate(BaseModel):
++    is_cash_or_bank: bool
++
++
++@router.patch("/{account_id}")
++def update_account(
++    account_id: str,
++    payload: AccountUpdate,
++    supabase: Client = Depends(get_supabase),
++    company_id: str = Depends(get_current_company_id),
++    _perm: None = Depends(require_owner_or_admin),
++):
++    """Toggles the is_cash_or_bank flag on an existing account (including
++    system-seeded ones like the default Bank/Cash account) -- the only
++    field this exposes for now, since every other account property is
++    fixed once created (changing an account's type/code after it already
++    has posted journal lines would make historical reports inconsistent)."""
++    res = (
++        supabase.table("chart_of_accounts")
++        .update({"is_cash_or_bank": payload.is_cash_or_bank})
++        .eq("id", account_id)
++        .eq("company_id", company_id)
++        .execute()
++    )
++    if not res.data:
++        raise HTTPException(status_code=404, detail="Account not found")
++    return res.data[0]
++
++
+ class ChargeMapping(BaseModel):
+     label: str
+     account_id: str
+diff --git a/backend/app/routers/leases.py b/backend/app/routers/leases.py
+index d56b613..e0e5712 100644
+--- a/backend/app/routers/leases.py
++++ b/backend/app/routers/leases.py
+@@ -40,12 +40,18 @@ class LeaseCreate(BaseModel):
+     security_deposit_date_received: date
+     # Whether the deposit was actually collected at signing. When False,
+     # no journal entry is posted here -- use POST
+-    # /security-deposits/{id}/receive later, once it's actually collected.
+-    security_deposit_is_received: bool = True
+-    # Which asset account (Bank, Cash, etc.) the deposit was received into --
+-    # required only when security_deposit_is_received is True and the
+-    # deposit amount is > 0. Different companies use different account
+-    # codes, so this is never assumed/hardcoded.
++    # /security-deposits/{id}/payments later, once it's actually collected
++    # (from the Leases list page, which also prints the receipt). Defaults
++    # to False now -- the New Lease form only asks for the deposit amount;
++    # receiving it, picking which bank/cash account it landed in, and
++    # printing the receipt all happen in one place (Leases list) instead of
++    # being split across two forms.
++    security_deposit_is_received: bool = False
++    # Which account the deposit was received into -- required only when
++    # security_deposit_is_received is True and the deposit amount is > 0.
++    # Different companies use different account codes, so this is never
++    # assumed/hardcoded. Kept for API completeness/backward compatibility;
++    # the New Lease form itself no longer sends this as True.
+     security_deposit_received_account_id: str | None = None
+ 
+ 
+diff --git a/frontend/app/(dashboard)/chart-of-accounts/page.tsx b/frontend/app/(dashboard)/chart-of-accounts/page.tsx
+index 4c698ca..6eda068 100644
+--- a/frontend/app/(dashboard)/chart-of-accounts/page.tsx
++++ b/frontend/app/(dashboard)/chart-of-accounts/page.tsx
+@@ -14,6 +14,7 @@ type Account = {
+   account_type: "asset" | "liability" | "equity" | "income" | "expense";
+   transfers_to_owner: boolean;
+   is_system: boolean;
++  is_cash_or_bank: boolean;
+ };
+ 
+ type ChargeMapping = {
+@@ -43,7 +44,9 @@ export default function ChartOfAccountsPage() {
+     name: "",
+     account_type: "expense" as Account["account_type"],
+     transfers_to_owner: false,
++    is_cash_or_bank: false,
+   });
++  const [togglingId, setTogglingId] = useState<string | null>(null);
+ 
+   const [mappingModalOpen, setMappingModalOpen] = useState(false);
+   const [mappingSaving, setMappingSaving] = useState(false);
+@@ -74,7 +77,7 @@ export default function ChartOfAccountsPage() {
+     try {
+       await api.post("/chart-of-accounts", accountForm);
+       setAccountModalOpen(false);
+-      setAccountForm({ code: "", name: "", account_type: "expense", transfers_to_owner: false });
++      setAccountForm({ code: "", name: "", account_type: "expense", transfers_to_owner: false, is_cash_or_bank: false });
+       load();
+     } catch (err: any) {
+       setAccountError(err.message);
+@@ -83,6 +86,18 @@ export default function ChartOfAccountsPage() {
+     }
+   }
+ 
++  async function toggleCashOrBank(account: Account) {
++    setTogglingId(account.id);
++    try {
++      await api.patch(`/chart-of-accounts/${account.id}`, { is_cash_or_bank: !account.is_cash_or_bank });
++      load();
++    } catch (err: any) {
++      setError(err.message);
++    } finally {
++      setTogglingId(null);
++    }
++  }
++
+   function openMappingModal() {
+     setMappingError(null);
+     setMappingForm({ label: "", account_id: accounts?.[0]?.id ?? "" });
+@@ -141,6 +156,24 @@ export default function ChartOfAccountsPage() {
+                   <span className="text-ink/40 text-xs">No</span>
+                 ),
+             },
++            {
++              header: "Bank / cash account",
++              accessor: (a) =>
++                a.account_type === "asset" ? (
++                  <button
++                    onClick={() => toggleCashOrBank(a)}
++                    disabled={togglingId !== null}
++                    className={`text-xs font-medium hover:underline ${
++                      a.is_cash_or_bank ? "text-stamp-green" : "text-ink/40"
++                    }`}
++                    title="Click to toggle"
++                  >
++                    {togglingId === a.id ? "…" : a.is_cash_or_bank ? "Yes" : "No"}
++                  </button>
++                ) : (
++                  <span className="text-ink/25 text-xs">—</span>
++                ),
++            },
+             {
+               header: "",
+               accessor: (a) =>
+@@ -221,6 +254,20 @@ export default function ChartOfAccountsPage() {
+               <option value="yes">Yes — belongs to the building owner</option>
+             </Select>
+           </Field>
++          {accountForm.account_type === "asset" && (
++            <Field
++              label="Bank / cash account?"
++              hint="Only for a real bank or cash account — not for Accounts Receivable or similar. Controls whether this shows up as an option when recording money actually received (e.g. a security deposit receipt)."
++            >
++              <Select
++                value={accountForm.is_cash_or_bank ? "yes" : "no"}
++                onChange={(e) => setAccountForm({ ...accountForm, is_cash_or_bank: e.target.value === "yes" })}
++              >
++                <option value="no">No</option>
++                <option value="yes">Yes</option>
++              </Select>
++            </Field>
++          )}
+           {accountError && <p className="text-sm text-stamp-red">{accountError}</p>}
+           <div className="flex justify-end gap-2 pt-2">
+             <Button type="button" variant="ghost" onClick={() => setAccountModalOpen(false)}>
+diff --git a/frontend/app/(dashboard)/leases/new/page.tsx b/frontend/app/(dashboard)/leases/new/page.tsx
+index c3cb9a4..591e760 100644
+--- a/frontend/app/(dashboard)/leases/new/page.tsx
++++ b/frontend/app/(dashboard)/leases/new/page.tsx
+@@ -63,8 +63,6 @@ export default function NewLeasePage() {
+   // Step 3
+   const [depositAmount, setDepositAmount] = useState("");
+   const [depositDate, setDepositDate] = useState("");
+-  const [depositReceived, setDepositReceived] = useState(true);
+-  const [depositAccountId, setDepositAccountId] = useState("");
+ 
+   // The deposit date field visually defaults to the lease start date, but
+   // the underlying STATE stayed empty until this fired -- which is exactly
+@@ -206,8 +204,8 @@ export default function NewLeasePage() {
+         })),
+         security_deposit_amount: parseFloat(depositAmount || "0"),
+         security_deposit_date_received: depositDate || startDate,
+-        security_deposit_is_received: depositReceived,
+-        security_deposit_received_account_id: depositReceived ? depositAccountId || null : null,
++        security_deposit_is_received: false,
++        security_deposit_received_account_id: null,
+       });
+       router.push("/leases");
+     } catch (e: any) {
+@@ -241,10 +239,7 @@ export default function NewLeasePage() {
+     return { isProrated, days: daysActive, daysInMonth, lineItems, currentSubtotal };
+   }
+   const billPreview = computeBillPreview();
+-  const canProceedStep2 =
+-    depositAmount &&
+-    depositDate &&
+-    (parseFloat(depositAmount) <= 0 || !depositReceived || depositAccountId);
++  const canProceedStep2 = depositAmount && depositDate;
+ 
+   return (
+     <div className="max-w-5xl space-y-6">
+@@ -449,7 +444,7 @@ export default function NewLeasePage() {
+                 placeholder="e.g. 40000"
+               />
+             </Field>
+-            <Field label={depositReceived ? "Date received" : "Date agreed"} hint="Defaults to the lease start date.">
++            <Field label="Date agreed" hint="Defaults to the lease start date.">
+               <Input
+                 type="date"
+                 value={depositDate || startDate}
+@@ -457,42 +452,6 @@ export default function NewLeasePage() {
+               />
+             </Field>
+ 
+-            {parseFloat(depositAmount || "0") > 0 && (
+-              <Field label="Has the deposit been collected yet?">
+-                <div className="flex gap-2">
+-                  <Button
+-                    type="button"
+-                    variant={depositReceived ? "primary" : "secondary"}
+-                    onClick={() => setDepositReceived(true)}
+-                  >
+-                    Yes, collected already
+-                  </Button>
+-                  <Button
+-                    type="button"
+-                    variant={!depositReceived ? "primary" : "secondary"}
+-                    onClick={() => setDepositReceived(false)}
+-                  >
+-                    Not yet — pending
+-                  </Button>
+-                </div>
+-              </Field>
+-            )}
+-
+-            {parseFloat(depositAmount || "0") > 0 && depositReceived && (
+-              <Field label="Received into which account?">
+-                <Select value={depositAccountId} onChange={(e) => setDepositAccountId(e.target.value)}>
+-                  <option value="">Select account…</option>
+-                  {accounts
+-                    .filter((a) => a.account_type === "asset")
+-                    .map((a) => (
+-                      <option key={a.id} value={a.id}>
+-                        {a.code} · {a.name}
+-                      </option>
+-                    ))}
+-                </Select>
+-              </Field>
+-            )}
+-
+             <p className="text-xs text-ink/50">
+               This is held against damages or unpaid dues, and refunded (in full
+               or in part) once the lease ends. It always posts to the same
+@@ -500,9 +459,7 @@ export default function NewLeasePage() {
+               per-lease, so every deposit in your books stays on one
+               consistent, auditable liability line.
+               {parseFloat(depositAmount || "0") > 0 &&
+-                (depositReceived
+-                  ? " The journal entry for this deposit posts immediately, once the lease is created."
+-                  : " Since it isn't collected yet, nothing posts to your books until you record the receipt later from the Leases list.")}
++                " Nothing posts to your books yet — once you've actually collected it, record the receipt (and pick which bank/cash account it landed in) from the Leases list, which also prints the receipt for the tenant."}
+             </p>
+           </div>
+         )}
+@@ -579,22 +536,11 @@ export default function NewLeasePage() {
+                   {formatPkr(parseFloat(depositAmount || "0"))}
+                 </p>
+                 {parseFloat(depositAmount || "0") > 0 && (
+-                  <span
+-                    className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+-                      depositReceived
+-                        ? "bg-accent/10 text-accent"
+-                        : "bg-brass/15 text-brass"
+-                    }`}
+-                  >
+-                    {depositReceived ? "Received" : "Pending"}
++                  <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-brass/15 text-brass">
++                    Pending
+                   </span>
+                 )}
+               </div>
+-              {parseFloat(depositAmount || "0") > 0 && depositReceived && depositAccountId && (
+-                <p className="text-xs text-ink/45 mt-1">
+-                  Into: {accounts.find((a) => a.id === depositAccountId)?.name ?? ""}
+-                </p>
+-              )}
+             </div>
+ 
+             <div className="bg-brass/10 border border-brass/25 rounded-card px-3 py-2.5 flex items-center justify-between">
+diff --git a/frontend/app/(dashboard)/leases/page.tsx b/frontend/app/(dashboard)/leases/page.tsx
+index 041f23d..71e8cc6 100644
+--- a/frontend/app/(dashboard)/leases/page.tsx
++++ b/frontend/app/(dashboard)/leases/page.tsx
+@@ -922,7 +922,7 @@ export default function LeasesPage() {
+             <Select required value={receiveAccountId} onChange={(e) => setReceiveAccountId(e.target.value)}>
+               <option value="">Select account…</option>
+               {accounts
+-                .filter((a) => a.account_type === "asset")
++                .filter((a) => a.is_cash_or_bank)
+                 .map((a) => (
+                   <option key={a.id} value={a.id}>
+                     {a.code} · {a.name}
+diff --git a/frontend/lib/api.ts b/frontend/lib/api.ts
+index 7bed975..87f6992 100644
+--- a/frontend/lib/api.ts
++++ b/frontend/lib/api.ts
+@@ -170,6 +170,7 @@ export type Account = {
+   name: string;
+   account_type: string;
+   transfers_to_owner: boolean;
++  is_cash_or_bank?: boolean;
+ };
+ 
+ export type SecurityDeposit = {

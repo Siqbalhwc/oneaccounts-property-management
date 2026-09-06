@@ -922,7 +922,7 @@ export default function LeasesPage() {
             <Select required value={receiveAccountId} onChange={(e) => setReceiveAccountId(e.target.value)}>
               <option value="">Select account…</option>
               {accounts
-                .filter((a) => a.account_type === "asset")
+                .filter((a) => a.is_cash_or_bank)
                 .map((a) => (
                   <option key={a.id} value={a.id}>
                     {a.code} · {a.name}
