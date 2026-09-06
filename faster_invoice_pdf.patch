@@ -1,0 +1,129 @@
+diff --git a/backend/app/services/invoice_pdf.py b/backend/app/services/invoice_pdf.py
+index 7e6acd7..12e71fb 100644
+--- a/backend/app/services/invoice_pdf.py
++++ b/backend/app/services/invoice_pdf.py
+@@ -16,7 +16,7 @@ from reportlab.lib.utils import ImageReader
+ from reportlab.pdfgen import canvas
+ from supabase import Client
+ 
+-from app.services.ledger import get_account_id, get_tenant_account_balance_as_of
++from app.services.ledger import get_tenant_account_balance_as_of
+ 
+ 
+ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
+@@ -52,26 +52,49 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
+       A lease with no security_deposits row at all but a manual entry
+       against 2100 still shows the held amount -- just without that
+       breakdown, since there's no agreed figure to compare it to."""
+-    invoice = supabase.table("invoices").select("*").eq("id", invoice_id).single().execute()
+-    if not invoice.data:
++    # As of schema_patch_027 (part 2), the invoice/lease/tenant/room/
++    # building/company chain below is fetched as ONE query instead of 6
++    # sequential ones, using the foreign keys that already exist in the
++    # database (invoices.lease_id, invoices.company_id, leases.tenant_id,
++    # leases.room_id, rooms.building_id -- confirmed via
++    # information_schema before writing this) so Postgres does the join
++    # instead of the backend doing it one round trip at a time. Every
++    # field fetched, and every value in it, is identical to before -- this
++    # only changes HOW MANY requests it takes to fetch them.
++    invoice_res = (
++        supabase.table("invoices")
++        .select(
++            "*, "
++            "lease:leases(*, tenant:tenants(*), room:rooms(*, building:buildings(*))), "
++            "company:companies(*)"
++        )
++        .eq("id", invoice_id)
++        .single()
++        .execute()
++    )
++    if not invoice_res.data:
+         raise HTTPException(status_code=404, detail="Invoice not found")
+-    invoice = invoice.data
++    invoice = invoice_res.data
++    lease = invoice.pop("lease")
++    company = invoice.pop("company")
++    tenant = lease.pop("tenant")
++    room = lease.pop("room")
++    building = room.pop("building")
+ 
+     line_items = (
+         supabase.table("invoice_line_items").select("*").eq("invoice_id", invoice_id).execute().data
+     )
+-    lease = supabase.table("leases").select("*").eq("id", invoice["lease_id"]).single().execute().data
+-    tenant = supabase.table("tenants").select("*").eq("id", lease["tenant_id"]).single().execute().data
+-    room = supabase.table("rooms").select("*").eq("id", lease["room_id"]).single().execute().data
+-    building = (
+-        supabase.table("buildings").select("*").eq("id", room["building_id"]).single().execute().data
+-    )
+-    company = (
+-        supabase.table("companies").select("*").eq("id", invoice["company_id"]).single().execute().data
+-    )
+ 
++    # Same idea for the deposit + its payments: one query with the payments
++    # embedded, instead of two sequential ones. Only the first deposit row
++    # is ever used below (matching the original behaviour exactly), so its
++    # embedded payments are the only ones that matter here.
+     deposit_rows = (
+-        supabase.table("security_deposits").select("*").eq("lease_id", lease["id"]).execute().data
++        supabase.table("security_deposits")
++        .select("*, security_deposit_payments(amount)")
++        .eq("lease_id", lease["id"])
++        .execute()
++        .data
+     )
+     deposit = deposit_rows[0] if deposit_rows else None
+ 
+@@ -79,22 +102,29 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
+     deposit_pending = 0.0
+     deposit_refunded = 0.0
+     if deposit:
+-        payment_rows = (
+-            supabase.table("security_deposit_payments")
+-            .select("amount")
+-            .eq("security_deposit_id", deposit["id"])
+-            .execute()
+-            .data
+-        )
++        payment_rows = deposit.pop("security_deposit_payments", []) or []
+         deposit_paid = sum(float(p["amount"]) for p in payment_rows)
+         deposit_refunded = float(deposit.get("amount_refunded") or 0)
+         deposit_pending = max(float(deposit["amount_received"]) - deposit_paid, 0.0)
+ 
++    # Both system account lookups (2100, 1100) batched into one query
++    # instead of two separate get_account_id() calls -- same result either
++    # way: a missing code just means that account isn't set up for this
++    # company yet, so it's treated exactly as get_account_id()'s ValueError
++    # was treated before (silently None, PDF still renders without that
++    # line).
++    coa_rows = (
++        supabase.table("chart_of_accounts")
++        .select("id, code")
++        .eq("company_id", invoice["company_id"])
++        .in_("code", ["1100", "2100"])
++        .execute()
++        .data
++    )
++    coa_by_code = {r["code"]: r["id"] for r in coa_rows}
++
+     deposit_held_ledger = 0.0
+-    try:
+-        deposits_held_id = get_account_id(supabase, invoice["company_id"], "2100")
+-    except ValueError:
+-        deposits_held_id = None  # chart of accounts isn't fully set up for this company yet
++    deposits_held_id = coa_by_code.get("2100")
+     if deposits_held_id:
+         # Tenant-wide, NOT scoped to just this lease_id -- same reasoning
+         # as the Accounts Receivable "Opening balance" below (and Receive
+@@ -109,10 +139,7 @@ def fetch_invoice_context(supabase: Client, invoice_id: str) -> dict:
+         )
+ 
+     opening_balance = None
+-    try:
+-        ar_account_id = get_account_id(supabase, invoice["company_id"], "1100")
+-    except ValueError:
+-        ar_account_id = None  # chart of accounts isn't fully set up for this company yet
++    ar_account_id = coa_by_code.get("1100")
+     if ar_account_id:
+         cutoff = date.fromisoformat(str(invoice["invoice_month"])) - timedelta(days=1)
+         opening_balance = get_tenant_account_balance_as_of(
