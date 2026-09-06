@@ -142,15 +142,26 @@ def get_lease_receivable_summary(
         .data
     )
 
-    outstanding = []
-    for inv in invoices:
-        payments = (
+    # One batched query for every outstanding invoice's payments, instead
+    # of one query per invoice in a loop -- same filter (eq invoice_id),
+    # same settled/balance math per invoice, just fetched together so this
+    # doesn't grow slower the more unpaid invoices a lease has.
+    invoice_ids = [inv["id"] for inv in invoices]
+    payments_by_invoice: dict[str, list] = {}
+    if invoice_ids:
+        all_payments = (
             supabase.table("payments")
-            .select("amount, discount_amount")
-            .eq("invoice_id", inv["id"])
+            .select("invoice_id, amount, discount_amount")
+            .in_("invoice_id", invoice_ids)
             .execute()
             .data
         )
+        for p in all_payments:
+            payments_by_invoice.setdefault(p["invoice_id"], []).append(p)
+
+    outstanding = []
+    for inv in invoices:
+        payments = payments_by_invoice.get(inv["id"], [])
         settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in payments)
         balance = round(float(inv["total_amount"]) - settled, 2)
         if balance > 0.01:

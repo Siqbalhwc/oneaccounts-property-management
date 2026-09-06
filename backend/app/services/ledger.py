@@ -83,40 +83,31 @@ def get_tenant_account_balance_as_of(
 ) -> float:
     """
     A tenant's balance in one account (e.g. Accounts Receivable) as of a
-    given date, inclusive -- computed the SAME direct way as
-    get_lease_receivable_balance above (sum journal_lines by account +
-    tenant, straight off the tables), just also filtered to entries dated
-    on or before as_of_date. Deliberately does NOT go through the
-    general_ledger() database function -- that function lives only in the
-    live Supabase database, not as a file in this repo (see reference doc,
-    known open item #4), so a mismatch between what this code expects and
-    that function's real signature fails silently and invisibly on every
-    invoice. This version has no such dependency.
+    given date, inclusive -- same definition as before (sum journal_lines
+    by account + tenant, filtered to entries dated on or before
+    as_of_date, debits minus credits, rounded to 2dp).
+
+    As of schema_patch_027, the actual summing happens inside Postgres via
+    the tenant_account_balance_as_of() SQL function (one round trip)
+    instead of pulling every one of the company's journal entry IDs into
+    Python first and then re-querying journal_lines with that ID list (two
+    round trips, and the first one grows with the company's ENTIRE
+    history, not just this tenant's). The SQL function applies the exact
+    same filters (company_id, account_id, tenant_id, entry_date <=
+    as_of_date) and the exact same debits-minus-credits math -- see
+    012_schema_patch_027_fast_tenant_balance.sql. Every caller of this
+    function is unaffected: same name, same parameters, same return value.
     """
-    entries = (
-        supabase.table("journal_entries")
-        .select("id")
-        .eq("company_id", company_id)
-        .lte("entry_date", as_of_date)
-        .execute()
-        .data
-    )
-    entry_ids = [e["id"] for e in entries]
-    if not entry_ids:
-        return 0.0
-    lines = (
-        supabase.table("journal_lines")
-        .select("direction, amount")
-        .eq("company_id", company_id)
-        .eq("account_id", account_id)
-        .eq("tenant_id", tenant_id)
-        .in_("journal_entry_id", entry_ids)
-        .execute()
-        .data
-    )
-    debits = sum(float(l["amount"]) for l in lines if l["direction"] == "debit")
-    credits = sum(float(l["amount"]) for l in lines if l["direction"] == "credit")
-    return round(debits - credits, 2)
+    result = supabase.rpc(
+        "tenant_account_balance_as_of",
+        {
+            "p_company_id": company_id,
+            "p_account_id": account_id,
+            "p_tenant_id": tenant_id,
+            "p_as_of_date": as_of_date,
+        },
+    ).execute()
+    return float(result.data or 0.0)
 
 
 def get_tenant_account_balance(

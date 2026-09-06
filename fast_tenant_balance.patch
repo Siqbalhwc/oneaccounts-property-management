@@ -1,0 +1,105 @@
+diff --git a/backend/app/routers/leases.py b/backend/app/routers/leases.py
+index e0e5712..33b5878 100644
+--- a/backend/app/routers/leases.py
++++ b/backend/app/routers/leases.py
+@@ -142,15 +142,26 @@ def get_lease_receivable_summary(
+         .data
+     )
+ 
+-    outstanding = []
+-    for inv in invoices:
+-        payments = (
++    # One batched query for every outstanding invoice's payments, instead
++    # of one query per invoice in a loop -- same filter (eq invoice_id),
++    # same settled/balance math per invoice, just fetched together so this
++    # doesn't grow slower the more unpaid invoices a lease has.
++    invoice_ids = [inv["id"] for inv in invoices]
++    payments_by_invoice: dict[str, list] = {}
++    if invoice_ids:
++        all_payments = (
+             supabase.table("payments")
+-            .select("amount, discount_amount")
+-            .eq("invoice_id", inv["id"])
++            .select("invoice_id, amount, discount_amount")
++            .in_("invoice_id", invoice_ids)
+             .execute()
+             .data
+         )
++        for p in all_payments:
++            payments_by_invoice.setdefault(p["invoice_id"], []).append(p)
++
++    outstanding = []
++    for inv in invoices:
++        payments = payments_by_invoice.get(inv["id"], [])
+         settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in payments)
+         balance = round(float(inv["total_amount"]) - settled, 2)
+         if balance > 0.01:
+diff --git a/backend/app/services/ledger.py b/backend/app/services/ledger.py
+index 4996926..b514a8a 100644
+--- a/backend/app/services/ledger.py
++++ b/backend/app/services/ledger.py
+@@ -83,40 +83,31 @@ def get_tenant_account_balance_as_of(
+ ) -> float:
+     """
+     A tenant's balance in one account (e.g. Accounts Receivable) as of a
+-    given date, inclusive -- computed the SAME direct way as
+-    get_lease_receivable_balance above (sum journal_lines by account +
+-    tenant, straight off the tables), just also filtered to entries dated
+-    on or before as_of_date. Deliberately does NOT go through the
+-    general_ledger() database function -- that function lives only in the
+-    live Supabase database, not as a file in this repo (see reference doc,
+-    known open item #4), so a mismatch between what this code expects and
+-    that function's real signature fails silently and invisibly on every
+-    invoice. This version has no such dependency.
++    given date, inclusive -- same definition as before (sum journal_lines
++    by account + tenant, filtered to entries dated on or before
++    as_of_date, debits minus credits, rounded to 2dp).
++
++    As of schema_patch_027, the actual summing happens inside Postgres via
++    the tenant_account_balance_as_of() SQL function (one round trip)
++    instead of pulling every one of the company's journal entry IDs into
++    Python first and then re-querying journal_lines with that ID list (two
++    round trips, and the first one grows with the company's ENTIRE
++    history, not just this tenant's). The SQL function applies the exact
++    same filters (company_id, account_id, tenant_id, entry_date <=
++    as_of_date) and the exact same debits-minus-credits math -- see
++    012_schema_patch_027_fast_tenant_balance.sql. Every caller of this
++    function is unaffected: same name, same parameters, same return value.
+     """
+-    entries = (
+-        supabase.table("journal_entries")
+-        .select("id")
+-        .eq("company_id", company_id)
+-        .lte("entry_date", as_of_date)
+-        .execute()
+-        .data
+-    )
+-    entry_ids = [e["id"] for e in entries]
+-    if not entry_ids:
+-        return 0.0
+-    lines = (
+-        supabase.table("journal_lines")
+-        .select("direction, amount")
+-        .eq("company_id", company_id)
+-        .eq("account_id", account_id)
+-        .eq("tenant_id", tenant_id)
+-        .in_("journal_entry_id", entry_ids)
+-        .execute()
+-        .data
+-    )
+-    debits = sum(float(l["amount"]) for l in lines if l["direction"] == "debit")
+-    credits = sum(float(l["amount"]) for l in lines if l["direction"] == "credit")
+-    return round(debits - credits, 2)
++    result = supabase.rpc(
++        "tenant_account_balance_as_of",
++        {
++            "p_company_id": company_id,
++            "p_account_id": account_id,
++            "p_tenant_id": tenant_id,
++            "p_as_of_date": as_of_date,
++        },
++    ).execute()
++    return float(result.data or 0.0)
+ 
+ 
+ def get_tenant_account_balance(
