@@ -1,0 +1,243 @@
+diff --git a/backend/app/routers/leases.py b/backend/app/routers/leases.py
+index 33b5878..e97c541 100644
+--- a/backend/app/routers/leases.py
++++ b/backend/app/routers/leases.py
+@@ -99,9 +99,74 @@ class SettlementFinalize(BaseModel):
+ # Endpoints
+ # ---------------------------------------------------------------------------
+ @router.get("")
+-def list_leases(supabase: Client = Depends(get_supabase)):
+-    res = supabase.table("leases").select("*").order("created_at", desc=True).execute()
+-    return res.data
++def list_leases(
++    search: Optional[str] = None,
++    limit: Optional[int] = None,
++    offset: int = 0,
++    supabase: Client = Depends(get_supabase),
++):
++    """
++    IMPORTANT for backward compatibility: several other screens (Dashboard,
++    Invoices, Tenants, Reports, New Lease) call GET /leases with NO
++    parameters at all, expecting the full list back as a plain array, and
++    do their own client-side lookups against it. Calling with no `limit`
++    reproduces that exact original query and exact original response
++    shape -- nothing about those callers changes.
++
++    Only when `limit` is explicitly passed (currently just the Leases list
++    page, schema_patch_027 follow-up) does this paginate, and the response
++    shape changes to {"items": [...], "total": N} so the caller can render
++    page numbers -- a new, additive path that doesn't touch the old one.
++
++    Search matches the exact same two things the old client-side search on
++    the Leases page did (tenant name, or building name / room number),
++    just resolved server-side instead of after loading every lease into
++    the browser. One narrow, disclosed difference: the old version matched
++    against the single combined string "{building} — {room}" as one
++    substring; this matches building name OR room number independently.
++    Functionally identical for every realistic search -- the only case
++    that could differ is a search term deliberately spanning across the
++    " — " separator itself, which was intentionally avoided by not writing
++    the combined string in a single filter, to keep every filter here as a
++    simple, well-tested single-column lookup rather than a hand-built
++    multi-table pattern that couldn't be verified without a live query.
++    """
++    if limit is None:
++        res = supabase.table("leases").select("*").order("created_at", desc=True).execute()
++        return res.data
++
++    query = supabase.table("leases").select("*", count="exact")
++
++    term = (search or "").strip()
++    if term:
++        pattern = f"%{term}%"
++        tenant_ids = [
++            t["id"] for t in supabase.table("tenants").select("id").ilike("full_name", pattern).execute().data
++        ]
++        building_ids = [
++            b["id"] for b in supabase.table("buildings").select("id").ilike("name", pattern).execute().data
++        ]
++        room_ids = {
++            r["id"] for r in supabase.table("rooms").select("id").ilike("room_number", pattern).execute().data
++        }
++        if building_ids:
++            room_ids |= {
++                r["id"]
++                for r in supabase.table("rooms").select("id").in_("building_id", building_ids).execute().data
++            }
++
++        or_parts = []
++        if tenant_ids:
++            or_parts.append(f"tenant_id.in.({','.join(tenant_ids)})")
++        if room_ids:
++            or_parts.append(f"room_id.in.({','.join(room_ids)})")
++        if not or_parts:
++            return {"items": [], "total": 0}
++        query = query.or_(",".join(or_parts))
++
++    query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
++    res = query.execute()
++    return {"items": res.data, "total": res.count}
+ 
+ 
+ @router.get("/{lease_id}")
+diff --git a/frontend/app/(dashboard)/leases/page.tsx b/frontend/app/(dashboard)/leases/page.tsx
+index 71e8cc6..6509ecc 100644
+--- a/frontend/app/(dashboard)/leases/page.tsx
++++ b/frontend/app/(dashboard)/leases/page.tsx
+@@ -24,6 +24,19 @@ type LeaseCharge = {
+ 
+ type ChargeMapping = { label: string; account_id: string };
+ 
++function pageNumbers(current: number, total: number): (number | "…")[] {
++  const delta = 1;
++  const range: (number | "…")[] = [];
++  for (let i = Math.max(2, current - delta); i <= Math.min(total - 1, current + delta); i++) range.push(i);
++  if (typeof range[0] === "number" && (range[0] as number) - 2 > 1) range.unshift("…");
++  const last = range[range.length - 1];
++  if (typeof last === "number" && total - 1 - last > 1) range.push("…");
++  range.unshift(1);
++  if (total > 1) range.push(total);
++  return Array.from(new Set(range));
++}
++
++
+ export default function LeasesPage() {
+   const [leases, setLeases] = useState<Lease[] | null>(null);
+   const [tenants, setTenants] = useState<Tenant[] | null>(null);
+@@ -113,12 +126,39 @@ export default function LeasesPage() {
+     api.get<SecurityDeposit[]>("/security-deposits").then(setDeposits);
+   }
+ 
++  // Page size fixed at 50, matching the mockup you approved. `total` is
++  // the server's count of ALL matching leases (not just this page), used
++  // for the "Showing X-Y of N" label and to compute how many page number
++  // buttons to render.
++  const PAGE_SIZE = 50;
++  const [totalLeases, setTotalLeases] = useState(0);
++  const [page, setPage] = useState(1);
++
++  function fetchLeases(targetPage: number, targetSearch: string) {
++    const offset = (targetPage - 1) * PAGE_SIZE;
++    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
++    const trimmed = targetSearch.trim();
++    if (trimmed) params.set("search", trimmed);
++    api.get<{ items: Lease[]; total: number }>(`/leases?${params.toString()}`).then((res) => {
++      setLeases(res.items);
++      setTotalLeases(res.total);
++    });
++  }
++
++  // Used after saving an edit (see handleSave below) -- refreshes
++  // whichever page/search you're currently looking at, same as before
++  // this just refreshed the one full list.
+   function load() {
+-    api.get<Lease[]>("/leases").then(setLeases);
++    fetchLeases(page, search);
++  }
++
++  function goToPage(p: number) {
++    setPage(p);
++    fetchLeases(p, search);
+   }
+ 
+   useEffect(() => {
+-    load();
++    fetchLeases(1, "");
+     loadDeposits();
+     api.get<Tenant[]>("/tenants").then(setTenants);
+     api.get<Room[]>("/rooms").then(setRooms);
+@@ -127,6 +167,19 @@ export default function LeasesPage() {
+     api.get<ChargeMapping[]>("/chart-of-accounts/charge-mappings").then(setChargeMappings);
+   }, []);
+ 
++  // Debounced server-side search: waits 300ms after typing stops before
++  // asking the backend (so it's not firing a request on every keystroke),
++  // then always jumps back to page 1 -- same as the old client-side
++  // filter always searching the whole list regardless of scroll position.
++  useEffect(() => {
++    const t = setTimeout(() => {
++      setPage(1);
++      fetchLeases(1, search);
++    }, 300);
++    return () => clearTimeout(t);
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [search]);
++
+   const tenantName = (id: string) => tenants?.find((t) => t.id === id)?.full_name ?? "—";
+   const roomAndBuilding = (roomId: string) => {
+     const room = rooms?.find((r) => r.id === roomId);
+@@ -326,14 +379,12 @@ export default function LeasesPage() {
+     }
+   }
+ 
+-  const filteredLeases = (leases ?? []).filter((l) => {
+-    if (!search.trim()) return true;
+-    const q = search.trim().toLowerCase();
+-    return (
+-      tenantName(l.tenant_id).toLowerCase().includes(q) ||
+-      roomAndBuilding(l.room_id).toLowerCase().includes(q)
+-    );
+-  });
++  // Search now happens on the server (see the debounced effect above) --
++  // `leases` is already exactly the filtered, current-page result.
++  const filteredLeases = leases ?? [];
++  const totalPages = Math.max(1, Math.ceil(totalLeases / PAGE_SIZE));
++  const rangeStart = totalLeases === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
++  const rangeEnd = Math.min(page * PAGE_SIZE, totalLeases);
+ 
+   async function handleSave(e: React.FormEvent) {
+     e.preventDefault();
+@@ -606,6 +657,53 @@ export default function LeasesPage() {
+             </table>
+           </div>
+         )}
++
++        {totalLeases > 0 && (
++          <div className="flex items-center justify-between mt-4 pt-3.5 border-t border-border flex-wrap gap-2.5 no-print">
++            <p className="text-xs text-ink/55">
++              {search.trim() ? (
++                <>Showing page <span className="font-medium text-ink">{page}</span> of results for "{search.trim()}"</>
++              ) : (
++                <>Showing <span className="font-medium text-ink">{rangeStart}–{rangeEnd}</span> of{" "}
++                <span className="font-medium text-ink">{totalLeases.toLocaleString()}</span> leases</>
++              )}
++            </p>
++            <div className="flex items-center gap-1">
++              <button
++                type="button"
++                onClick={() => goToPage(page - 1)}
++                disabled={page === 1}
++                className="px-2.5 h-7 text-xs font-medium rounded-card border border-border text-ink/75 disabled:opacity-35 disabled:cursor-not-allowed hover:bg-ink/5 disabled:hover:bg-transparent"
++              >
++                ‹ Prev
++              </button>
++              {pageNumbers(page, totalPages).map((p, i) =>
++                p === "…" ? (
++                  <span key={`ellipsis-${i}`} className="px-1 text-xs text-ink/35">…</span>
++                ) : (
++                  <button
++                    key={p}
++                    type="button"
++                    onClick={() => goToPage(p as number)}
++                    className={`min-w-[28px] h-7 px-2 text-xs font-medium rounded-card ${
++                      p === page ? "bg-ledger text-paper-card" : "text-ink/65 hover:bg-ink/5"
++                    }`}
++                  >
++                    {p}
++                  </button>
++                )
++              )}
++              <button
++                type="button"
++                onClick={() => goToPage(page + 1)}
++                disabled={page === totalPages}
++                className="px-2.5 h-7 text-xs font-medium rounded-card border border-border text-ink/75 disabled:opacity-35 disabled:cursor-not-allowed hover:bg-ink/5 disabled:hover:bg-transparent"
++              >
++                Next ›
++              </button>
++            </div>
++          </div>
++        )}
+       </Card>
+ 
+       <Modal open={editModalOpen} onClose={() => setEditModalOpen(false)} title="Edit lease" size="full">

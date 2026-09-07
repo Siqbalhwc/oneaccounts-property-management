@@ -24,6 +24,19 @@ type LeaseCharge = {
 
 type ChargeMapping = { label: string; account_id: string };
 
+function pageNumbers(current: number, total: number): (number | "…")[] {
+  const delta = 1;
+  const range: (number | "…")[] = [];
+  for (let i = Math.max(2, current - delta); i <= Math.min(total - 1, current + delta); i++) range.push(i);
+  if (typeof range[0] === "number" && (range[0] as number) - 2 > 1) range.unshift("…");
+  const last = range[range.length - 1];
+  if (typeof last === "number" && total - 1 - last > 1) range.push("…");
+  range.unshift(1);
+  if (total > 1) range.push(total);
+  return Array.from(new Set(range));
+}
+
+
 export default function LeasesPage() {
   const [leases, setLeases] = useState<Lease[] | null>(null);
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
@@ -113,12 +126,39 @@ export default function LeasesPage() {
     api.get<SecurityDeposit[]>("/security-deposits").then(setDeposits);
   }
 
+  // Page size fixed at 50, matching the mockup you approved. `total` is
+  // the server's count of ALL matching leases (not just this page), used
+  // for the "Showing X-Y of N" label and to compute how many page number
+  // buttons to render.
+  const PAGE_SIZE = 50;
+  const [totalLeases, setTotalLeases] = useState(0);
+  const [page, setPage] = useState(1);
+
+  function fetchLeases(targetPage: number, targetSearch: string) {
+    const offset = (targetPage - 1) * PAGE_SIZE;
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
+    const trimmed = targetSearch.trim();
+    if (trimmed) params.set("search", trimmed);
+    api.get<{ items: Lease[]; total: number }>(`/leases?${params.toString()}`).then((res) => {
+      setLeases(res.items);
+      setTotalLeases(res.total);
+    });
+  }
+
+  // Used after saving an edit (see handleSave below) -- refreshes
+  // whichever page/search you're currently looking at, same as before
+  // this just refreshed the one full list.
   function load() {
-    api.get<Lease[]>("/leases").then(setLeases);
+    fetchLeases(page, search);
+  }
+
+  function goToPage(p: number) {
+    setPage(p);
+    fetchLeases(p, search);
   }
 
   useEffect(() => {
-    load();
+    fetchLeases(1, "");
     loadDeposits();
     api.get<Tenant[]>("/tenants").then(setTenants);
     api.get<Room[]>("/rooms").then(setRooms);
@@ -126,6 +166,19 @@ export default function LeasesPage() {
     api.get<Account[]>("/chart-of-accounts").then(setAccounts);
     api.get<ChargeMapping[]>("/chart-of-accounts/charge-mappings").then(setChargeMappings);
   }, []);
+
+  // Debounced server-side search: waits 300ms after typing stops before
+  // asking the backend (so it's not firing a request on every keystroke),
+  // then always jumps back to page 1 -- same as the old client-side
+  // filter always searching the whole list regardless of scroll position.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setPage(1);
+      fetchLeases(1, search);
+    }, 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
 
   const tenantName = (id: string) => tenants?.find((t) => t.id === id)?.full_name ?? "—";
   const roomAndBuilding = (roomId: string) => {
@@ -326,14 +379,12 @@ export default function LeasesPage() {
     }
   }
 
-  const filteredLeases = (leases ?? []).filter((l) => {
-    if (!search.trim()) return true;
-    const q = search.trim().toLowerCase();
-    return (
-      tenantName(l.tenant_id).toLowerCase().includes(q) ||
-      roomAndBuilding(l.room_id).toLowerCase().includes(q)
-    );
-  });
+  // Search now happens on the server (see the debounced effect above) --
+  // `leases` is already exactly the filtered, current-page result.
+  const filteredLeases = leases ?? [];
+  const totalPages = Math.max(1, Math.ceil(totalLeases / PAGE_SIZE));
+  const rangeStart = totalLeases === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+  const rangeEnd = Math.min(page * PAGE_SIZE, totalLeases);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -604,6 +655,53 @@ export default function LeasesPage() {
                 })}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {totalLeases > 0 && (
+          <div className="flex items-center justify-between mt-4 pt-3.5 border-t border-border flex-wrap gap-2.5 no-print">
+            <p className="text-xs text-ink/55">
+              {search.trim() ? (
+                <>Showing page <span className="font-medium text-ink">{page}</span> of results for "{search.trim()}"</>
+              ) : (
+                <>Showing <span className="font-medium text-ink">{rangeStart}–{rangeEnd}</span> of{" "}
+                <span className="font-medium text-ink">{totalLeases.toLocaleString()}</span> leases</>
+              )}
+            </p>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => goToPage(page - 1)}
+                disabled={page === 1}
+                className="px-2.5 h-7 text-xs font-medium rounded-card border border-border text-ink/75 disabled:opacity-35 disabled:cursor-not-allowed hover:bg-ink/5 disabled:hover:bg-transparent"
+              >
+                ‹ Prev
+              </button>
+              {pageNumbers(page, totalPages).map((p, i) =>
+                p === "…" ? (
+                  <span key={`ellipsis-${i}`} className="px-1 text-xs text-ink/35">…</span>
+                ) : (
+                  <button
+                    key={p}
+                    type="button"
+                    onClick={() => goToPage(p as number)}
+                    className={`min-w-[28px] h-7 px-2 text-xs font-medium rounded-card ${
+                      p === page ? "bg-ledger text-paper-card" : "text-ink/65 hover:bg-ink/5"
+                    }`}
+                  >
+                    {p}
+                  </button>
+                )
+              )}
+              <button
+                type="button"
+                onClick={() => goToPage(page + 1)}
+                disabled={page === totalPages}
+                className="px-2.5 h-7 text-xs font-medium rounded-card border border-border text-ink/75 disabled:opacity-35 disabled:cursor-not-allowed hover:bg-ink/5 disabled:hover:bg-transparent"
+              >
+                Next ›
+              </button>
+            </div>
           </div>
         )}
       </Card>

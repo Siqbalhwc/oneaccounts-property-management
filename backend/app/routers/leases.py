@@ -99,9 +99,74 @@ class SettlementFinalize(BaseModel):
 # Endpoints
 # ---------------------------------------------------------------------------
 @router.get("")
-def list_leases(supabase: Client = Depends(get_supabase)):
-    res = supabase.table("leases").select("*").order("created_at", desc=True).execute()
-    return res.data
+def list_leases(
+    search: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    supabase: Client = Depends(get_supabase),
+):
+    """
+    IMPORTANT for backward compatibility: several other screens (Dashboard,
+    Invoices, Tenants, Reports, New Lease) call GET /leases with NO
+    parameters at all, expecting the full list back as a plain array, and
+    do their own client-side lookups against it. Calling with no `limit`
+    reproduces that exact original query and exact original response
+    shape -- nothing about those callers changes.
+
+    Only when `limit` is explicitly passed (currently just the Leases list
+    page, schema_patch_027 follow-up) does this paginate, and the response
+    shape changes to {"items": [...], "total": N} so the caller can render
+    page numbers -- a new, additive path that doesn't touch the old one.
+
+    Search matches the exact same two things the old client-side search on
+    the Leases page did (tenant name, or building name / room number),
+    just resolved server-side instead of after loading every lease into
+    the browser. One narrow, disclosed difference: the old version matched
+    against the single combined string "{building} — {room}" as one
+    substring; this matches building name OR room number independently.
+    Functionally identical for every realistic search -- the only case
+    that could differ is a search term deliberately spanning across the
+    " — " separator itself, which was intentionally avoided by not writing
+    the combined string in a single filter, to keep every filter here as a
+    simple, well-tested single-column lookup rather than a hand-built
+    multi-table pattern that couldn't be verified without a live query.
+    """
+    if limit is None:
+        res = supabase.table("leases").select("*").order("created_at", desc=True).execute()
+        return res.data
+
+    query = supabase.table("leases").select("*", count="exact")
+
+    term = (search or "").strip()
+    if term:
+        pattern = f"%{term}%"
+        tenant_ids = [
+            t["id"] for t in supabase.table("tenants").select("id").ilike("full_name", pattern).execute().data
+        ]
+        building_ids = [
+            b["id"] for b in supabase.table("buildings").select("id").ilike("name", pattern).execute().data
+        ]
+        room_ids = {
+            r["id"] for r in supabase.table("rooms").select("id").ilike("room_number", pattern).execute().data
+        }
+        if building_ids:
+            room_ids |= {
+                r["id"]
+                for r in supabase.table("rooms").select("id").in_("building_id", building_ids).execute().data
+            }
+
+        or_parts = []
+        if tenant_ids:
+            or_parts.append(f"tenant_id.in.({','.join(tenant_ids)})")
+        if room_ids:
+            or_parts.append(f"room_id.in.({','.join(room_ids)})")
+        if not or_parts:
+            return {"items": [], "total": 0}
+        query = query.or_(",".join(or_parts))
+
+    query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
+    res = query.execute()
+    return {"items": res.data, "total": res.count}
 
 
 @router.get("/{lease_id}")
