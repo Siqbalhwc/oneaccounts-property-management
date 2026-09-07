@@ -80,7 +80,7 @@ export default function NewLeasePage() {
     api.get<Room[]>("/rooms").then(setRooms);
     api.get<Account[]>("/chart-of-accounts").then(setAccounts);
     api.get<ChargeMapping[]>("/chart-of-accounts/charge-mappings").then(setChargeMappings);
-    api.get<LeaseSummary[]>("/leases").then(setExistingLeases);
+    api.get<LeaseSummary[]>("/leases?status=active").then(setExistingLeases);
   }, []);
 
   const vacantRooms = rooms.filter(

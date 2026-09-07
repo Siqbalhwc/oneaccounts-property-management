@@ -95,11 +95,15 @@ export default function ReportsPage() {
     api.get<SecurityDeposit[]>("/security-deposits").then(setDeposits);
   }
 
+  // leases is now built up from two targeted fetches instead of one fetch
+  // of every lease the company has ever had: the selected tenant's leases
+  // (for the Tenant Statement tab) and the leases referenced by whichever
+  // security deposits are loaded (for the Security Deposits tab) -- the
+  // two effects below, merged into the same `leases` state.
   useEffect(() => {
     api.get<PnlRow[]>("/reports/pnl").then(setPnl);
     api.get<Company>("/company/me").then(setCompany);
     loadDeposits();
-    api.get<Lease[]>("/leases").then(setLeases);
     api.get<Tenant[]>("/tenants").then((data) => {
       setTenants(data);
       setSelectedTenantId((prev) => prev || data[0]?.id || "");
@@ -115,6 +119,25 @@ export default function ReportsPage() {
       .get<{ billed_to_tenants: CollectionVsExpenseRow[] }>("/reports/collection-vs-expense")
       .then((res) => setCollectionVsExpense(res.billed_to_tenants ?? []));
   }, []);
+
+  function mergeLeasesIn(newOnes: Lease[]) {
+    setLeases((prev) => {
+      const merged = new Map((prev ?? []).map((l) => [l.id, l]));
+      newOnes.forEach((l) => merged.set(l.id, l));
+      return Array.from(merged.values());
+    });
+  }
+
+  useEffect(() => {
+    if (!selectedTenantId) return;
+    api.get<Lease[]>(`/leases?tenant_id=${selectedTenantId}`).then(mergeLeasesIn);
+  }, [selectedTenantId]);
+
+  useEffect(() => {
+    const leaseIds = Array.from(new Set((deposits ?? []).map((d) => d.lease_id).filter(Boolean)));
+    if (leaseIds.length === 0) return;
+    api.get<Lease[]>(`/leases?ids=${leaseIds.join(",")}`).then(mergeLeasesIn);
+  }, [deposits]);
 
   const tenantName = (id: string) => tenants?.find((t) => t.id === id)?.full_name ?? "—";
   const leaseById = (id: string) => leases?.find((l) => l.id === id);

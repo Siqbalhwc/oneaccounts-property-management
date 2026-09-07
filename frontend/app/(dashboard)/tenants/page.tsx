@@ -54,7 +54,7 @@ export default function TenantsPage() {
   useEffect(load, [showArchived]);
   useEffect(() => {
     api.get<Profile>("/profile/me").then((p) => setMyRole(p.role));
-    api.get<Lease[]>("/leases").then(setLeases);
+    api.get<Lease[]>("/leases?status=active").then(setLeases);
     api.get<Room[]>("/rooms").then(setRooms);
     api.get<Building[]>("/buildings").then(setBuildings);
   }, []);

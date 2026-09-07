@@ -137,8 +137,12 @@ export default function DashboardHome() {
     api.get<Room[]>("/rooms").then(setRooms).catch((err) => setError(err.message));
   }, []);
 
+  // Just the most recent leases, for the "New lease created" activity
+  // feed below, which only ever shows the last handful anyway. The other
+  // effect further down (after invoices load) tops this up with whichever
+  // specific leases the awaiting-payment / top-buildings figures need.
   useEffect(() => {
-    api.get<Lease[]>("/leases").then(setLeases).catch((err) => setError(err.message));
+    api.get<Lease[]>("/leases?recent=15").then(setLeases).catch((err) => setError(err.message));
   }, []);
 
   useEffect(() => {
@@ -167,6 +171,25 @@ export default function DashboardHome() {
       .catch((err) => setError(err.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Tops up `leases` with whichever specific leases the loaded invoices
+  // reference (for awaitingPayment / topBuildings below) -- same lookups
+  // as before, just fetching only the leases actually needed instead of
+  // every lease the company has ever had.
+  useEffect(() => {
+    const leaseIds = Array.from(new Set((invoices ?? []).map((i) => i.lease_id).filter(Boolean)));
+    if (leaseIds.length === 0) return;
+    api
+      .get<Lease[]>(`/leases?ids=${leaseIds.join(",")}`)
+      .then((invoiceLeases) => {
+        setLeases((prev) => {
+          const merged = new Map((prev ?? []).map((l) => [l.id, l]));
+          invoiceLeases.forEach((l) => merged.set(l.id, l));
+          return Array.from(merged.values());
+        });
+      })
+      .catch((err) => setError(err.message));
+  }, [invoices]);
 
   useEffect(() => {
     api

@@ -1,0 +1,279 @@
+diff --git a/backend/app/routers/leases.py b/backend/app/routers/leases.py
+index e97c541..0c1a00c 100644
+--- a/backend/app/routers/leases.py
++++ b/backend/app/routers/leases.py
+@@ -103,20 +103,41 @@ def list_leases(
+     search: Optional[str] = None,
+     limit: Optional[int] = None,
+     offset: int = 0,
++    status: Optional[str] = None,
++    tenant_id: Optional[str] = None,
++    ids: Optional[str] = None,
++    recent: Optional[int] = None,
+     supabase: Client = Depends(get_supabase),
+ ):
+     """
+-    IMPORTANT for backward compatibility: several other screens (Dashboard,
+-    Invoices, Tenants, Reports, New Lease) call GET /leases with NO
+-    parameters at all, expecting the full list back as a plain array, and
+-    do their own client-side lookups against it. Calling with no `limit`
+-    reproduces that exact original query and exact original response
+-    shape -- nothing about those callers changes.
+-
+-    Only when `limit` is explicitly passed (currently just the Leases list
+-    page, schema_patch_027 follow-up) does this paginate, and the response
+-    shape changes to {"items": [...], "total": N} so the caller can render
+-    page numbers -- a new, additive path that doesn't touch the old one.
++    IMPORTANT for backward compatibility: calling this with NO parameters
++    at all reproduces the exact original query and exact original response
++    shape (a plain array, every lease, newest first) -- nothing about that
++    default path changes here.
++
++    `limit` (+ optional `offset`/`search`) triggers the paginated mode used
++    by the Leases list page -- unchanged from before, response shape
++    {"items": [...], "total": N}.
++
++    NEW in this round -- three more optional, independent filters, only
++    used when `limit` is NOT given, so they stay in the "plain array"
++    response shape the other screens already expect:
++      - status: exact match (e.g. status=active) -- Tenants page and New
++        Lease page only ever cared about active leases; they used to
++        pull every lease ever created just to check this one field.
++      - tenant_id: only that one tenant's leases -- e.g. Reports page's
++        tenant statement, which used to scan the whole company's leases
++        for one tenant's handful of them.
++      - ids: comma-separated lease IDs -- for screens that already know
++        exactly which leases they need (e.g. the leases referenced by a
++        specific set of invoices or deposits already loaded), instead of
++        pulling every lease and filtering client-side.
++      - recent: just the N most recent (same "newest first" ordering as
++        always), as a plain array -- e.g. a dashboard activity feed that
++        only ever displayed the last handful anyway.
++    These can combine (all AND'd together) but in practice each caller
++    only uses one. None of them existed before, so there's no prior
++    behavior to preserve for them -- purely additive.
+ 
+     Search matches the exact same two things the old client-side search on
+     the Leases page did (tenant name, or building name / room number),
+@@ -131,14 +152,21 @@ def list_leases(
+     simple, well-tested single-column lookup rather than a hand-built
+     multi-table pattern that couldn't be verified without a live query.
+     """
+-    if limit is None:
++    if limit is None and status is None and tenant_id is None and ids is None and recent is None and not search:
+         res = supabase.table("leases").select("*").order("created_at", desc=True).execute()
+         return res.data
+ 
+-    query = supabase.table("leases").select("*", count="exact")
+-
+-    term = (search or "").strip()
+-    if term:
++    def apply_simple_filters(q):
++        if status:
++            q = q.eq("status", status)
++        if tenant_id:
++            q = q.eq("tenant_id", tenant_id)
++        if ids:
++            id_list = [i.strip() for i in ids.split(",") if i.strip()]
++            q = q.in_("id", id_list)
++        return q
++
++    def apply_search(q, term: str):
+         pattern = f"%{term}%"
+         tenant_ids = [
+             t["id"] for t in supabase.table("tenants").select("id").ilike("full_name", pattern).execute().data
+@@ -154,19 +182,38 @@ def list_leases(
+                 r["id"]
+                 for r in supabase.table("rooms").select("id").in_("building_id", building_ids).execute().data
+             }
+-
+         or_parts = []
+         if tenant_ids:
+             or_parts.append(f"tenant_id.in.({','.join(tenant_ids)})")
+         if room_ids:
+             or_parts.append(f"room_id.in.({','.join(room_ids)})")
+-        if not or_parts:
+-            return {"items": [], "total": 0}
+-        query = query.or_(",".join(or_parts))
++        return q.or_(",".join(or_parts)) if or_parts else None
+ 
+-    query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
++    term = (search or "").strip()
++
++    if limit is not None:
++        query = supabase.table("leases").select("*", count="exact")
++        query = apply_simple_filters(query)
++        if term:
++            query = apply_search(query, term)
++            if query is None:
++                return {"items": [], "total": 0}
++        query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
++        res = query.execute()
++        return {"items": res.data, "total": res.count}
++
++    # Plain-array mode: status / tenant_id / ids / recent / search, no pagination shape.
++    query = supabase.table("leases").select("*")
++    query = apply_simple_filters(query)
++    if term:
++        query = apply_search(query, term)
++        if query is None:
++            return []
++    query = query.order("created_at", desc=True)
++    if recent is not None:
++        query = query.limit(recent)
+     res = query.execute()
+-    return {"items": res.data, "total": res.count}
++    return res.data
+ 
+ 
+ @router.get("/{lease_id}")
+diff --git a/frontend/app/(dashboard)/invoices/page.tsx b/frontend/app/(dashboard)/invoices/page.tsx
+index 0e60768..726559b 100644
+--- a/frontend/app/(dashboard)/invoices/page.tsx
++++ b/frontend/app/(dashboard)/invoices/page.tsx
+@@ -37,14 +37,26 @@ export default function InvoicesPage() {
+     due_in_days: "7",
+   });
+ 
++  // leases is now derived from whichever invoices are actually loaded,
++  // instead of a separate fetch of every lease the company has ever had --
++  // every lease this page could possibly need to look up (tenantName,
++  // propertyAndRoom above) is one referenced by a loaded invoice, so this
++  // covers the exact same lookups as before.
+   function load() {
+-    api.get<Invoice[]>("/invoices").then(setInvoices);
++    api.get<Invoice[]>("/invoices").then((data) => {
++      setInvoices(data);
++      const leaseIds = Array.from(new Set(data.map((i) => i.lease_id).filter(Boolean)));
++      if (leaseIds.length > 0) {
++        api.get<Lease[]>(`/leases?ids=${leaseIds.join(",")}`).then(setLeases);
++      } else {
++        setLeases([]);
++      }
++    });
+   }
+ 
+   useEffect(() => {
+     load();
+     api.get<Building[]>("/buildings").then(setBuildings);
+-    api.get<Lease[]>("/leases").then(setLeases);
+     api.get<Tenant[]>("/tenants").then(setTenants);
+     api.get<Room[]>("/rooms").then(setRooms);
+   }, []);
+diff --git a/frontend/app/(dashboard)/leases/new/page.tsx b/frontend/app/(dashboard)/leases/new/page.tsx
+index 591e760..6c62aea 100644
+--- a/frontend/app/(dashboard)/leases/new/page.tsx
++++ b/frontend/app/(dashboard)/leases/new/page.tsx
+@@ -80,7 +80,7 @@ export default function NewLeasePage() {
+     api.get<Room[]>("/rooms").then(setRooms);
+     api.get<Account[]>("/chart-of-accounts").then(setAccounts);
+     api.get<ChargeMapping[]>("/chart-of-accounts/charge-mappings").then(setChargeMappings);
+-    api.get<LeaseSummary[]>("/leases").then(setExistingLeases);
++    api.get<LeaseSummary[]>("/leases?status=active").then(setExistingLeases);
+   }, []);
+ 
+   const vacantRooms = rooms.filter(
+diff --git a/frontend/app/(dashboard)/page.tsx b/frontend/app/(dashboard)/page.tsx
+index 17d8f73..6d39b2e 100644
+--- a/frontend/app/(dashboard)/page.tsx
++++ b/frontend/app/(dashboard)/page.tsx
+@@ -137,8 +137,12 @@ export default function DashboardHome() {
+     api.get<Room[]>("/rooms").then(setRooms).catch((err) => setError(err.message));
+   }, []);
+ 
++  // Just the most recent leases, for the "New lease created" activity
++  // feed below, which only ever shows the last handful anyway. The other
++  // effect further down (after invoices load) tops this up with whichever
++  // specific leases the awaiting-payment / top-buildings figures need.
+   useEffect(() => {
+-    api.get<Lease[]>("/leases").then(setLeases).catch((err) => setError(err.message));
++    api.get<Lease[]>("/leases?recent=15").then(setLeases).catch((err) => setError(err.message));
+   }, []);
+ 
+   useEffect(() => {
+@@ -168,6 +172,25 @@ export default function DashboardHome() {
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, []);
+ 
++  // Tops up `leases` with whichever specific leases the loaded invoices
++  // reference (for awaitingPayment / topBuildings below) -- same lookups
++  // as before, just fetching only the leases actually needed instead of
++  // every lease the company has ever had.
++  useEffect(() => {
++    const leaseIds = Array.from(new Set((invoices ?? []).map((i) => i.lease_id).filter(Boolean)));
++    if (leaseIds.length === 0) return;
++    api
++      .get<Lease[]>(`/leases?ids=${leaseIds.join(",")}`)
++      .then((invoiceLeases) => {
++        setLeases((prev) => {
++          const merged = new Map((prev ?? []).map((l) => [l.id, l]));
++          invoiceLeases.forEach((l) => merged.set(l.id, l));
++          return Array.from(merged.values());
++        });
++      })
++      .catch((err) => setError(err.message));
++  }, [invoices]);
++
+   useEffect(() => {
+     api
+       .get<Payment[]>(`/payments?date_from=${windowStartDate}`)
+diff --git a/frontend/app/(dashboard)/reports/page.tsx b/frontend/app/(dashboard)/reports/page.tsx
+index 297d244..c5304e5 100644
+--- a/frontend/app/(dashboard)/reports/page.tsx
++++ b/frontend/app/(dashboard)/reports/page.tsx
+@@ -95,11 +95,15 @@ export default function ReportsPage() {
+     api.get<SecurityDeposit[]>("/security-deposits").then(setDeposits);
+   }
+ 
++  // leases is now built up from two targeted fetches instead of one fetch
++  // of every lease the company has ever had: the selected tenant's leases
++  // (for the Tenant Statement tab) and the leases referenced by whichever
++  // security deposits are loaded (for the Security Deposits tab) -- the
++  // two effects below, merged into the same `leases` state.
+   useEffect(() => {
+     api.get<PnlRow[]>("/reports/pnl").then(setPnl);
+     api.get<Company>("/company/me").then(setCompany);
+     loadDeposits();
+-    api.get<Lease[]>("/leases").then(setLeases);
+     api.get<Tenant[]>("/tenants").then((data) => {
+       setTenants(data);
+       setSelectedTenantId((prev) => prev || data[0]?.id || "");
+@@ -116,6 +120,25 @@ export default function ReportsPage() {
+       .then((res) => setCollectionVsExpense(res.billed_to_tenants ?? []));
+   }, []);
+ 
++  function mergeLeasesIn(newOnes: Lease[]) {
++    setLeases((prev) => {
++      const merged = new Map((prev ?? []).map((l) => [l.id, l]));
++      newOnes.forEach((l) => merged.set(l.id, l));
++      return Array.from(merged.values());
++    });
++  }
++
++  useEffect(() => {
++    if (!selectedTenantId) return;
++    api.get<Lease[]>(`/leases?tenant_id=${selectedTenantId}`).then(mergeLeasesIn);
++  }, [selectedTenantId]);
++
++  useEffect(() => {
++    const leaseIds = Array.from(new Set((deposits ?? []).map((d) => d.lease_id).filter(Boolean)));
++    if (leaseIds.length === 0) return;
++    api.get<Lease[]>(`/leases?ids=${leaseIds.join(",")}`).then(mergeLeasesIn);
++  }, [deposits]);
++
+   const tenantName = (id: string) => tenants?.find((t) => t.id === id)?.full_name ?? "—";
+   const leaseById = (id: string) => leases?.find((l) => l.id === id);
+   const roomLabel = (roomId?: string) => {
+diff --git a/frontend/app/(dashboard)/tenants/page.tsx b/frontend/app/(dashboard)/tenants/page.tsx
+index ceeeecc..065e752 100644
+--- a/frontend/app/(dashboard)/tenants/page.tsx
++++ b/frontend/app/(dashboard)/tenants/page.tsx
+@@ -54,7 +54,7 @@ export default function TenantsPage() {
+   useEffect(load, [showArchived]);
+   useEffect(() => {
+     api.get<Profile>("/profile/me").then((p) => setMyRole(p.role));
+-    api.get<Lease[]>("/leases").then(setLeases);
++    api.get<Lease[]>("/leases?status=active").then(setLeases);
+     api.get<Room[]>("/rooms").then(setRooms);
+     api.get<Building[]>("/buildings").then(setBuildings);
+   }, []);

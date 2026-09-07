@@ -37,14 +37,26 @@ export default function InvoicesPage() {
     due_in_days: "7",
   });
 
+  // leases is now derived from whichever invoices are actually loaded,
+  // instead of a separate fetch of every lease the company has ever had --
+  // every lease this page could possibly need to look up (tenantName,
+  // propertyAndRoom above) is one referenced by a loaded invoice, so this
+  // covers the exact same lookups as before.
   function load() {
-    api.get<Invoice[]>("/invoices").then(setInvoices);
+    api.get<Invoice[]>("/invoices").then((data) => {
+      setInvoices(data);
+      const leaseIds = Array.from(new Set(data.map((i) => i.lease_id).filter(Boolean)));
+      if (leaseIds.length > 0) {
+        api.get<Lease[]>(`/leases?ids=${leaseIds.join(",")}`).then(setLeases);
+      } else {
+        setLeases([]);
+      }
+    });
   }
 
   useEffect(() => {
     load();
     api.get<Building[]>("/buildings").then(setBuildings);
-    api.get<Lease[]>("/leases").then(setLeases);
     api.get<Tenant[]>("/tenants").then(setTenants);
     api.get<Room[]>("/rooms").then(setRooms);
   }, []);

@@ -103,20 +103,41 @@ def list_leases(
     search: Optional[str] = None,
     limit: Optional[int] = None,
     offset: int = 0,
+    status: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    ids: Optional[str] = None,
+    recent: Optional[int] = None,
     supabase: Client = Depends(get_supabase),
 ):
     """
-    IMPORTANT for backward compatibility: several other screens (Dashboard,
-    Invoices, Tenants, Reports, New Lease) call GET /leases with NO
-    parameters at all, expecting the full list back as a plain array, and
-    do their own client-side lookups against it. Calling with no `limit`
-    reproduces that exact original query and exact original response
-    shape -- nothing about those callers changes.
+    IMPORTANT for backward compatibility: calling this with NO parameters
+    at all reproduces the exact original query and exact original response
+    shape (a plain array, every lease, newest first) -- nothing about that
+    default path changes here.
 
-    Only when `limit` is explicitly passed (currently just the Leases list
-    page, schema_patch_027 follow-up) does this paginate, and the response
-    shape changes to {"items": [...], "total": N} so the caller can render
-    page numbers -- a new, additive path that doesn't touch the old one.
+    `limit` (+ optional `offset`/`search`) triggers the paginated mode used
+    by the Leases list page -- unchanged from before, response shape
+    {"items": [...], "total": N}.
+
+    NEW in this round -- three more optional, independent filters, only
+    used when `limit` is NOT given, so they stay in the "plain array"
+    response shape the other screens already expect:
+      - status: exact match (e.g. status=active) -- Tenants page and New
+        Lease page only ever cared about active leases; they used to
+        pull every lease ever created just to check this one field.
+      - tenant_id: only that one tenant's leases -- e.g. Reports page's
+        tenant statement, which used to scan the whole company's leases
+        for one tenant's handful of them.
+      - ids: comma-separated lease IDs -- for screens that already know
+        exactly which leases they need (e.g. the leases referenced by a
+        specific set of invoices or deposits already loaded), instead of
+        pulling every lease and filtering client-side.
+      - recent: just the N most recent (same "newest first" ordering as
+        always), as a plain array -- e.g. a dashboard activity feed that
+        only ever displayed the last handful anyway.
+    These can combine (all AND'd together) but in practice each caller
+    only uses one. None of them existed before, so there's no prior
+    behavior to preserve for them -- purely additive.
 
     Search matches the exact same two things the old client-side search on
     the Leases page did (tenant name, or building name / room number),
@@ -131,14 +152,21 @@ def list_leases(
     simple, well-tested single-column lookup rather than a hand-built
     multi-table pattern that couldn't be verified without a live query.
     """
-    if limit is None:
+    if limit is None and status is None and tenant_id is None and ids is None and recent is None and not search:
         res = supabase.table("leases").select("*").order("created_at", desc=True).execute()
         return res.data
 
-    query = supabase.table("leases").select("*", count="exact")
+    def apply_simple_filters(q):
+        if status:
+            q = q.eq("status", status)
+        if tenant_id:
+            q = q.eq("tenant_id", tenant_id)
+        if ids:
+            id_list = [i.strip() for i in ids.split(",") if i.strip()]
+            q = q.in_("id", id_list)
+        return q
 
-    term = (search or "").strip()
-    if term:
+    def apply_search(q, term: str):
         pattern = f"%{term}%"
         tenant_ids = [
             t["id"] for t in supabase.table("tenants").select("id").ilike("full_name", pattern).execute().data
@@ -154,19 +182,38 @@ def list_leases(
                 r["id"]
                 for r in supabase.table("rooms").select("id").in_("building_id", building_ids).execute().data
             }
-
         or_parts = []
         if tenant_ids:
             or_parts.append(f"tenant_id.in.({','.join(tenant_ids)})")
         if room_ids:
             or_parts.append(f"room_id.in.({','.join(room_ids)})")
-        if not or_parts:
-            return {"items": [], "total": 0}
-        query = query.or_(",".join(or_parts))
+        return q.or_(",".join(or_parts)) if or_parts else None
 
-    query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
+    term = (search or "").strip()
+
+    if limit is not None:
+        query = supabase.table("leases").select("*", count="exact")
+        query = apply_simple_filters(query)
+        if term:
+            query = apply_search(query, term)
+            if query is None:
+                return {"items": [], "total": 0}
+        query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
+        res = query.execute()
+        return {"items": res.data, "total": res.count}
+
+    # Plain-array mode: status / tenant_id / ids / recent / search, no pagination shape.
+    query = supabase.table("leases").select("*")
+    query = apply_simple_filters(query)
+    if term:
+        query = apply_search(query, term)
+        if query is None:
+            return []
+    query = query.order("created_at", desc=True)
+    if recent is not None:
+        query = query.limit(recent)
     res = query.execute()
-    return {"items": res.data, "total": res.count}
+    return res.data
 
 
 @router.get("/{lease_id}")
