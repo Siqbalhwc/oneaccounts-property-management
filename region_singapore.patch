@@ -1,0 +1,20 @@
+diff --git a/backend/vercel.json b/backend/vercel.json
+index b5db5a1..0fc0587 100644
+--- a/backend/vercel.json
++++ b/backend/vercel.json
+@@ -1,4 +1,5 @@
+ {
++  "regions": ["sin1"],
+   "functions": {
+     "api/index.py": {
+       "maxDuration": 30
+diff --git a/frontend/vercel.json b/frontend/vercel.json
+new file mode 100644
+index 0000000..5d7b761
+--- /dev/null
++++ b/frontend/vercel.json
+@@ -0,0 +1,4 @@
++{
++  "$schema": "https://openapi.vercel.sh/vercel.json",
++  "regions": ["sin1"]
++}
