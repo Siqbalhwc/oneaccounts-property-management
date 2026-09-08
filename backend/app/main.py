@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import (
     audit_log,
+    auth_activity,
     chart_of_accounts,
     company_settings,
     expenses,
@@ -65,6 +66,7 @@ app.include_router(owner_ledger.router, prefix=API_PREFIX)
 app.include_router(reports.router, prefix=API_PREFIX)
 app.include_router(company_settings.router, prefix=API_PREFIX)
 app.include_router(signup.router, prefix=API_PREFIX)
+app.include_router(auth_activity.router, prefix=API_PREFIX)
 app.include_router(team.router, prefix=API_PREFIX)
 app.include_router(platform_admin.router, prefix=API_PREFIX)
 app.include_router(audit_log.router, prefix=API_PREFIX)

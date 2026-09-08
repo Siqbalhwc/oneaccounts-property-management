@@ -47,10 +47,16 @@ def signup(payload: SignupRequest, service_client=Depends(get_service_client)):
     user_id = auth_result.user.id
 
     try:
-        # 2. Create their new, isolated company
+        # 2. Create their new, isolated company -- starts 'pending', not
+        # 'active'. A platform admin has to approve it from Tower before
+        # this user (or anyone they invite) gets any real data access.
+        # auth_company_id() (see schema_patch_019 / patch_027) already
+        # treats any non-'active' status as "no access", so nothing else
+        # needs to change for this to actually be enforced -- it's the same
+        # mechanism that already blocks a suspended company.
         company = (
             service_client.table("companies")
-            .insert({"name": payload.company_name})
+            .insert({"name": payload.company_name, "status": "pending"})
             .execute()
             .data[0]
         )
@@ -88,4 +94,8 @@ def signup(payload: SignupRequest, service_client=Depends(get_service_client)):
             pass
         raise HTTPException(status_code=400, detail=f"Signup failed while setting up your company: {e}")
 
-    return {"message": "Account created", "company_id": company["id"]}
+    return {
+        "message": "Account created — awaiting approval",
+        "company_id": company["id"],
+        "status": "pending",
+    }

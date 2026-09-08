@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import { api } from "@/lib/api";
 import { friendlyAuthError } from "@/lib/authErrors";
 import { Field, EmailInput, PasswordInput } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
@@ -16,17 +17,41 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [blockedMessage, setBlockedMessage] = useState<string | null>(null);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setError(null);
+    setBlockedMessage(null);
+
     const { error } = await supabase.auth.signInWithPassword({ email, password });
-    setLoading(false);
     if (error) {
+      setLoading(false);
       setError(friendlyAuthError(error.message));
       return;
     }
+
+    // Password was correct -- now record the attempt and find out whether
+    // this account/company actually has access yet (it may be pending
+    // approval, or suspended). This is the ONE place that can tell the
+    // difference, since a pending/suspended session can't read its own
+    // company row under RLS to figure that out itself.
+    try {
+      const result = await api.post<{ access_status: string; message: string }>("/auth/log-login");
+      if (result.access_status !== "active") {
+        await supabase.auth.signOut();
+        setBlockedMessage(result.message);
+        setLoading(false);
+        return;
+      }
+    } catch {
+      // If the status check itself fails (network hiccup), fall through to
+      // the dashboard -- it does the same check again on load and will
+      // catch anything real. Never let a logging failure lock someone out.
+    }
+
+    setLoading(false);
     router.push("/");
   }
 
@@ -72,6 +97,11 @@ export default function LoginPage() {
             </div>
 
             {error && <p className="text-sm text-stamp-red">{error}</p>}
+            {blockedMessage && (
+              <p className="text-sm text-brass-dark bg-brass/10 border border-brass/25 rounded-card px-3 py-2.5">
+                {blockedMessage}
+              </p>
+            )}
 
             <Button type="submit" className="w-full" loading={loading}>
               {loading ? "Signing in…" : "Sign in"}

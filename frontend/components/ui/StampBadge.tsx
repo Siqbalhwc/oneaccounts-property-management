@@ -14,6 +14,7 @@ const STATUS_MAP: Record<string, { label: string; className: string }> = {
   reserved: { label: "Reserved", className: "stamp-pending" },
   held: { label: "Held", className: "stamp-held" },
   suspended: { label: "Suspended", className: "stamp-overdue" },
+  pending: { label: "Pending approval", className: "stamp-pending" },
   refunded: { label: "Refunded", className: "stamp-refunded" },
   partially_refunded: { label: "Partial refund", className: "stamp-held" },
 

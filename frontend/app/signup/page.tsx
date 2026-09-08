@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
-import { postPublic } from "@/lib/api";
+import { postPublic, api } from "@/lib/api";
 import { friendlyAuthError } from "@/lib/authErrors";
 import { Field, Input, EmailInput, PasswordInput } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
@@ -21,6 +21,7 @@ export default function SignupPage() {
   });
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [pendingApproval, setPendingApproval] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -28,18 +29,53 @@ export default function SignupPage() {
     setError(null);
     try {
       await postPublic("/signup", form);
-      // Sign them straight in with the credentials they just created.
+      // Sign them in with the credentials they just created so we can
+      // check + log their access status -- but every new company starts
+      // 'pending', so this will NOT land them in the dashboard yet.
       const { error: signInError } = await supabase.auth.signInWithPassword({
         email: form.email,
         password: form.password,
       });
       if (signInError) throw signInError;
+
+      const result = await api.post<{ access_status: string; message: string }>("/auth/log-login");
+      if (result.access_status !== "active") {
+        await supabase.auth.signOut();
+        setPendingApproval(true);
+        setLoading(false);
+        return;
+      }
       router.push("/");
     } catch (err: any) {
       setError(friendlyAuthError(err.message));
     } finally {
       setLoading(false);
     }
+  }
+
+  if (pendingApproval) {
+    return (
+      <div className="min-h-screen flex bg-paper">
+        <BrandPanel />
+        <div className="flex-1 flex items-center justify-center px-4 py-10">
+          <div className="w-full max-w-sm">
+            <BrandPanelMobileHeader />
+            <div className="card p-6 sm:p-7 space-y-4 text-center">
+              <h1 className="font-display text-xl font-semibold text-ink">Account created</h1>
+              <p className="text-sm text-ink/60">
+                Your company has been set up, but a platform admin needs to approve it
+                before you can sign in. You&apos;ll be able to log in as soon as that
+                happens — no further action needed from you right now.
+              </p>
+              <Link href="/login" className="text-sm text-accent hover:underline inline-block pt-2">
+                Back to sign in
+              </Link>
+              <ContactFooter />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (

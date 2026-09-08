@@ -35,6 +35,26 @@ def require_platform_admin(
         raise HTTPException(status_code=403, detail="Platform admin access required.")
 
 
+@router.get("/login-log")
+def list_login_log(
+    limit: int = 300,
+    company_id: Optional[str] = None,
+    _admin: None = Depends(require_platform_admin),
+    service_client=Depends(get_service_client),
+):
+    """
+    Every login attempt across every company -- who, when, and what
+    happened (succeeded, blocked as pending, blocked as suspended, etc).
+    Written by POST /auth/log-login, which fires right after each
+    successful Supabase sign-in. Cross-tenant by nature, so this is
+    platform-admin only, same gate as every other Tower endpoint.
+    """
+    query = service_client.table("login_log").select("*").order("created_at", desc=True).limit(limit)
+    if company_id:
+        query = query.eq("company_id", company_id)
+    return query.execute().data
+
+
 @router.get("/companies")
 def list_all_companies(_admin: None = Depends(require_platform_admin), service_client=Depends(get_service_client)):
     companies = service_client.table("companies").select("*").execute().data

@@ -7,7 +7,7 @@ import { supabase } from "@/lib/supabaseClient";
 import { Sidebar } from "@/components/ui/Sidebar";
 import { GlobalSearch } from "@/components/ui/GlobalSearch";
 import { NotificationBell } from "@/components/ui/NotificationBell";
-import { Company } from "@/lib/api";
+import { Company, api } from "@/lib/api";
 import { ThemeProvider } from "@/lib/theme";
 
 type ProfileInfo = {
@@ -33,6 +33,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [checking, setChecking] = useState(true);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [companyBlocked, setCompanyBlocked] = useState(false);
+  const [blockedReason, setBlockedReason] = useState<"pending" | "suspended" | null>(null);
+  const [blockedMessage, setBlockedMessage] = useState<string | null>(null);
 
   useEffect(() => {
     async function checkSessionAndLoadProfile() {
@@ -76,11 +78,20 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         } else if (!(profileFields as ProfileInfo).is_suspended) {
           // Profile loaded fine (so the user isn't individually suspended),
           // but the company row itself is unreadable -- Row Level Security
-          // blocks it once a platform admin suspends the whole company.
-          // This is the ONLY signal the frontend has for that case (RLS
-          // fails closed with no error detail, by design), so we treat a
-          // missing company row as "company suspended".
+          // blocks it whenever the company isn't 'active' (suspended, or
+          // still pending approval on a brand-new signup). RLS fails closed
+          // with no error detail by design, so the embedded query alone
+          // can't tell us WHICH of those it is -- ask the one endpoint that
+          // can (it uses the service-role client to look, purely to explain
+          // this back to the same user who already owns the info).
           setCompanyBlocked(true);
+          try {
+            const status = await api.get<{ access_status: string; message: string }>("/auth/access-status");
+            setBlockedReason(status.access_status === "pending" ? "pending" : "suspended");
+            setBlockedMessage(status.message);
+          } catch {
+            setBlockedReason("suspended");
+          }
         }
       }
       setChecking(false);
@@ -110,15 +121,19 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }
 
   if (profile?.is_suspended || companyBlocked) {
+    const isPending = !profile?.is_suspended && blockedReason === "pending";
     return (
       <ThemeProvider initialTheme={profile?.theme_preference}>
         <div className="min-h-screen flex items-center justify-center bg-paper px-4">
           <div className="card p-8 max-w-md text-center space-y-3">
-            <h2 className="font-display text-lg font-semibold text-stamp-red">Access suspended</h2>
+            <h2 className={`font-display text-lg font-semibold ${isPending ? "text-brass-dark" : "text-stamp-red"}`}>
+              {isPending ? "Awaiting approval" : "Access suspended"}
+            </h2>
             <p className="text-sm text-ink/60">
-              {profile?.is_suspended
-                ? "Your account has been suspended. Contact your company owner for help."
-                : "Your company's access has been suspended. Contact support for help."}
+              {blockedMessage ??
+                (profile?.is_suspended
+                  ? "Your account has been suspended. Contact your company owner for help."
+                  : "Your company's access has been suspended. Contact support for help.")}
             </p>
             <button
               onClick={handleSignOut}

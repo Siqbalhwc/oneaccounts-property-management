@@ -88,6 +88,11 @@ def get_current_company_id(
         raise HTTPException(status_code=403, detail="Your account has been suspended. Contact your company owner.")
 
     company = res.data.get("companies") or {}
+    if company.get("status") == "pending":
+        raise HTTPException(
+            status_code=403,
+            detail="Your company's signup is still awaiting approval. You'll get access once it's approved.",
+        )
     if company.get("status") == "suspended":
         reason = company.get("suspended_reason")
         detail = "Your company's access has been suspended."
