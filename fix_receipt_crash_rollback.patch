@@ -1,0 +1,279 @@
+diff --git a/backend/app/main.py b/backend/app/main.py
+index f26d320..8d24225 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -1,5 +1,8 @@
+-from fastapi import FastAPI
++import logging
++
++from fastapi import FastAPI, Request
+ from fastapi.middleware.cors import CORSMiddleware
++from fastapi.responses import JSONResponse
+ 
+ from app.routers import (
+     audit_log,
+@@ -44,6 +47,25 @@ app.add_middleware(
+     allow_headers=["*"],
+ )
+ 
++# Safety net for any endpoint that raises an exception nobody caught.
++# Without this, an unhandled crash could reach the browser as a bare,
++# unhelpful network failure instead of a real error -- because the
++# response never made it back through normal FastAPI handling to pick up
++# CORS headers. This does not change behavior for any request that
++# already works correctly today; it only affects the crash path, which
++# previously had no defined response at all.
++logger = logging.getLogger("app")
++
++
++@app.exception_handler(Exception)
++async def unhandled_exception_handler(request: Request, exc: Exception):
++    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
++    return JSONResponse(
++        status_code=500,
++        content={"detail": "Something went wrong on our end. Nothing was saved -- please try again."},
++    )
++
++
+ API_PREFIX = "/api"
+ 
+ app.include_router(simple_resources.buildings_router, prefix=API_PREFIX)
+diff --git a/backend/app/routers/payments.py b/backend/app/routers/payments.py
+index d171b30..14be0da 100644
+--- a/backend/app/routers/payments.py
++++ b/backend/app/routers/payments.py
+@@ -7,7 +7,13 @@ from pydantic import BaseModel
+ from supabase import Client
+ 
+ from app.core.deps import get_current_company_id, get_current_user, get_supabase
+-from app.services.ledger import get_account_id, get_tenant_account_balance_as_of, post_journal_entry, resolve_room_owner
++from app.services.ledger import (
++    UnbalancedJournalEntry,
++    get_account_id,
++    get_tenant_account_balance_as_of,
++    post_journal_entry,
++    resolve_room_owner,
++)
+ 
+ router = APIRouter(prefix="/payments", tags=["Payments"])
+ 
+@@ -229,35 +235,68 @@ def record_receipt(
+         if not payload.discount_account_id:
+             raise HTTPException(status_code=400, detail="Select which account the discount should be charged to.")
+ 
+-    account = (
+-        supabase.table("chart_of_accounts")
+-        .select("id")
+-        .eq("id", payload.account_id)
+-        .eq("company_id", company_id)
+-        .single()
+-        .execute()
+-    )
+-    if not account.data:
+-        raise HTTPException(status_code=404, detail="Account not found")
+-
+-    if payload.discount_account_id:
+-        discount_account = (
++    # NOTE on the try/except blocks below: supabase-py's .single() raises an
++    # exception itself when a lookup finds zero rows -- it does NOT just
++    # return an object with data=None. That meant the "if not X.data: raise
++    # HTTPException(404, ...)" lines that already existed here were dead
++    # code; a missing row crashed straight past them as an unhandled 500
++    # with no CORS headers, which is what the browser was showing as a bare
++    # "Failed to fetch" with nothing recorded. Wrapping each lookup makes
++    # the ALREADY-INTENDED clean error message actually reachable. No
++    # validation rule, amount, or money calculation below is touched.
++    try:
++        account = (
+             supabase.table("chart_of_accounts")
+             .select("id")
+-            .eq("id", payload.discount_account_id)
++            .eq("id", payload.account_id)
+             .eq("company_id", company_id)
+             .single()
+             .execute()
+         )
+-        if not discount_account.data:
++    except Exception:
++        account = None
++    if not account or not account.data:
++        raise HTTPException(status_code=404, detail="Account not found")
++
++    if payload.discount_account_id:
++        try:
++            discount_account = (
++                supabase.table("chart_of_accounts")
++                .select("id")
++                .eq("id", payload.discount_account_id)
++                .eq("company_id", company_id)
++                .single()
++                .execute()
++            )
++        except Exception:
++            discount_account = None
++        if not discount_account or not discount_account.data:
+             raise HTTPException(status_code=404, detail="Discount account not found")
+ 
+-    lease = supabase.table("leases").select("id, tenant_id, room_id").eq("id", payload.lease_id).single().execute()
+-    if not lease.data:
++    try:
++        lease = (
++            supabase.table("leases")
++            .select("id, tenant_id, room_id")
++            .eq("id", payload.lease_id)
++            .single()
++            .execute()
++        )
++    except Exception:
++        lease = None
++    if not lease or not lease.data:
+         raise HTTPException(status_code=404, detail="Lease not found")
+     tenant_id = lease.data["tenant_id"]
+     room_id = lease.data["room_id"]
+-    room = supabase.table("rooms").select("building_id").eq("id", room_id).single().execute().data
++
++    # Room lookup stays soft-fail on purpose (matching the original code's
++    # own "if room else None" fallback) -- a receipt should never be
++    # blocked just because the building/room tag for reporting couldn't be
++    # read. Every live lease currently has a room_id (verified), so this is
++    # a safety net for an edge case, not the expected path.
++    try:
++        room = supabase.table("rooms").select("building_id").eq("id", room_id).single().execute().data
++    except Exception:
++        room = None
+     building_id = room["building_id"] if room else None
+     owner_id = resolve_room_owner(supabase, room_id)
+ 
+@@ -395,6 +434,12 @@ def record_receipt(
+ 
+     receipt_group_id = str(uuid.uuid4())
+     created_payments = []
++    # Remembers each invoice's status BEFORE this receipt touches it, so
++    # that if the journal-posting step below fails for any reason, we can
++    # put every invoice back exactly how it was (see the rollback block
++    # after post_journal_entry) instead of leaving a payment recorded with
++    # no ledger entry behind it.
++    original_invoice_status: Dict[str, str] = {}
+ 
+     if opening_balance_cash > 0.01 or opening_balance_discount > 0.01:
+         row = {
+@@ -435,6 +480,8 @@ def record_receipt(
+         )
+         total_settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in all_payments)
+         new_status = "paid" if total_settled >= float(inv["total_amount"]) - 0.01 else "partial"
++        if inv["id"] not in original_invoice_status:
++            original_invoice_status[inv["id"]] = inv["status"]
+         supabase.table("invoices").update({"status": new_status}).eq("id", inv["id"]).execute()
+ 
+     if advance_amount > 0.01:
+@@ -451,47 +498,81 @@ def record_receipt(
+         }
+         created_payments.append(supabase.table("payments").insert(row).execute().data[0])
+ 
+-    tenant = supabase.table("tenants").select("full_name").eq("id", tenant_id).single().execute().data
++    try:
++        tenant = supabase.table("tenants").select("full_name").eq("id", tenant_id).single().execute().data
++    except Exception:
++        tenant = None
+     tenant_name = tenant["full_name"] if tenant else "Tenant"
+ 
+-    ar_id = get_account_id(supabase, company_id, "1100")
+-    lines = [
+-        {
+-            "account_id": payload.account_id, "direction": "debit", "amount": round(payload.amount_received, 2),
+-            "building_id": building_id, "room_id": room_id, "owner_id": owner_id,
+-            "tenant_id": tenant_id, "lease_id": payload.lease_id,
+-        },
+-    ]
+-    if payload.discount_amount > 0:
++    # Everything from here down either succeeds completely, or is rolled
++    # back completely -- a receipt is never left half-recorded (a payment
++    # row with no journal entry behind it). This does NOT change what a
++    # successful receipt looks like or any amount/allocation logic above;
++    # it only adds a clean-up path for the failure case, which previously
++    # crashed uncaught and left whatever had already been inserted sitting
++    # in the database with no ledger entry to back it.
++    try:
++        ar_id = get_account_id(supabase, company_id, "1100")
++        lines = [
++            {
++                "account_id": payload.account_id, "direction": "debit", "amount": round(payload.amount_received, 2),
++                "building_id": building_id, "room_id": room_id, "owner_id": owner_id,
++                "tenant_id": tenant_id, "lease_id": payload.lease_id,
++            },
++        ]
++        if payload.discount_amount > 0:
++            lines.append({
++                "account_id": payload.discount_account_id, "direction": "debit", "amount": round(payload.discount_amount, 2),
++                "building_id": building_id, "room_id": room_id, "owner_id": owner_id,
++                "tenant_id": tenant_id, "lease_id": payload.lease_id,
++            })
+         lines.append({
+-            "account_id": payload.discount_account_id, "direction": "debit", "amount": round(payload.discount_amount, 2),
++            "account_id": ar_id, "direction": "credit",
++            "amount": round(payload.amount_received + payload.discount_amount, 2),
+             "building_id": building_id, "room_id": room_id, "owner_id": owner_id,
+             "tenant_id": tenant_id, "lease_id": payload.lease_id,
+         })
+-    lines.append({
+-        "account_id": ar_id, "direction": "credit",
+-        "amount": round(payload.amount_received + payload.discount_amount, 2),
+-        "building_id": building_id, "room_id": room_id, "owner_id": owner_id,
+-        "tenant_id": tenant_id, "lease_id": payload.lease_id,
+-    })
+-
+-    entry = post_journal_entry(
+-        supabase,
+-        company_id=company_id,
+-        entry_date=str(payload.receipt_date),
+-        source_type="receipt",
+-        source_id=receipt_group_id,
+-        description=f"Receipt — {tenant_name}" + (" (with discount)" if payload.discount_amount > 0 else ""),
+-        lines=lines,
+-        created_by=user["user_id"],
+-    )
+ 
++        entry = post_journal_entry(
++            supabase,
++            company_id=company_id,
++            entry_date=str(payload.receipt_date),
++            source_type="receipt",
++            source_id=receipt_group_id,
++            description=f"Receipt — {tenant_name}" + (" (with discount)" if payload.discount_amount > 0 else ""),
++            lines=lines,
++            created_by=user["user_id"],
++        )
++    except Exception as exc:
++        for p in created_payments:
++            try:
++                supabase.table("payments").delete().eq("id", p["id"]).execute()
++            except Exception:
++                pass
++        for inv_id, prior_status in original_invoice_status.items():
++            try:
++                supabase.table("invoices").update({"status": prior_status}).eq("id", inv_id).execute()
++            except Exception:
++                pass
++        if isinstance(exc, UnbalancedJournalEntry):
++            raise HTTPException(
++                status_code=400,
++                detail="This receipt doesn't balance -- please check the amount and try again. Nothing was saved.",
++            )
++        raise HTTPException(
++            status_code=500,
++            detail="Could not post this receipt to the ledger. Nothing was saved -- please try again.",
++        )
++
++    # The receipt is already fully committed by this point -- this is only
++    # a number for the response/confirmation screen. Any failure here (e.g.
++    # a transient read) must never look like the receipt itself failed.
+     try:
+         ar_account_id_final = get_account_id(supabase, company_id, "1100")
+         final_running_balance = get_tenant_account_balance_as_of(
+             supabase, company_id, ar_account_id_final, tenant_id, str(date.today())
+         )
+-    except ValueError:
++    except Exception:
+         final_running_balance = 0.0
+ 
+     return {

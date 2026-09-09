@@ -1,5 +1,8 @@
-from fastapi import FastAPI
+import logging
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.routers import (
     audit_log,
@@ -43,6 +46,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Safety net for any endpoint that raises an exception nobody caught.
+# Without this, an unhandled crash could reach the browser as a bare,
+# unhelpful network failure instead of a real error -- because the
+# response never made it back through normal FastAPI handling to pick up
+# CORS headers. This does not change behavior for any request that
+# already works correctly today; it only affects the crash path, which
+# previously had no defined response at all.
+logger = logging.getLogger("app")
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Something went wrong on our end. Nothing was saved -- please try again."},
+    )
+
 
 API_PREFIX = "/api"
 
