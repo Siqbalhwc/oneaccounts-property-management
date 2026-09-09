@@ -7,6 +7,7 @@ import { friendlyAuthError } from "@/lib/authErrors";
 import { Field, PasswordInput } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
 import { BrandPanel, BrandPanelMobileHeader } from "@/components/marketing/BrandPanel";
+import { AuthShell } from "@/components/marketing/AuthShell";
 import { ContactFooter } from "@/components/marketing/ContactFooter";
 
 export default function ResetPasswordPage() {
@@ -54,58 +55,56 @@ export default function ResetPasswordPage() {
   }
 
   return (
-    <div className="min-h-screen flex bg-paper">
+    <AuthShell>
       <BrandPanel />
 
-      <div className="flex-1 flex items-center justify-center px-4 py-10">
-        <div className="w-full max-w-sm">
-          <BrandPanelMobileHeader />
+      <div className="w-full max-w-sm">
+        <BrandPanelMobileHeader />
 
-          <div className="card p-6 sm:p-7 space-y-4">
-            <div className="mb-1">
-              <h1 className="font-display text-xl font-semibold text-ink">Set a new password</h1>
-              <p className="text-sm text-ink/55 mt-1">
-                {done ? "Password updated — taking you in now…" : "Choose a new password for your account."}
-              </p>
-            </div>
-
-            {!done && (
-              <form onSubmit={handleSubmit} className="space-y-4">
-                <Field label="New password" hint="At least 8 characters.">
-                  <PasswordInput
-                    autoFocus
-                    autoComplete="new-password"
-                    minLength={8}
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                    disabled={!ready}
-                  />
-                </Field>
-                <Field label="Confirm new password">
-                  <PasswordInput
-                    autoComplete="new-password"
-                    minLength={8}
-                    value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
-                    required
-                    disabled={!ready}
-                  />
-                </Field>
-                {!ready && !error && (
-                  <p className="text-xs text-ink/45">Verifying your reset link…</p>
-                )}
-                {error && <p className="text-sm text-stamp-red">{error}</p>}
-                <Button type="submit" className="w-full" loading={loading} disabled={!ready}>
-                  {loading ? "Updating…" : "Update password"}
-                </Button>
-              </form>
-            )}
-
-            <ContactFooter />
+        <div className="card p-6 sm:p-7 space-y-4 border-t-[3px] border-t-brass">
+          <div className="mb-1">
+            <h1 className="font-display text-xl font-semibold text-ink">Set a new password</h1>
+            <p className="text-sm text-ink/55 mt-1">
+              {done ? "Password updated — taking you in now…" : "Choose a new password for your account."}
+            </p>
           </div>
+
+          {!done && (
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <Field label="New password" hint="At least 8 characters.">
+                <PasswordInput
+                  autoFocus
+                  autoComplete="new-password"
+                  minLength={8}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  disabled={!ready}
+                />
+              </Field>
+              <Field label="Confirm new password">
+                <PasswordInput
+                  autoComplete="new-password"
+                  minLength={8}
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  required
+                  disabled={!ready}
+                />
+              </Field>
+              {!ready && !error && (
+                <p className="text-xs text-ink/45">Verifying your reset link…</p>
+              )}
+              {error && <p className="text-sm text-stamp-red">{error}</p>}
+              <Button type="submit" className="w-full" loading={loading} disabled={!ready}>
+                {loading ? "Updating…" : "Update password"}
+              </Button>
+            </form>
+          )}
+
+          <ContactFooter />
         </div>
       </div>
-    </div>
+    </AuthShell>
   );
 }

@@ -113,6 +113,24 @@ export function IconShuffle(props: IconProps) {
   );
 }
 
+export function IconWallet(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="2" y="6" width="20" height="14" rx="2" />
+      <path d="M2 10h20" />
+    </IconBase>
+  );
+}
+
+export function IconTrendingUp(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M3 17l6-6 4 4 8-8" />
+      <path d="M17 7h4v4" />
+    </IconBase>
+  );
+}
+
 export function IconPhone(props: IconProps) {
   return (
     <IconBase {...props}>
