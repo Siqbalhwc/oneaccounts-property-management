@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import date
 from typing import Any, Dict, List, Optional
@@ -16,6 +17,7 @@ from app.services.ledger import (
 )
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
+logger = logging.getLogger("app.payments")
 
 
 @router.get("")
@@ -544,6 +546,14 @@ def record_receipt(
             created_by=user["user_id"],
         )
     except Exception as exc:
+        # Logged BEFORE the generic message is returned, so the real cause
+        # (the actual database/library error, with full traceback) is
+        # visible in Vercel's Runtime Logs even though the person using the
+        # app only ever sees the safe, generic message below.
+        logger.exception(
+            "Receipt posting failed for lease_id=%s company_id=%s amount_received=%s discount_amount=%s",
+            payload.lease_id, company_id, payload.amount_received, payload.discount_amount,
+        )
         for p in created_payments:
             try:
                 supabase.table("payments").delete().eq("id", p["id"]).execute()
