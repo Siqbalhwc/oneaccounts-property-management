@@ -1,0 +1,514 @@
+diff --git a/frontend/app/(dashboard)/settings/page.tsx b/frontend/app/(dashboard)/settings/page.tsx
+index 8b64f86..36cf7fc 100644
+--- a/frontend/app/(dashboard)/settings/page.tsx
++++ b/frontend/app/(dashboard)/settings/page.tsx
+@@ -1,7 +1,7 @@
+ "use client";
+ 
+ import { useEffect, useRef, useState } from "react";
+-import { api, uploadFile, Company, Profile } from "@/lib/api";
++import { api, downloadFile, uploadFile, uploadFileForReport, Company, Profile } from "@/lib/api";
+ import { Card, DataTable } from "@/components/ui/Card";
+ import { Field, Input, Select } from "@/components/ui/Field";
+ import { Button } from "@/components/ui/Button";
+@@ -9,6 +9,104 @@ import { Modal } from "@/components/ui/Modal";
+ 
+ type TeamMember = { id: string; full_name: string; role: string; phone?: string };
+ 
++type ImportReportRow = { row: number; status: "created" | "skipped" | "error"; detail: string };
++
++function statusClass(status: ImportReportRow["status"]) {
++  if (status === "created") return "stamp-paid";
++  if (status === "skipped") return "stamp-pending";
++  return "stamp-overdue";
++}
++
++// One upload slot for one entity (Owners / Buildings / Rooms / Tenants /
++// Leases). Each is independent -- own file, own "Import" button, own
++// row-by-row report -- so uploading Rooms doesn't touch Tenants' state,
++// and a partial success on one sheet never blocks re-trying another.
++function ImportSlot({
++  label,
++  endpoint,
++  hint,
++}: {
++  label: string;
++  endpoint: string;
++  hint: string;
++}) {
++  const [file, setFile] = useState<File | null>(null);
++  const [uploading, setUploading] = useState(false);
++  const [report, setReport] = useState<ImportReportRow[] | null>(null);
++  const [error, setError] = useState<string | null>(null);
++  const inputRef = useRef<HTMLInputElement>(null);
++
++  async function handleImport() {
++    if (!file) return;
++    setUploading(true);
++    setError(null);
++    setReport(null);
++    try {
++      const result = await uploadFileForReport<{ report: ImportReportRow[] }>(endpoint, file);
++      setReport(result.report);
++    } catch (err: any) {
++      setError(err.message);
++    } finally {
++      setUploading(false);
++    }
++  }
++
++  const createdCount = report?.filter((r) => r.status === "created").length ?? 0;
++  const skippedCount = report?.filter((r) => r.status === "skipped").length ?? 0;
++  const errorCount = report?.filter((r) => r.status === "error").length ?? 0;
++
++  return (
++    <div className="border border-border rounded-card p-4">
++      <div className="flex items-center justify-between gap-3 flex-wrap">
++        <div>
++          <p className="text-sm font-medium">{label}</p>
++          <p className="text-xs text-ink/50 mt-0.5">{hint}</p>
++        </div>
++        <div className="flex items-center gap-2 shrink-0">
++          <input
++            ref={inputRef}
++            type="file"
++            accept=".xlsx"
++            className="hidden"
++            onChange={(e) => {
++              setFile(e.target.files?.[0] ?? null);
++              setReport(null);
++              setError(null);
++            }}
++          />
++          <Button variant="ghost" onClick={() => inputRef.current?.click()}>
++            {file ? file.name : "Choose file…"}
++          </Button>
++          <Button variant="secondary" onClick={handleImport} disabled={!file || uploading}>
++            {uploading ? "Importing…" : "Import"}
++          </Button>
++        </div>
++      </div>
++
++      {error && <p className="text-sm text-stamp-red mt-3">{error}</p>}
++
++      {report && (
++        <div className="mt-4">
++          <p className="text-xs text-ink/55 mb-2">
++            {createdCount} created
++            {skippedCount > 0 ? `, ${skippedCount} skipped` : ""}
++            {errorCount > 0 ? `, ${errorCount} failed` : ""} — fix and re-upload just the failed rows if any.
++          </p>
++          <div className="max-h-56 overflow-y-auto space-y-1.5">
++            {report.map((r, i) => (
++              <div key={i} className="flex items-start gap-2 text-xs">
++                <span className="text-ink/40 w-10 shrink-0">Row {r.row}</span>
++                <span className={`stamp ${statusClass(r.status)} shrink-0`}>{r.status}</span>
++                <span className="text-ink/65">{r.detail}</span>
++              </div>
++            ))}
++          </div>
++        </div>
++      )}
++    </div>
++  );
++}
++
+ export default function SettingsPage() {
+   const [company, setCompany] = useState<Company | null>(null);
+   const [profile, setProfile] = useState<Profile | null>(null);
+@@ -18,6 +116,9 @@ export default function SettingsPage() {
+   const [message, setMessage] = useState<string | null>(null);
+   const fileInputRef = useRef<HTMLInputElement>(null);
+ 
++  const [exporting, setExporting] = useState(false);
++  const [exportError, setExportError] = useState<string | null>(null);
++
+   const [team, setTeam] = useState<TeamMember[] | null>(null);
+   const [inviteModalOpen, setInviteModalOpen] = useState(false);
+   const [inviteSaving, setInviteSaving] = useState(false);
+@@ -96,11 +197,24 @@ export default function SettingsPage() {
+     }
+   }
+ 
++  async function handleExport() {
++    setExporting(true);
++    setExportError(null);
++    try {
++      await downloadFile("/data-transfer/export", "oneaccounts_export.xlsx");
++    } catch (err: any) {
++      setExportError(err.message);
++    } finally {
++      setExporting(false);
++    }
++  }
++
+   if (!company || !profile) {
+     return <p className="text-sm text-ink/50">Loading settings…</p>;
+   }
+ 
+   const canInvite = profile.role === "owner" || profile.role === "admin";
++  const canManageData = profile.role === "owner" || profile.role === "admin";
+ 
+   return (
+     <div className="max-w-2xl space-y-6">
+@@ -215,6 +329,61 @@ export default function SettingsPage() {
+         )}
+       </Card>
+ 
++      {canManageData && (
++        <Card
++          title="Import & export"
++          action={
++            <Button variant="secondary" onClick={handleExport} disabled={exporting}>
++              {exporting ? "Preparing…" : "Export to Excel"}
++            </Button>
++          }
++        >
++          <p className="text-sm text-ink/55 mb-1">
++            Export gives you one workbook with a sheet for each entity below —
++            useful as a backup, or as a starting template for a bulk import
++            (fill in new rows underneath your existing ones and re-upload).
++          </p>
++          <p className="text-xs text-ink/45 mb-4">
++            Import order matters: Owners → Buildings → Rooms → Tenants → Leases.
++            Each later sheet looks up earlier ones by name or CNIC, not by ID —
++            spreadsheets don&apos;t have your internal IDs — so run them in that
++            order. Every row is checked against the same rules the manual forms
++            use (CNIC format, phone format, no duplicate room numbers, no
++            duplicate active lease) before anything is saved, and a lease
++            import posts to your ledger exactly like creating one by hand does.
++          </p>
++          {exportError && <p className="text-sm text-stamp-red mb-4">{exportError}</p>}
++
++          <div className="space-y-3">
++            <ImportSlot
++              label="Owners"
++              endpoint="/data-transfer/import/owners"
++              hint="Columns: name, phone, cnic, address"
++            />
++            <ImportSlot
++              label="Buildings"
++              endpoint="/data-transfer/import/buildings"
++              hint="Columns: name, address"
++            />
++            <ImportSlot
++              label="Rooms"
++              endpoint="/data-transfer/import/rooms"
++              hint="Columns: building_name, floor_number, room_number, room_type, base_rent, owner_name (blank = inherit the building's owner)"
++            />
++            <ImportSlot
++              label="Tenants"
++              endpoint="/data-transfer/import/tenants"
++              hint="Columns: full_name, cnic, phone, email, emergency_contact_name, emergency_contact_phone"
++            />
++            <ImportSlot
++              label="Leases"
++              endpoint="/data-transfer/import/leases"
++              hint="Columns: tenant_cnic, building_name, room_number, start_date, end_date, rent_amount, security_deposit_amount, security_deposit_date_received, security_deposit_is_received (yes/no), security_deposit_received_account_code"
++            />
++          </div>
++        </Card>
++      )}
++
+       <Modal open={inviteModalOpen} onClose={() => setInviteModalOpen(false)} title="Add teammate">
+         <form onSubmit={handleInvite} className="space-y-4">
+           <p className="text-xs text-ink/50 bg-accent/5 border border-accent/15 rounded-card px-3 py-2">
+diff --git a/frontend/app/(dashboard)/tower/page.tsx b/frontend/app/(dashboard)/tower/page.tsx
+index 4be960d..ca712fd 100644
+--- a/frontend/app/(dashboard)/tower/page.tsx
++++ b/frontend/app/(dashboard)/tower/page.tsx
+@@ -7,7 +7,7 @@ import { Modal } from "@/components/ui/Modal";
+ import { ConfirmModal } from "@/components/ui/ConfirmModal";
+ import { Field, Input } from "@/components/ui/Field";
+ import { StampBadge } from "@/components/ui/StampBadge";
+-import { api } from "@/lib/api";
++import { api, downloadFile, uploadFileForReport } from "@/lib/api";
+ 
+ type CompanyOverview = {
+   id: string;
+@@ -91,6 +91,13 @@ export default function TowerPage() {
+   const [loginLogError, setLoginLogError] = useState<string | null>(null);
+   const [showOnlyBlocked, setShowOnlyBlocked] = useState(false);
+ 
++  const [backupWorkingId, setBackupWorkingId] = useState<string | null>(null);
++  const [restoreFile, setRestoreFile] = useState<File | null>(null);
++  const [restoring, setRestoring] = useState(false);
++  const [restoreResult, setRestoreResult] = useState<Record<string, number> | null>(null);
++  const [restoreError, setRestoreError] = useState<string | null>(null);
++  const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
++
+   function loadCompanies() {
+     api
+       .get<CompanyOverview[]>("/platform/companies")
+@@ -124,6 +131,9 @@ export default function TowerPage() {
+   function closeDetail() {
+     setSelectedId(null);
+     setDetail(null);
++    setRestoreFile(null);
++    setRestoreResult(null);
++    setRestoreError(null);
+   }
+ 
+   async function activateCompany(id: string) {
+@@ -210,6 +220,46 @@ export default function TowerPage() {
+     }
+   }
+ 
++  async function backupCompany(company: CompanyOverview) {
++    setBackupWorkingId(company.id);
++    setError(null);
++    try {
++      const safeName = company.name.replace(/[^a-zA-Z0-9-_]+/g, "_");
++      await downloadFile(
++        `/platform/companies/${company.id}/backup`,
++        `backup_${safeName}_${new Date().toISOString().slice(0, 10)}.json`
++      );
++    } catch (e: any) {
++      setError(`Backup failed — ${e.message}`);
++    } finally {
++      setBackupWorkingId(null);
++    }
++  }
++
++  async function confirmRestore() {
++    if (!restoreFile || !selectedId) return;
++    setRestoring(true);
++    setRestoreError(null);
++    setRestoreResult(null);
++    try {
++      const result = await uploadFileForReport<{ status: string; rows_imported: Record<string, number> }>(
++        `/platform/companies/${selectedId}/restore`,
++        restoreFile
++      );
++      setRestoreResult(result.rows_imported);
++      setRestoreFile(null);
++      loadCompanies();
++    } catch (e: any) {
++      // The SQL function's error message is detailed on purpose (e.g. exactly
++      // which table already has data, or which rows couldn't resolve) --
++      // shown as-is rather than replaced with a generic message.
++      setRestoreError(e.message);
++    } finally {
++      setRestoring(false);
++      setRestoreConfirmOpen(false);
++    }
++  }
++
+   async function toggleUserSuspend(userId: string, suspend: boolean) {
+     try {
+       await api.post(`/platform/users/${userId}/${suspend ? "suspend" : "activate"}`);
+@@ -355,9 +405,19 @@ export default function TowerPage() {
+             { header: "Joined", accessor: (c) => c.created_at?.slice(0, 10) },
+             {
+               header: "",
+-              accessor: (c) => {
+-                if (c.status === "active") {
+-                  return (
++              accessor: (c) => (
++                <div className="flex justify-end gap-2">
++                  <Button
++                    variant="ghost"
++                    disabled={backupWorkingId === c.id}
++                    onClick={(e) => {
++                      e.stopPropagation();
++                      backupCompany(c);
++                    }}
++                  >
++                    {backupWorkingId === c.id ? "Preparing…" : "Backup"}
++                  </Button>
++                  {c.status === "active" && (
+                     <Button
+                       variant="danger"
+                       onClick={(e) => {
+@@ -367,10 +427,8 @@ export default function TowerPage() {
+                     >
+                       Suspend
+                     </Button>
+-                  );
+-                }
+-                if (c.status === "pending") {
+-                  return (
++                  )}
++                  {c.status === "pending" && (
+                     <Button
+                       variant="secondary"
+                       onClick={(e) => {
+@@ -380,20 +438,20 @@ export default function TowerPage() {
+                     >
+                       Approve
+                     </Button>
+-                  );
+-                }
+-                return (
+-                  <Button
+-                    variant="secondary"
+-                    onClick={(e) => {
+-                      e.stopPropagation();
+-                      activateCompany(c.id);
+-                    }}
+-                  >
+-                    Activate
+-                  </Button>
+-                );
+-              },
++                  )}
++                  {c.status === "suspended" && (
++                    <Button
++                      variant="secondary"
++                      onClick={(e) => {
++                        e.stopPropagation();
++                        activateCompany(c.id);
++                      }}
++                    >
++                      Activate
++                    </Button>
++                  )}
++                </div>
++              ),
+               align: "right",
+             },
+           ]}
+@@ -559,9 +617,89 @@ export default function TowerPage() {
+                 ]}
+               />
+             </div>
++
++            <div>
++              <h4 className="font-display text-sm font-semibold mb-2">Backup &amp; restore</h4>
++              <div className="rounded-card border border-border p-4 space-y-4">
++                <div className="flex items-center justify-between gap-3">
++                  <div>
++                    <p className="text-sm">Download a full backup</p>
++                    <p className="text-xs text-ink/50 mt-0.5">
++                      One .json file — every building, room, tenant, lease, chart
++                      of accounts entry, and journal line this company has.
++                      Doesn&apos;t include team logins or the audit trail (those
++                      can&apos;t be meaningfully restored into a different
++                      company).
++                    </p>
++                  </div>
++                  <Button
++                    variant="secondary"
++                    disabled={backupWorkingId === detail.company.id}
++                    onClick={() => backupCompany(detail.company)}
++                  >
++                    {backupWorkingId === detail.company.id ? "Preparing…" : "Download backup"}
++                  </Button>
++                </div>
++
++                <div className="border-t border-border pt-4">
++                  <p className="text-sm">Restore a backup into this company</p>
++                  <p className="text-xs text-ink/50 mt-0.5 mb-3">
++                    Only works if this company has <strong>no business data yet</strong> —
++                    a brand-new signup with nothing entered. Every ID in the
++                    backup is regenerated on the way in, and the whole restore
++                    either fully succeeds or changes nothing at all — there&apos;s
++                    no partial/half-restored state.
++                  </p>
++                  <div className="flex items-center gap-2 flex-wrap">
++                    <input
++                      type="file"
++                      accept=".json"
++                      className="text-xs"
++                      onChange={(e) => {
++                        setRestoreFile(e.target.files?.[0] ?? null);
++                        setRestoreResult(null);
++                        setRestoreError(null);
++                      }}
++                    />
++                    <Button
++                      variant="danger"
++                      disabled={!restoreFile || restoring}
++                      onClick={() => setRestoreConfirmOpen(true)}
++                    >
++                      {restoring ? "Restoring…" : "Restore into this company"}
++                    </Button>
++                  </div>
++                  {restoreError && (
++                    <p className="text-sm text-stamp-red mt-3 whitespace-pre-wrap">{restoreError}</p>
++                  )}
++                  {restoreResult && (
++                    <div className="mt-3 text-xs text-ink/60 bg-accent/5 border border-accent/15 rounded-card px-3 py-2">
++                      <p className="font-medium text-ink/80 mb-1">Restore complete:</p>
++                      {Object.entries(restoreResult)
++                        .filter(([, count]) => count > 0)
++                        .map(([table, count]) => (
++                          <span key={table} className="inline-block mr-3">
++                            {table}: {count}
++                          </span>
++                        ))}
++                    </div>
++                  )}
++                </div>
++              </div>
++            </div>
+           </div>
+         )}
+       </Modal>
++
++      <ConfirmModal
++        open={restoreConfirmOpen}
++        onClose={() => setRestoreConfirmOpen(false)}
++        onConfirm={confirmRestore}
++        title={`Restore backup into ${detail?.company.name ?? "this company"}?`}
++        message="This only works if the company is genuinely empty of business data -- it will refuse and change nothing otherwise. If it does proceed, every building, room, tenant, lease, and ledger entry from the backup file will be created here with fresh IDs. This can't be undone from this screen."
++        confirmLabel="Restore backup"
++        confirming={restoring}
++      />
+     </div>
+   );
+ }
+diff --git a/frontend/lib/api.ts b/frontend/lib/api.ts
+index 87f6992..868f4d2 100644
+--- a/frontend/lib/api.ts
++++ b/frontend/lib/api.ts
+@@ -89,6 +89,49 @@ export async function fetchPdfBlob(path: string): Promise<Blob> {
+   return res.blob();
+ }
+ 
++// Fetches any file (JSON backup, Excel export, ...) and triggers a real
++// browser download with a proper filename -- same auth-header requirement
++// as fetchPdfBlob above, but this one saves to disk instead of opening a
++// preview tab. `filename` is a fallback; if the server sends a
++// Content-Disposition header with its own filename (the backup endpoint
++// does, so each download is named after the actual company), that name
++// wins instead.
++export async function downloadFile(path: string, filename: string): Promise<void> {
++  const headers = await authHeader();
++  const res = await fetch(`${API_BASE}${path}`, { headers });
++  if (!res.ok) {
++    const bodyText = await res.text();
++    let message = bodyText;
++    try {
++      const parsed = JSON.parse(bodyText);
++      if (typeof parsed.detail === "string") message = parsed.detail;
++    } catch {
++      // not JSON, use raw text
++    }
++    throw new Error(message);
++  }
++  const disposition = res.headers.get("Content-Disposition") || "";
++  const match = disposition.match(/filename="?([^"]+)"?/);
++  const finalFilename = match ? match[1] : filename;
++
++  const blob = await res.blob();
++  const url = URL.createObjectURL(blob);
++  const a = document.createElement("a");
++  a.href = url;
++  a.download = finalFilename;
++  document.body.appendChild(a);
++  a.click();
++  a.remove();
++  URL.revokeObjectURL(url);
++}
++
++// Uploads a file to an endpoint that returns a JSON report rather than a
++// created record (e.g. a data-transfer import). Same multipart shape as
++// uploadFile above -- kept separate only so call sites read clearly
++// ("upload and get back the created thing" vs "upload and get back a
++// report of what happened").
++export const uploadFileForReport = uploadFile;
++
+ export type Company = {
+   id: string;
+   name: string;

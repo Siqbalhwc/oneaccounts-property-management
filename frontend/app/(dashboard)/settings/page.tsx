@@ -1,13 +1,111 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api, uploadFile, Company, Profile } from "@/lib/api";
+import { api, downloadFile, uploadFile, uploadFileForReport, Company, Profile } from "@/lib/api";
 import { Card, DataTable } from "@/components/ui/Card";
 import { Field, Input, Select } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 
 type TeamMember = { id: string; full_name: string; role: string; phone?: string };
+
+type ImportReportRow = { row: number; status: "created" | "skipped" | "error"; detail: string };
+
+function statusClass(status: ImportReportRow["status"]) {
+  if (status === "created") return "stamp-paid";
+  if (status === "skipped") return "stamp-pending";
+  return "stamp-overdue";
+}
+
+// One upload slot for one entity (Owners / Buildings / Rooms / Tenants /
+// Leases). Each is independent -- own file, own "Import" button, own
+// row-by-row report -- so uploading Rooms doesn't touch Tenants' state,
+// and a partial success on one sheet never blocks re-trying another.
+function ImportSlot({
+  label,
+  endpoint,
+  hint,
+}: {
+  label: string;
+  endpoint: string;
+  hint: string;
+}) {
+  const [file, setFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [report, setReport] = useState<ImportReportRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  async function handleImport() {
+    if (!file) return;
+    setUploading(true);
+    setError(null);
+    setReport(null);
+    try {
+      const result = await uploadFileForReport<{ report: ImportReportRow[] }>(endpoint, file);
+      setReport(result.report);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  const createdCount = report?.filter((r) => r.status === "created").length ?? 0;
+  const skippedCount = report?.filter((r) => r.status === "skipped").length ?? 0;
+  const errorCount = report?.filter((r) => r.status === "error").length ?? 0;
+
+  return (
+    <div className="border border-border rounded-card p-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <p className="text-sm font-medium">{label}</p>
+          <p className="text-xs text-ink/50 mt-0.5">{hint}</p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".xlsx"
+            className="hidden"
+            onChange={(e) => {
+              setFile(e.target.files?.[0] ?? null);
+              setReport(null);
+              setError(null);
+            }}
+          />
+          <Button variant="ghost" onClick={() => inputRef.current?.click()}>
+            {file ? file.name : "Choose file…"}
+          </Button>
+          <Button variant="secondary" onClick={handleImport} disabled={!file || uploading}>
+            {uploading ? "Importing…" : "Import"}
+          </Button>
+        </div>
+      </div>
+
+      {error && <p className="text-sm text-stamp-red mt-3">{error}</p>}
+
+      {report && (
+        <div className="mt-4">
+          <p className="text-xs text-ink/55 mb-2">
+            {createdCount} created
+            {skippedCount > 0 ? `, ${skippedCount} skipped` : ""}
+            {errorCount > 0 ? `, ${errorCount} failed` : ""} — fix and re-upload just the failed rows if any.
+          </p>
+          <div className="max-h-56 overflow-y-auto space-y-1.5">
+            {report.map((r, i) => (
+              <div key={i} className="flex items-start gap-2 text-xs">
+                <span className="text-ink/40 w-10 shrink-0">Row {r.row}</span>
+                <span className={`stamp ${statusClass(r.status)} shrink-0`}>{r.status}</span>
+                <span className="text-ink/65">{r.detail}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function SettingsPage() {
   const [company, setCompany] = useState<Company | null>(null);
@@ -17,6 +115,9 @@ export default function SettingsPage() {
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const [team, setTeam] = useState<TeamMember[] | null>(null);
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
@@ -96,11 +197,24 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleExport() {
+    setExporting(true);
+    setExportError(null);
+    try {
+      await downloadFile("/data-transfer/export", "oneaccounts_export.xlsx");
+    } catch (err: any) {
+      setExportError(err.message);
+    } finally {
+      setExporting(false);
+    }
+  }
+
   if (!company || !profile) {
     return <p className="text-sm text-ink/50">Loading settings…</p>;
   }
 
   const canInvite = profile.role === "owner" || profile.role === "admin";
+  const canManageData = profile.role === "owner" || profile.role === "admin";
 
   return (
     <div className="max-w-2xl space-y-6">
@@ -214,6 +328,61 @@ export default function SettingsPage() {
           </p>
         )}
       </Card>
+
+      {canManageData && (
+        <Card
+          title="Import & export"
+          action={
+            <Button variant="secondary" onClick={handleExport} disabled={exporting}>
+              {exporting ? "Preparing…" : "Export to Excel"}
+            </Button>
+          }
+        >
+          <p className="text-sm text-ink/55 mb-1">
+            Export gives you one workbook with a sheet for each entity below —
+            useful as a backup, or as a starting template for a bulk import
+            (fill in new rows underneath your existing ones and re-upload).
+          </p>
+          <p className="text-xs text-ink/45 mb-4">
+            Import order matters: Owners → Buildings → Rooms → Tenants → Leases.
+            Each later sheet looks up earlier ones by name or CNIC, not by ID —
+            spreadsheets don&apos;t have your internal IDs — so run them in that
+            order. Every row is checked against the same rules the manual forms
+            use (CNIC format, phone format, no duplicate room numbers, no
+            duplicate active lease) before anything is saved, and a lease
+            import posts to your ledger exactly like creating one by hand does.
+          </p>
+          {exportError && <p className="text-sm text-stamp-red mb-4">{exportError}</p>}
+
+          <div className="space-y-3">
+            <ImportSlot
+              label="Owners"
+              endpoint="/data-transfer/import/owners"
+              hint="Columns: name, phone, cnic, address"
+            />
+            <ImportSlot
+              label="Buildings"
+              endpoint="/data-transfer/import/buildings"
+              hint="Columns: name, address"
+            />
+            <ImportSlot
+              label="Rooms"
+              endpoint="/data-transfer/import/rooms"
+              hint="Columns: building_name, floor_number, room_number, room_type, base_rent, owner_name (blank = inherit the building's owner)"
+            />
+            <ImportSlot
+              label="Tenants"
+              endpoint="/data-transfer/import/tenants"
+              hint="Columns: full_name, cnic, phone, email, emergency_contact_name, emergency_contact_phone"
+            />
+            <ImportSlot
+              label="Leases"
+              endpoint="/data-transfer/import/leases"
+              hint="Columns: tenant_cnic, building_name, room_number, start_date, end_date, rent_amount, security_deposit_amount, security_deposit_date_received, security_deposit_is_received (yes/no), security_deposit_received_account_code"
+            />
+          </div>
+        </Card>
+      )}
 
       <Modal open={inviteModalOpen} onClose={() => setInviteModalOpen(false)} title="Add teammate">
         <form onSubmit={handleInvite} className="space-y-4">

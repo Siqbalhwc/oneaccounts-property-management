@@ -7,7 +7,7 @@ import { Modal } from "@/components/ui/Modal";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
 import { Field, Input } from "@/components/ui/Field";
 import { StampBadge } from "@/components/ui/StampBadge";
-import { api } from "@/lib/api";
+import { api, downloadFile, uploadFileForReport } from "@/lib/api";
 
 type CompanyOverview = {
   id: string;
@@ -91,6 +91,13 @@ export default function TowerPage() {
   const [loginLogError, setLoginLogError] = useState<string | null>(null);
   const [showOnlyBlocked, setShowOnlyBlocked] = useState(false);
 
+  const [backupWorkingId, setBackupWorkingId] = useState<string | null>(null);
+  const [restoreFile, setRestoreFile] = useState<File | null>(null);
+  const [restoring, setRestoring] = useState(false);
+  const [restoreResult, setRestoreResult] = useState<Record<string, number> | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
+
   function loadCompanies() {
     api
       .get<CompanyOverview[]>("/platform/companies")
@@ -124,6 +131,9 @@ export default function TowerPage() {
   function closeDetail() {
     setSelectedId(null);
     setDetail(null);
+    setRestoreFile(null);
+    setRestoreResult(null);
+    setRestoreError(null);
   }
 
   async function activateCompany(id: string) {
@@ -207,6 +217,46 @@ export default function TowerPage() {
       openDetail({ id: companyId } as CompanyOverview);
     } catch (e: any) {
       setError(e.message);
+    }
+  }
+
+  async function backupCompany(company: CompanyOverview) {
+    setBackupWorkingId(company.id);
+    setError(null);
+    try {
+      const safeName = company.name.replace(/[^a-zA-Z0-9-_]+/g, "_");
+      await downloadFile(
+        `/platform/companies/${company.id}/backup`,
+        `backup_${safeName}_${new Date().toISOString().slice(0, 10)}.json`
+      );
+    } catch (e: any) {
+      setError(`Backup failed — ${e.message}`);
+    } finally {
+      setBackupWorkingId(null);
+    }
+  }
+
+  async function confirmRestore() {
+    if (!restoreFile || !selectedId) return;
+    setRestoring(true);
+    setRestoreError(null);
+    setRestoreResult(null);
+    try {
+      const result = await uploadFileForReport<{ status: string; rows_imported: Record<string, number> }>(
+        `/platform/companies/${selectedId}/restore`,
+        restoreFile
+      );
+      setRestoreResult(result.rows_imported);
+      setRestoreFile(null);
+      loadCompanies();
+    } catch (e: any) {
+      // The SQL function's error message is detailed on purpose (e.g. exactly
+      // which table already has data, or which rows couldn't resolve) --
+      // shown as-is rather than replaced with a generic message.
+      setRestoreError(e.message);
+    } finally {
+      setRestoring(false);
+      setRestoreConfirmOpen(false);
     }
   }
 
@@ -355,9 +405,19 @@ export default function TowerPage() {
             { header: "Joined", accessor: (c) => c.created_at?.slice(0, 10) },
             {
               header: "",
-              accessor: (c) => {
-                if (c.status === "active") {
-                  return (
+              accessor: (c) => (
+                <div className="flex justify-end gap-2">
+                  <Button
+                    variant="ghost"
+                    disabled={backupWorkingId === c.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      backupCompany(c);
+                    }}
+                  >
+                    {backupWorkingId === c.id ? "Preparing…" : "Backup"}
+                  </Button>
+                  {c.status === "active" && (
                     <Button
                       variant="danger"
                       onClick={(e) => {
@@ -367,10 +427,8 @@ export default function TowerPage() {
                     >
                       Suspend
                     </Button>
-                  );
-                }
-                if (c.status === "pending") {
-                  return (
+                  )}
+                  {c.status === "pending" && (
                     <Button
                       variant="secondary"
                       onClick={(e) => {
@@ -380,20 +438,20 @@ export default function TowerPage() {
                     >
                       Approve
                     </Button>
-                  );
-                }
-                return (
-                  <Button
-                    variant="secondary"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      activateCompany(c.id);
-                    }}
-                  >
-                    Activate
-                  </Button>
-                );
-              },
+                  )}
+                  {c.status === "suspended" && (
+                    <Button
+                      variant="secondary"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        activateCompany(c.id);
+                      }}
+                    >
+                      Activate
+                    </Button>
+                  )}
+                </div>
+              ),
               align: "right",
             },
           ]}
@@ -559,9 +617,89 @@ export default function TowerPage() {
                 ]}
               />
             </div>
+
+            <div>
+              <h4 className="font-display text-sm font-semibold mb-2">Backup &amp; restore</h4>
+              <div className="rounded-card border border-border p-4 space-y-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm">Download a full backup</p>
+                    <p className="text-xs text-ink/50 mt-0.5">
+                      One .json file — every building, room, tenant, lease, chart
+                      of accounts entry, and journal line this company has.
+                      Doesn&apos;t include team logins or the audit trail (those
+                      can&apos;t be meaningfully restored into a different
+                      company).
+                    </p>
+                  </div>
+                  <Button
+                    variant="secondary"
+                    disabled={backupWorkingId === detail.company.id}
+                    onClick={() => backupCompany(detail.company)}
+                  >
+                    {backupWorkingId === detail.company.id ? "Preparing…" : "Download backup"}
+                  </Button>
+                </div>
+
+                <div className="border-t border-border pt-4">
+                  <p className="text-sm">Restore a backup into this company</p>
+                  <p className="text-xs text-ink/50 mt-0.5 mb-3">
+                    Only works if this company has <strong>no business data yet</strong> —
+                    a brand-new signup with nothing entered. Every ID in the
+                    backup is regenerated on the way in, and the whole restore
+                    either fully succeeds or changes nothing at all — there&apos;s
+                    no partial/half-restored state.
+                  </p>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <input
+                      type="file"
+                      accept=".json"
+                      className="text-xs"
+                      onChange={(e) => {
+                        setRestoreFile(e.target.files?.[0] ?? null);
+                        setRestoreResult(null);
+                        setRestoreError(null);
+                      }}
+                    />
+                    <Button
+                      variant="danger"
+                      disabled={!restoreFile || restoring}
+                      onClick={() => setRestoreConfirmOpen(true)}
+                    >
+                      {restoring ? "Restoring…" : "Restore into this company"}
+                    </Button>
+                  </div>
+                  {restoreError && (
+                    <p className="text-sm text-stamp-red mt-3 whitespace-pre-wrap">{restoreError}</p>
+                  )}
+                  {restoreResult && (
+                    <div className="mt-3 text-xs text-ink/60 bg-accent/5 border border-accent/15 rounded-card px-3 py-2">
+                      <p className="font-medium text-ink/80 mb-1">Restore complete:</p>
+                      {Object.entries(restoreResult)
+                        .filter(([, count]) => count > 0)
+                        .map(([table, count]) => (
+                          <span key={table} className="inline-block mr-3">
+                            {table}: {count}
+                          </span>
+                        ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
         )}
       </Modal>
+
+      <ConfirmModal
+        open={restoreConfirmOpen}
+        onClose={() => setRestoreConfirmOpen(false)}
+        onConfirm={confirmRestore}
+        title={`Restore backup into ${detail?.company.name ?? "this company"}?`}
+        message="This only works if the company is genuinely empty of business data -- it will refuse and change nothing otherwise. If it does proceed, every building, room, tenant, lease, and ledger entry from the backup file will be created here with fresh IDs. This can't be undone from this screen."
+        confirmLabel="Restore backup"
+        confirming={restoring}
+      />
     </div>
   );
 }

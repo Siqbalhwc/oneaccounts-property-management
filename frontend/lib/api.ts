@@ -89,6 +89,49 @@ export async function fetchPdfBlob(path: string): Promise<Blob> {
   return res.blob();
 }
 
+// Fetches any file (JSON backup, Excel export, ...) and triggers a real
+// browser download with a proper filename -- same auth-header requirement
+// as fetchPdfBlob above, but this one saves to disk instead of opening a
+// preview tab. `filename` is a fallback; if the server sends a
+// Content-Disposition header with its own filename (the backup endpoint
+// does, so each download is named after the actual company), that name
+// wins instead.
+export async function downloadFile(path: string, filename: string): Promise<void> {
+  const headers = await authHeader();
+  const res = await fetch(`${API_BASE}${path}`, { headers });
+  if (!res.ok) {
+    const bodyText = await res.text();
+    let message = bodyText;
+    try {
+      const parsed = JSON.parse(bodyText);
+      if (typeof parsed.detail === "string") message = parsed.detail;
+    } catch {
+      // not JSON, use raw text
+    }
+    throw new Error(message);
+  }
+  const disposition = res.headers.get("Content-Disposition") || "";
+  const match = disposition.match(/filename="?([^"]+)"?/);
+  const finalFilename = match ? match[1] : filename;
+
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = finalFilename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Uploads a file to an endpoint that returns a JSON report rather than a
+// created record (e.g. a data-transfer import). Same multipart shape as
+// uploadFile above -- kept separate only so call sites read clearly
+// ("upload and get back the created thing" vs "upload and get back a
+// report of what happened").
+export const uploadFileForReport = uploadFile;
+
 export type Company = {
   id: string;
   name: string;
