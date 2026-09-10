@@ -37,18 +37,6 @@ type Payment = {
 type ExpenseCategory = { id: string; name: string };
 type Expense = { id: string; category_id: string; building_id?: string; amount: number; expense_date: string };
 type SalaryPayment = { id: string; staff_id: string; salary_month: string; amount_paid: number };
-type RoomWiseRow = {
-  room_id: string;
-  room_number: string;
-  building_id: string;
-  building_name: string;
-  tenant_name: string | null;
-  security_received: boolean;
-  opening_balance: number;
-  invoiced_period: number;
-  received_period: number;
-  receivable_total: number;
-};
 type CollectionVsExpenseRow = {
   building_id: string;
   building_name: string;
@@ -68,7 +56,6 @@ const TABS = [
   "Profit & Loss",
   "Security Deposits",
   "Tenant Ledger",
-  "Room-wise Receivables",
   "Expenses by Category",
   "Expenses by Month",
   "Collection vs Bills",
@@ -104,15 +91,6 @@ export default function ReportsPage() {
 
   const [pnlDetailMonth, setPnlDetailMonth] = useState<PnlRow | null>(null);
 
-  const [roomWiseRows, setRoomWiseRows] = useState<RoomWiseRow[] | null>(null);
-  const [roomWiseLoading, setRoomWiseLoading] = useState(false);
-  const [roomWiseError, setRoomWiseError] = useState<string | null>(null);
-  const [roomWisePeriodStart, setRoomWisePeriodStart] = useState(
-    new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10)
-  );
-  const [roomWisePeriodEnd, setRoomWisePeriodEnd] = useState(new Date().toISOString().slice(0, 10));
-  const [roomWiseBuildingFilter, setRoomWiseBuildingFilter] = useState("");
-
   function loadDeposits() {
     api.get<SecurityDeposit[]>("/security-deposits").then(setDeposits);
   }
@@ -140,26 +118,6 @@ export default function ReportsPage() {
     api
       .get<{ billed_to_tenants: CollectionVsExpenseRow[] }>("/reports/collection-vs-expense")
       .then((res) => setCollectionVsExpense(res.billed_to_tenants ?? []));
-  }, []);
-
-  function loadRoomWise() {
-    setRoomWiseLoading(true);
-    setRoomWiseError(null);
-    const params = new URLSearchParams({
-      period_start: roomWisePeriodStart,
-      period_end: roomWisePeriodEnd,
-    });
-    if (roomWiseBuildingFilter) params.set("building_id", roomWiseBuildingFilter);
-    api
-      .get<RoomWiseRow[]>(`/reports/room-wise?${params.toString()}`)
-      .then(setRoomWiseRows)
-      .catch((err) => setRoomWiseError(err.message))
-      .finally(() => setRoomWiseLoading(false));
-  }
-
-  useEffect(() => {
-    loadRoomWise();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function mergeLeasesIn(newOnes: Lease[]) {
@@ -464,128 +422,6 @@ export default function ReportsPage() {
                 { header: "Amount", accessor: (p) => <span className="figures">{formatPkr(p.amount)}</span>, align: "right" },
               ]}
             />
-          </Card>
-        </div>
-      )}
-
-      {tab === "Room-wise Receivables" && (
-        <div className="space-y-4">
-          <Card className="no-print">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <Field label="Period from" hint="Everything before this date rolls into opening balance.">
-                <Input
-                  type="date"
-                  value={roomWisePeriodStart}
-                  onChange={(e) => setRoomWisePeriodStart(e.target.value)}
-                />
-              </Field>
-              <Field label="Period to">
-                <Input type="date" value={roomWisePeriodEnd} onChange={(e) => setRoomWisePeriodEnd(e.target.value)} />
-              </Field>
-              <Field label="Building">
-                <Select value={roomWiseBuildingFilter} onChange={(e) => setRoomWiseBuildingFilter(e.target.value)}>
-                  <option value="">All buildings</option>
-                  {buildingsForFilter.map((b) => (
-                    <option key={b.id} value={b.id}>
-                      {b.name}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-            </div>
-            <div className="flex justify-end mt-3">
-              <Button variant="secondary" onClick={loadRoomWise} disabled={roomWiseLoading}>
-                {roomWiseLoading ? "Loading…" : "Apply"}
-              </Button>
-            </div>
-          </Card>
-
-          <p className="hidden print:block text-xs text-ink/50">
-            {roomWisePeriodStart} to {roomWisePeriodEnd}
-            {roomWiseBuildingFilter
-              ? ` — ${buildingsForFilter.find((b) => b.id === roomWiseBuildingFilter)?.name ?? ""}`
-              : ""}
-          </p>
-
-          {roomWiseError && (
-            <Card className="border-stamp-red/40">
-              <p className="text-sm text-stamp-red">Couldn&apos;t reach the API — {roomWiseError}.</p>
-            </Card>
-          )}
-
-          <Card>
-            <DataTable
-              keyField="room_id"
-              rows={roomWiseRows ?? []}
-              emptyMessage="No rooms match this filter."
-              columns={[
-                {
-                  header: "Room",
-                  accessor: (r) => (
-                    <span className="font-medium">
-                      {r.building_name} — {r.room_number}
-                    </span>
-                  ),
-                },
-                { header: "Tenant", accessor: (r) => r.tenant_name ?? "—" },
-                {
-                  header: "Security",
-                  accessor: (r) => <StampBadge status={r.security_received ? "paid" : "pending"} />,
-                },
-                {
-                  header: "Opening bal.",
-                  accessor: (r) => <span className="figures">{formatPkr(r.opening_balance)}</span>,
-                  align: "right",
-                },
-                {
-                  header: "Invoiced",
-                  accessor: (r) => <span className="figures">{formatPkr(r.invoiced_period)}</span>,
-                  align: "right",
-                },
-                {
-                  header: "Received",
-                  accessor: (r) => <span className="figures">{formatPkr(r.received_period)}</span>,
-                  align: "right",
-                },
-                {
-                  header: "Receivable",
-                  accessor: (r) => (
-                    <span className={`figures font-semibold ${r.receivable_total > 0 ? "text-stamp-red" : ""}`}>
-                      {formatPkr(r.receivable_total)}
-                    </span>
-                  ),
-                  align: "right",
-                },
-              ]}
-            />
-            {roomWiseRows && roomWiseRows.length > 0 && (
-              <div className="flex flex-wrap justify-end gap-6 pt-3 mt-3 border-t border-border text-sm font-medium">
-                <span>
-                  Opening:{" "}
-                  <span className="figures">
-                    {formatPkr(roomWiseRows.reduce((s, r) => s + r.opening_balance, 0))}
-                  </span>
-                </span>
-                <span>
-                  Invoiced:{" "}
-                  <span className="figures">
-                    {formatPkr(roomWiseRows.reduce((s, r) => s + r.invoiced_period, 0))}
-                  </span>
-                </span>
-                <span>
-                  Received:{" "}
-                  <span className="figures">
-                    {formatPkr(roomWiseRows.reduce((s, r) => s + r.received_period, 0))}
-                  </span>
-                </span>
-                <span>
-                  Total receivable:{" "}
-                  <span className="figures">
-                    {formatPkr(roomWiseRows.reduce((s, r) => s + r.receivable_total, 0))}
-                  </span>
-                </span>
-              </div>
-            )}
           </Card>
         </div>
       )}

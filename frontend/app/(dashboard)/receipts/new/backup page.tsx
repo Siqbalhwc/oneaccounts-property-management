@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { api, fetchPdfBlob, Account, Invoice, Tenant, Room, Building } from "@/lib/api";
+import { api, Account, Invoice, Tenant, Room, Building } from "@/lib/api";
 import { supabase } from "@/lib/supabaseClient";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -50,8 +50,6 @@ export default function ReceivePaymentPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [completedReceiptId, setCompletedReceiptId] = useState<string | null>(null);
-  const [downloadingReceipt, setDownloadingReceipt] = useState(false);
 
   const isOwnerOrAdmin = role === "owner" || role === "admin";
 
@@ -140,61 +138,24 @@ export default function ReceivePaymentPage() {
 
     setSaving(true);
     try {
-      const result = await api.post<{ advance_amount: number; receipt_group_id: string }>(
-        "/payments/receipt",
-        {
-          lease_id: leaseId,
-          account_id: accountId,
-          payment_method: paymentMethod,
-          receipt_date: receiptDate,
-          amount_received: receivedNum,
-          invoice_ids: tickedInvoices.map((i) => i.id),
-          apply_to_opening_balance: applyOpeningBalance && (summary?.opening_balance ?? 0) > 0.01,
-          discount_amount: discountNum,
-          discount_account_id: discountNum > 0 ? discountAccountId : undefined,
-          notes: notes || undefined,
-        }
-      );
-      // Show a receipt-download confirmation instead of navigating straight
-      // away -- previously there was no acknowledgment document at all, so
-      // this is the one chance to hand the tenant something before moving on.
-      setCompletedReceiptId(result.receipt_group_id);
+      await api.post<{ advance_amount: number }>("/payments/receipt", {
+        lease_id: leaseId,
+        account_id: accountId,
+        payment_method: paymentMethod,
+        receipt_date: receiptDate,
+        amount_received: receivedNum,
+        invoice_ids: tickedInvoices.map((i) => i.id),
+        apply_to_opening_balance: applyOpeningBalance && (summary?.opening_balance ?? 0) > 0.01,
+        discount_amount: discountNum,
+        discount_account_id: discountNum > 0 ? discountAccountId : undefined,
+        notes: notes || undefined,
+      });
+      router.push("/invoices");
     } catch (err: any) {
       setError(err.message);
     } finally {
       setSaving(false);
     }
-  }
-
-  async function handleDownloadReceipt() {
-    if (!completedReceiptId) return;
-    setDownloadingReceipt(true);
-    try {
-      const blob = await fetchPdfBlob(`/payments/receipt/${completedReceiptId}/pdf`);
-      const url = URL.createObjectURL(blob);
-      window.open(url, "_blank");
-    } finally {
-      setDownloadingReceipt(false);
-    }
-  }
-
-  if (completedReceiptId) {
-    return (
-      <Card>
-        <div className="text-center py-8 space-y-4">
-          <p className="text-lg font-display font-semibold">Receipt recorded</p>
-          <p className="text-sm text-ink/55">
-            The payment has been posted. Download or print an acknowledgement of receipt for the tenant now, or come back to it later from this receipt&apos;s entry in the Journal.
-          </p>
-          <div className="flex justify-center gap-3 pt-2">
-            <Button variant="secondary" onClick={handleDownloadReceipt} disabled={downloadingReceipt}>
-              {downloadingReceipt ? "Preparing…" : "Print / Download receipt"}
-            </Button>
-            <Button onClick={() => router.push("/invoices")}>Done</Button>
-          </div>
-        </div>
-      </Card>
-    );
   }
 
   if (!leaseId) {

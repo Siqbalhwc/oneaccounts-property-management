@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from supabase import Client
 
-from app.core.deps import get_current_company_id, get_current_user, get_service_client, get_supabase
+from app.core.deps import get_current_company_id, get_current_user, get_supabase
 from app.services.ledger import (
     UnbalancedJournalEntry,
     get_account_id,
@@ -169,53 +169,6 @@ def record_payment(
     )
 
     return payment
-
-
-@router.get("/receipt/{receipt_id}/pdf")
-def receipt_pdf(receipt_id: str, supabase: Client = Depends(get_supabase)):
-    """
-    Authenticated download of a payment receipt. `receipt_id` is the
-    receipt_group_id returned by POST /payments/receipt (covers every
-    invoice/opening-balance/advance line that receipt touched, as one
-    document) -- or, as a fallback, a plain payment id for rows created via
-    the older POST /payments endpoint. Same pattern as invoices.py's
-    /invoices/{id}/pdf.
-    """
-    from fastapi.responses import StreamingResponse
-    import io
-
-    from app.services.payment_receipt_pdf import fetch_receipt_context, render_receipt_pdf
-
-    ctx = fetch_receipt_context(supabase, receipt_id)
-    pdf_bytes = render_receipt_pdf(ctx)
-
-    return StreamingResponse(
-        io.BytesIO(pdf_bytes),
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="receipt_{receipt_id[:8]}.pdf"'},
-    )
-
-
-@router.get("/receipt/{receipt_id}/pdf/view")
-def receipt_pdf_public(receipt_id: str, service_client=Depends(get_service_client)):
-    """
-    Public, unauthenticated receipt viewer -- for a WhatsApp "here's your
-    receipt" link, same security model as invoices.py's /invoices/{id}/view
-    (an unguessable UUID in the URL is the protection, no login step).
-    """
-    from fastapi.responses import StreamingResponse
-    import io
-
-    from app.services.payment_receipt_pdf import fetch_receipt_context, render_receipt_pdf
-
-    ctx = fetch_receipt_context(service_client, receipt_id)
-    pdf_bytes = render_receipt_pdf(ctx)
-
-    return StreamingResponse(
-        io.BytesIO(pdf_bytes),
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="receipt_{receipt_id[:8]}.pdf"'},
-    )
 
 
 # ---------------------------------------------------------------------------
