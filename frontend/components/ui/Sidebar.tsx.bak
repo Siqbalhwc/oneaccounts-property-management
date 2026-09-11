@@ -185,7 +185,7 @@ export function Sidebar({
           </button>
         </div>
 
-        <nav className="px-3 py-4 overflow-y-auto scrollbar-thin flex-1 min-h-0">
+        <nav className="px-3 py-4 overflow-y-auto scrollbar-thin shrink-0">
           {/* Dashboard: pinned, single item, no accordion needed */}
           <Link
             href="/"
@@ -257,7 +257,7 @@ export function Sidebar({
         {/* Absorbs whatever height the nav list doesn't use, so the panel
             still reads as one full-height piece rather than leaving a dead
             gap above the footer on a short nav list. */}
-        <div className="shrink-0 flex items-center justify-center opacity-[0.05] pointer-events-none min-h-10">
+        <div className="flex-1 flex items-center justify-center opacity-[0.05] pointer-events-none min-h-10">
           <IconProperty size={72} />
         </div>
 
