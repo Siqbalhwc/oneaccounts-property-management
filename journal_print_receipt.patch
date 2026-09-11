@@ -1,0 +1,86 @@
+diff --git a/backend/app/routers/financials.py b/backend/app/routers/financials.py
+index 930e151..a4e8a95 100644
+--- a/backend/app/routers/financials.py
++++ b/backend/app/routers/financials.py
+@@ -289,6 +289,13 @@ def get_source_document(
+     if source_type == "invoice" and source_id:
+         return RedirectResponse(url=f"/api/invoices/{source_id}/pdf")
+ 
++    if source_type == "receipt" and source_id:
++        # source_id here is the receipt_group_id set in payments.py's
++        # record_receipt -- redirect to the same branded receipt PDF the
++        # Receive Payment screen downloads, instead of falling through to
++        # the generic journal voucher below.
++        return RedirectResponse(url=f"/api/payments/receipt/{source_id}/pdf")
++
+     if source_type == "security_deposit" and source_id:
+         deposit = (
+             supabase.table("security_deposits")
+diff --git a/frontend/app/(dashboard)/journal/page.tsx b/frontend/app/(dashboard)/journal/page.tsx
+index b216486..50c7fee 100644
+--- a/frontend/app/(dashboard)/journal/page.tsx
++++ b/frontend/app/(dashboard)/journal/page.tsx
+@@ -2,17 +2,19 @@
+ 
+ import { useEffect, useState } from "react";
+ import Link from "next/link";
+-import { Pencil } from "lucide-react";
++import { Pencil, Printer } from "lucide-react";
+ import { Card, DataTable } from "@/components/ui/Card";
+ import { Button } from "@/components/ui/Button";
+ import { StampBadge } from "@/components/ui/StampBadge";
+ import { Field, Input, Select } from "@/components/ui/Field";
+-import { api, Building } from "@/lib/api";
++import { api, fetchPdfBlob, Building } from "@/lib/api";
+ 
+ type JournalLine = {
+   line_id: string;
++  entry_id: string;
+   entry_date: string;
+   source_type: string;
++  source_id: string | null;
+   description?: string;
+   account_code: string;
+   account_name: string;
+@@ -62,6 +64,20 @@ export default function JournalEntriesPage() {
+       .catch((err: any) => setManualError(err.message));
+   }
+ 
++  const [printingLineId, setPrintingLineId] = useState<string | null>(null);
++
++  async function handlePrintLine(l: JournalLine) {
++    setPrintingLineId(l.line_id);
++    try {
++      const params = new URLSearchParams({ source_type: l.source_type, journal_entry_id: l.entry_id });
++      if (l.source_id) params.set("source_id", l.source_id);
++      const blob = await fetchPdfBlob(`/financials/source-document?${params.toString()}`);
++      window.open(URL.createObjectURL(blob), "_blank");
++    } finally {
++      setPrintingLineId(null);
++    }
++  }
++
+   const [dateFrom, setDateFrom] = useState("");
+   const [dateTo, setDateTo] = useState("");
+   const [buildingFilter, setBuildingFilter] = useState("");
+@@ -217,6 +233,20 @@ export default function JournalEntriesPage() {
+             { header: "Account", accessor: (l) => `${l.account_code} · ${l.account_name}` },
+             { header: "Dr", accessor: (l) => (l.direction === "debit" ? <span className="figures">{formatPkr(l.amount)}</span> : ""), align: "right" },
+             { header: "Cr", accessor: (l) => (l.direction === "credit" ? <span className="figures">{formatPkr(l.amount)}</span> : ""), align: "right" },
++            {
++              header: "",
++              accessor: (l) => (
++                <button
++                  onClick={() => handlePrintLine(l)}
++                  disabled={printingLineId === l.line_id}
++                  title="Print / view document"
++                  className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink inline-flex disabled:opacity-40"
++                >
++                  <Printer size={16} />
++                </button>
++              ),
++              align: "right",
++            },
+           ]}
+         />
+         {lines && lines.length > 0 && (

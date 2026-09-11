@@ -289,6 +289,13 @@ def get_source_document(
     if source_type == "invoice" and source_id:
         return RedirectResponse(url=f"/api/invoices/{source_id}/pdf")
 
+    if source_type == "receipt" and source_id:
+        # source_id here is the receipt_group_id set in payments.py's
+        # record_receipt -- redirect to the same branded receipt PDF the
+        # Receive Payment screen downloads, instead of falling through to
+        # the generic journal voucher below.
+        return RedirectResponse(url=f"/api/payments/receipt/{source_id}/pdf")
+
     if source_type == "security_deposit" and source_id:
         deposit = (
             supabase.table("security_deposits")
