@@ -2,12 +2,12 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Pencil, Printer } from "lucide-react";
+import { Pencil } from "lucide-react";
 import { Card, DataTable } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { StampBadge } from "@/components/ui/StampBadge";
 import { Field, Input, Select } from "@/components/ui/Field";
-import { api, fetchPdfBlob, Building } from "@/lib/api";
+import { api, Building } from "@/lib/api";
 
 type JournalLine = {
   line_id: string;
@@ -62,20 +62,6 @@ export default function JournalEntriesPage() {
       .get<ManualEntry[]>("/ledger/manual-entries")
       .then(setManualEntries)
       .catch((err: any) => setManualError(err.message));
-  }
-
-  const [printingLineId, setPrintingLineId] = useState<string | null>(null);
-
-  async function handlePrintLine(l: JournalLine) {
-    setPrintingLineId(l.line_id);
-    try {
-      const params = new URLSearchParams({ source_type: l.source_type, journal_entry_id: l.entry_id });
-      if (l.source_id) params.set("source_id", l.source_id);
-      const blob = await fetchPdfBlob(`/financials/source-document?${params.toString()}`);
-      window.open(URL.createObjectURL(blob), "_blank");
-    } finally {
-      setPrintingLineId(null);
-    }
   }
 
   const [dateFrom, setDateFrom] = useState("");
@@ -233,20 +219,6 @@ export default function JournalEntriesPage() {
             { header: "Account", accessor: (l) => `${l.account_code} · ${l.account_name}` },
             { header: "Dr", accessor: (l) => (l.direction === "debit" ? <span className="figures">{formatPkr(l.amount)}</span> : ""), align: "right" },
             { header: "Cr", accessor: (l) => (l.direction === "credit" ? <span className="figures">{formatPkr(l.amount)}</span> : ""), align: "right" },
-            {
-              header: "",
-              accessor: (l) => (
-                <button
-                  onClick={() => handlePrintLine(l)}
-                  disabled={printingLineId === l.line_id}
-                  title="Print / view document"
-                  className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink inline-flex disabled:opacity-40"
-                >
-                  <Printer size={16} />
-                </button>
-              ),
-              align: "right",
-            },
           ]}
         />
         {lines && lines.length > 0 && (

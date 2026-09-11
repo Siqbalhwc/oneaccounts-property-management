@@ -264,54 +264,6 @@ def invoice_pdf(invoice_id: str, supabase: Client = Depends(get_supabase)):
     )
 
 
-@router.get("/{invoice_id}/receipt-pdf")
-def invoice_receipt_pdf(invoice_id: str, supabase: Client = Depends(get_supabase)):
-    """
-    Printable payment receipt for this invoice -- moved here from the
-    Journal page's generic "print/view document" button, which used to be
-    the only way to reach a receipt and cluttered every journal line with
-    a print icon regardless of source type.
-
-    Mirrors security_deposits.py's /receipt-pdf: available as soon as at
-    least one payment has been recorded against this invoice, whether
-    that's the full amount or a partial instalment -- there is no
-    "fully paid" gate here, same as the deposit receipt.
-
-    A tenant's receipt can cover several invoices at once (the "Receive
-    Payment" screen groups them under one receipt_group_id), so this looks
-    up the MOST RECENT payment recorded against this specific invoice and
-    prints that payment's whole receipt -- the same document the person
-    would have gotten when the payment was originally recorded.
-    """
-    from fastapi.responses import StreamingResponse
-    import io
-
-    from app.services.payment_receipt_pdf import fetch_receipt_context, render_receipt_pdf
-
-    payments = (
-        supabase.table("payments")
-        .select("id, receipt_group_id, created_at")
-        .eq("invoice_id", invoice_id)
-        .order("created_at", desc=True)
-        .execute()
-        .data
-    )
-    if not payments:
-        raise HTTPException(status_code=400, detail="No payment has been recorded against this invoice yet.")
-
-    latest = payments[0]
-    receipt_id = latest.get("receipt_group_id") or latest["id"]
-
-    ctx = fetch_receipt_context(supabase, receipt_id)
-    pdf_bytes = render_receipt_pdf(ctx)
-
-    return StreamingResponse(
-        io.BytesIO(pdf_bytes),
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="receipt_{invoice_id[:8]}.pdf"'},
-    )
-
-
 @router.get("/{invoice_id}/view")
 def view_invoice_public(invoice_id: str, service_client=Depends(get_service_client)):
     """

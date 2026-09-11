@@ -2,15 +2,19 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { Pencil, Printer } from "lucide-react";
 import { Card, DataTable } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { StampBadge } from "@/components/ui/StampBadge";
 import { Field, Input, Select } from "@/components/ui/Field";
-import { api, Building } from "@/lib/api";
+import { api, fetchPdfBlob, Building } from "@/lib/api";
 
 type JournalLine = {
   line_id: string;
+  entry_id: string;
   entry_date: string;
   source_type: string;
+  source_id: string | null;
   description?: string;
   account_code: string;
   account_name: string;
@@ -20,6 +24,14 @@ type JournalLine = {
 
 type Owner = { id: string; name: string };
 type Tenant = { id: string; full_name: string };
+type ManualEntry = {
+  id: string;
+  entry_date: string;
+  description: string | null;
+  status: string;
+  total_amount: number;
+  lines_summary: string;
+};
 
 function formatPkr(n: number) {
   return `Rs ${Number(n || 0).toLocaleString("en-PK")}`;
@@ -37,6 +49,34 @@ export default function JournalEntriesPage() {
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showFilters, setShowFilters] = useState(false);
+
+  // Manual/adjustment entries only -- these are the only entries that can
+  // ever be edited (vs. reversed), so they get their own small list with
+  // an Edit action, separate from the all-lines table below which mixes
+  // in every source type and isn't grouped by entry.
+  const [manualEntries, setManualEntries] = useState<ManualEntry[] | null>(null);
+  const [manualError, setManualError] = useState<string | null>(null);
+
+  function loadManualEntries() {
+    api
+      .get<ManualEntry[]>("/ledger/manual-entries")
+      .then(setManualEntries)
+      .catch((err: any) => setManualError(err.message));
+  }
+
+  const [printingLineId, setPrintingLineId] = useState<string | null>(null);
+
+  async function handlePrintLine(l: JournalLine) {
+    setPrintingLineId(l.line_id);
+    try {
+      const params = new URLSearchParams({ source_type: l.source_type, journal_entry_id: l.entry_id });
+      if (l.source_id) params.set("source_id", l.source_id);
+      const blob = await fetchPdfBlob(`/financials/source-document?${params.toString()}`);
+      window.open(URL.createObjectURL(blob), "_blank");
+    } finally {
+      setPrintingLineId(null);
+    }
+  }
 
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -68,6 +108,7 @@ export default function JournalEntriesPage() {
     api.get<Building[]>("/buildings").then(setBuildings);
     api.get<Owner[]>("/owners").then(setOwners);
     api.get<Tenant[]>("/tenants").then(setTenants);
+    loadManualEntries();
   }, []);
 
   const activeFilterCount = [buildingFilter, ownerFilter, tenantFilter, sourceTypeFilter].filter(Boolean).length;
@@ -84,7 +125,7 @@ export default function JournalEntriesPage() {
         <div className="flex items-center gap-4">
           <button
             onClick={() => setShowFilters(!showFilters)}
-            className="text-sm text-ledger hover:underline whitespace-nowrap"
+            className="text-sm text-accent hover:underline whitespace-nowrap"
           >
             {showFilters ? "Hide filters" : `Filter${activeFilterCount ? ` (${activeFilterCount})` : ""}`}
           </button>
@@ -146,6 +187,42 @@ export default function JournalEntriesPage() {
       )}
 
       <Card>
+        <div className="mb-3">
+          <h2 className="text-sm font-semibold">Manual entries</h2>
+          <p className="text-xs text-ink/50 mt-0.5">
+            Only entries posted here via &quot;New entry&quot; can be edited after posting.
+            Everything else (leases, invoices, payments, expenses, salaries, deposits)
+            must be corrected by reversing it instead.
+          </p>
+        </div>
+        {manualError && <p className="text-sm text-stamp-red mb-2">Couldn&apos;t load manual entries — {manualError}.</p>}
+        <DataTable
+          keyField="id"
+          rows={manualEntries ?? []}
+          emptyMessage="No manual entries yet."
+          columns={[
+            { header: "Date", accessor: (e) => e.entry_date },
+            { header: "Description", accessor: (e) => e.description ?? "—" },
+            { header: "Lines", accessor: (e) => <span className="text-ink/60 text-xs">{e.lines_summary}</span> },
+            { header: "Amount", accessor: (e) => <span className="figures">{formatPkr(e.total_amount)}</span>, align: "right" },
+            { header: "Status", accessor: (e) => <StampBadge status={e.status === "reversed" ? "terminated" : "active"} /> },
+            {
+              header: "",
+              accessor: (e) =>
+                e.status === "reversed" ? (
+                  <span className="text-xs text-ink/35">Reversed</span>
+                ) : (
+                  <Link href={`/journal/${e.id}/edit`} title="Edit" className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink inline-flex">
+                    <Pencil size={16} />
+                  </Link>
+                ),
+              align: "right",
+            },
+          ]}
+        />
+      </Card>
+
+      <Card>
         <DataTable
           keyField="line_id"
           rows={lines ?? []}
@@ -156,6 +233,20 @@ export default function JournalEntriesPage() {
             { header: "Account", accessor: (l) => `${l.account_code} · ${l.account_name}` },
             { header: "Dr", accessor: (l) => (l.direction === "debit" ? <span className="figures">{formatPkr(l.amount)}</span> : ""), align: "right" },
             { header: "Cr", accessor: (l) => (l.direction === "credit" ? <span className="figures">{formatPkr(l.amount)}</span> : ""), align: "right" },
+            {
+              header: "",
+              accessor: (l) => (
+                <button
+                  onClick={() => handlePrintLine(l)}
+                  disabled={printingLineId === l.line_id}
+                  title="Print / view document"
+                  className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink inline-flex disabled:opacity-40"
+                >
+                  <Printer size={16} />
+                </button>
+              ),
+              align: "right",
+            },
           ]}
         />
         {lines && lines.length > 0 && (
