@@ -627,17 +627,28 @@ export default function LeasesPage() {
                                       Rs {pending.toLocaleString("en-PK")}
                                     </p>
                                   </div>
-                                  <div className="no-print">
-                                    {fullyPaid ? (
+                                  <div className="no-print flex items-center gap-2">
+                                    {/* A receipt can be printed as soon as at least one payment has
+                                        been recorded -- partial or full -- mirroring the backend's
+                                        /receipt-pdf endpoint, which has never gated on full payment.
+                                        "Record payment" stays available alongside it until the
+                                        deposit is fully paid, so a partial payment can still be
+                                        topped up later. */}
+                                    {paid > 0 && (
                                       <Button
                                         variant="secondary"
                                         onClick={() => handlePrintReceipt(deposit!.id)}
                                         disabled={printingDepositId === deposit!.id}
                                       >
                                         <Printer size={14} className="mr-1.5 inline -mt-0.5" />
-                                        {printingDepositId === deposit!.id ? "Opening…" : "Print receipt"}
+                                        {printingDepositId === deposit!.id
+                                          ? "Opening…"
+                                          : fullyPaid
+                                          ? "Print receipt"
+                                          : "Print partial receipt"}
                                       </Button>
-                                    ) : (
+                                    )}
+                                    {!fullyPaid && (
                                       <Button variant="secondary" onClick={() => openReceiveModal(deposit!)}>
                                         <Banknote size={14} className="mr-1.5 inline -mt-0.5" />
                                         Record payment
