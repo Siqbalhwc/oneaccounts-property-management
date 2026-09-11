@@ -6,6 +6,9 @@ import { createPortal } from "react-dom";
 export type ComboOption = {
   value: string;
   label: string;
+  /** Optional right-aligned, muted secondary text per row (e.g. a count).
+   *  Purely cosmetic -- omitting it renders exactly as before. */
+  meta?: string;
 };
 
 /**
@@ -181,11 +184,14 @@ export function SearchableSelect({
                   selectOption(opt);
                 }}
                 onMouseEnter={() => setActiveIndex(i)}
-                className={`px-3 py-2 text-sm cursor-pointer truncate ${
+                className={`px-3 py-2 text-sm cursor-pointer flex items-center justify-between gap-3 ${
                   i === activeIndex ? "bg-accent/[0.07]" : ""
                 } ${opt.value === value ? "font-medium text-accent" : "text-ink"}`}
               >
-                {opt.label}
+                <span className="truncate">{opt.label}</span>
+                {opt.meta && (
+                  <span className="shrink-0 text-xs text-ink/40 figures">{opt.meta}</span>
+                )}
               </div>
             ))}
           </div>,

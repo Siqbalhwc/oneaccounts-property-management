@@ -8,6 +8,7 @@ import { Modal } from "@/components/ui/Modal";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
 import { HistoryPanel } from "@/components/ui/HistoryPanel";
 import { Field, Input, Select } from "@/components/ui/Field";
+import { SearchableSelect, ComboOption } from "@/components/ui/SearchableSelect";
 
 const NEW_FLOOR_VALUE = "__new__";
 const NEW_TYPE_VALUE = "__new_type__";
@@ -315,83 +316,117 @@ export default function BuildingsPage() {
   const selectedBuilding = buildings?.find((b) => b.id === selected);
   const ownerName = (id: string) => owners?.find((o) => o.id === id)?.name ?? "—";
 
+  // Unfiltered rooms for the selected building -- deliberately NOT the same
+  // as roomsForSelected above, which is narrowed by the search box/status
+  // filter. The snapshot strip below should describe the whole building
+  // regardless of what's currently being searched for in the grid.
+  const roomsForSelectedBuilding = (rooms ?? []).filter((r) => r.building_id === selected);
+  const snapshotCounts = {
+    occupied: roomsForSelectedBuilding.filter((r) => r.status === "occupied").length,
+    // "vacant" and "reserved" already share the same amber stamp color
+    // elsewhere in the app (StampBadge) -- grouped the same way here
+    // rather than inventing a 4th color that doesn't exist anywhere else.
+    available: roomsForSelectedBuilding.filter((r) => r.status === "vacant" || r.status === "reserved").length,
+    underRepair: roomsForSelectedBuilding.filter((r) => r.status === "under_maintenance").length,
+  };
+  const rentedRooms = roomsForSelectedBuilding.filter((r) => !!r.base_rent);
+  const avgRent =
+    rentedRooms.length > 0
+      ? rentedRooms.reduce((sum, r) => sum + Number(r.base_rent), 0) / rentedRooms.length
+      : 0;
+
+  // Unit count per building, computed from the rooms already loaded on this
+  // page -- no extra API calls needed for the selector's "N units" hint.
+  const unitCountByBuilding = new Map<string, number>();
+  for (const r of rooms ?? []) {
+    unitCountByBuilding.set(r.building_id, (unitCountByBuilding.get(r.building_id) ?? 0) + 1);
+  }
+  const buildingOptions: ComboOption[] = (buildings ?? []).map((b) => {
+    const count = unitCountByBuilding.get(b.id) ?? 0;
+    return { value: b.id, label: b.name, meta: `${count} unit${count === 1 ? "" : "s"}` };
+  });
+
   return (
     <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+      {/* Consolidated header: title/subtitle on the left, building selector
+          on the right -- replaces the old wrapping row of building-name
+          tabs, which grew unreadable past ~10 buildings. */}
+      <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-display font-semibold">Buildings & apartments</h1>
           <p className="text-sm text-ink/55 mt-1">
             Every unit, its current status, and its maintenance history.
           </p>
         </div>
-        <div className="flex gap-2 flex-wrap no-print">
-          {selectedBuilding && (
-            <>
-              <Button variant="ghost" onClick={() => openEditBuildingModal(selectedBuilding)}>
-                Edit building
-              </Button>
-              {canManage && (
-                <Button variant="ghost" onClick={() => setArchiveBuildingTarget(selectedBuilding)}>
-                  Archive building
-                </Button>
-              )}
-            </>
-          )}
-          {buildings && buildings.length > 0 && (
-            <Button variant="secondary" onClick={openAddRoomModal}>
-              Add apartment
-            </Button>
-          )}
-          <Button onClick={openAddBuildingModal}>Add building</Button>
-        </div>
+        {buildings && buildings.length > 0 && (
+          <div className="w-full lg:w-72 lg:shrink-0">
+            <p className="text-[10px] uppercase tracking-wider text-ink/40 font-medium mb-1.5 text-right">
+              Building
+            </p>
+            <SearchableSelect
+              value={selected ?? ""}
+              onChange={(v) => setSelected(v)}
+              options={buildingOptions}
+              placeholder="Search buildings…"
+            />
+          </div>
+        )}
       </div>
-
-      {buildings && buildings.length > 0 && (
-        <div className="flex flex-wrap gap-x-1 gap-y-0 border-b border-border">
-          {buildings.map((b) => (
-            <button
-              key={b.id}
-              onClick={() => setSelected(b.id)}
-              className={`px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors whitespace-nowrap ${
-                selected === b.id
-                  ? "border-brass-dark text-ink"
-                  : "border-transparent text-ink/50 hover:text-ink"
-              }`}
-            >
-              {b.name}
-            </button>
-          ))}
-        </div>
-      )}
 
       {buildings && buildings.length === 0 && (
         <div className="py-12 text-center text-sm text-ink/45 border border-dashed border-border rounded-card">
           No buildings yet — click &quot;Add building&quot; to create your first one.
+          <div className="mt-4">
+            <Button onClick={openAddBuildingModal}>Add building</Button>
+          </div>
         </div>
       )}
 
       {buildings && buildings.length > 0 && (
         <>
-          <div className="flex flex-col sm:flex-row gap-3">
-            <div className="w-full sm:w-64">
-              <Input
-                placeholder="Search apartments…"
-                value={roomSearch}
-                onChange={(e) => setRoomSearch(e.target.value)}
-                className="w-full"
-              />
+          {/* Apartment search/filter and the building action buttons now
+              share one row instead of each floating on its own. */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex flex-col sm:flex-row gap-3">
+              <div className="w-full sm:w-56">
+                <Input
+                  placeholder="Search apartments…"
+                  value={roomSearch}
+                  onChange={(e) => setRoomSearch(e.target.value)}
+                  className="w-full"
+                />
+              </div>
+              <div className="w-full sm:w-40">
+                <Select value={roomStatusFilter} onChange={(e) => setRoomStatusFilter(e.target.value)} className="w-full">
+                  <option value="">All statuses</option>
+                  {ROOM_STATUSES.map((s) => (
+                    <option key={s} value={s}>
+                      {s.replace("_", " ")}
+                    </option>
+                  ))}
+                </Select>
+              </div>
             </div>
-            <div className="w-full sm:w-44">
-              <Select value={roomStatusFilter} onChange={(e) => setRoomStatusFilter(e.target.value)} className="w-full">
-                <option value="">All statuses</option>
-                {ROOM_STATUSES.map((s) => (
-                  <option key={s} value={s}>
-                    {s.replace("_", " ")}
-                  </option>
-                ))}
-              </Select>
+            <div className="flex gap-2 flex-wrap no-print">
+              {selectedBuilding && (
+                <>
+                  <Button variant="ghost" onClick={() => openEditBuildingModal(selectedBuilding)}>
+                    Edit building
+                  </Button>
+                  {canManage && (
+                    <Button variant="ghost" onClick={() => setArchiveBuildingTarget(selectedBuilding)}>
+                      Archive building
+                    </Button>
+                  )}
+                </>
+              )}
+              <Button variant="secondary" onClick={openAddRoomModal}>
+                Add apartment
+              </Button>
+              <Button onClick={openAddBuildingModal}>Add building</Button>
             </div>
           </div>
+
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
             {roomsForSelected.length === 0 && (
               <p className="col-span-full text-sm text-ink/45 py-8 text-center border border-dashed border-border rounded-card">
@@ -410,7 +445,7 @@ export default function BuildingsPage() {
                   <span className="font-display text-lg font-semibold">{room.room_number}</span>
                   <StampBadge status={room.status} />
                 </div>
-                <p className="text-xs text-ink/50">{room.room_type ?? "Unit"}</p>
+                <p className="text-xs text-ink/55">{room.room_type ?? "Unit"}</p>
                 {room.base_rent && (
                   <p className="text-sm figures mt-2 text-ink/70">
                     Rs {Number(room.base_rent).toLocaleString("en-PK")}/mo
@@ -424,6 +459,50 @@ export default function BuildingsPage() {
               </button>
             ))}
           </div>
+
+          {/* Building snapshot -- fills the space below the grid with an
+              actual occupancy read for the WHOLE building (unaffected by
+              the search/status filter above), instead of leaving it blank. */}
+          {roomsForSelectedBuilding.length > 0 && (
+            <div className="card px-4 py-3.5 flex flex-wrap items-center gap-5">
+              <p className="text-[10px] uppercase tracking-wider text-ink/40 font-medium shrink-0">
+                Building snapshot
+              </p>
+              <div className="flex-1 min-w-[180px] h-2.5 rounded-full overflow-hidden flex bg-ink/10">
+                <span
+                  className="h-full bg-stamp-green"
+                  style={{ width: `${(snapshotCounts.occupied / roomsForSelectedBuilding.length) * 100}%` }}
+                />
+                <span
+                  className="h-full bg-stamp-red"
+                  style={{ width: `${(snapshotCounts.underRepair / roomsForSelectedBuilding.length) * 100}%` }}
+                />
+                <span
+                  className="h-full bg-stamp-amber"
+                  style={{ width: `${(snapshotCounts.available / roomsForSelectedBuilding.length) * 100}%` }}
+                />
+              </div>
+              <div className="flex gap-4 text-xs text-ink/65 flex-wrap">
+                <span>
+                  <span className="inline-block w-2 h-2 rounded-full bg-stamp-green mr-1.5" />
+                  Occupied <b className="figures font-medium text-ink">{snapshotCounts.occupied}</b>
+                </span>
+                <span>
+                  <span className="inline-block w-2 h-2 rounded-full bg-stamp-amber mr-1.5" />
+                  Available <b className="figures font-medium text-ink">{snapshotCounts.available}</b>
+                </span>
+                <span>
+                  <span className="inline-block w-2 h-2 rounded-full bg-stamp-red mr-1.5" />
+                  Under repair <b className="figures font-medium text-ink">{snapshotCounts.underRepair}</b>
+                </span>
+              </div>
+              {avgRent > 0 && (
+                <p className="text-xs text-ink/50 shrink-0">
+                  Avg rent <b className="figures text-brass-dark font-medium">Rs {Math.round(avgRent).toLocaleString("en-PK")}</b>/mo
+                </p>
+              )}
+            </div>
+          )}
         </>
       )}
 
