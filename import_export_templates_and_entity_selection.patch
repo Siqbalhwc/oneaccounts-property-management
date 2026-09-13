@@ -1,0 +1,187 @@
+diff --git a/frontend/app/(dashboard)/settings/page.tsx b/frontend/app/(dashboard)/settings/page.tsx
+index 36cf7fc..4509ff5 100644
+--- a/frontend/app/(dashboard)/settings/page.tsx
++++ b/frontend/app/(dashboard)/settings/page.tsx
+@@ -24,18 +24,33 @@ function statusClass(status: ImportReportRow["status"]) {
+ function ImportSlot({
+   label,
+   endpoint,
++  templateEndpoint,
+   hint,
+ }: {
+   label: string;
+   endpoint: string;
++  templateEndpoint: string;
+   hint: string;
+ }) {
+   const [file, setFile] = useState<File | null>(null);
+   const [uploading, setUploading] = useState(false);
++  const [downloadingTemplate, setDownloadingTemplate] = useState(false);
+   const [report, setReport] = useState<ImportReportRow[] | null>(null);
+   const [error, setError] = useState<string | null>(null);
+   const inputRef = useRef<HTMLInputElement>(null);
+ 
++  async function handleDownloadTemplate() {
++    setDownloadingTemplate(true);
++    setError(null);
++    try {
++      await downloadFile(templateEndpoint, `${label.toLowerCase()}_template.xlsx`);
++    } catch (err: any) {
++      setError(`Couldn't get the template — ${err.message}`);
++    } finally {
++      setDownloadingTemplate(false);
++    }
++  }
++
+   async function handleImport() {
+     if (!file) return;
+     setUploading(true);
+@@ -63,6 +78,9 @@ function ImportSlot({
+           <p className="text-xs text-ink/50 mt-0.5">{hint}</p>
+         </div>
+         <div className="flex items-center gap-2 shrink-0">
++          <Button variant="ghost" onClick={handleDownloadTemplate} disabled={downloadingTemplate}>
++            {downloadingTemplate ? "Preparing…" : "Template"}
++          </Button>
+           <input
+             ref={inputRef}
+             type="file"
+@@ -118,6 +136,15 @@ export default function SettingsPage() {
+ 
+   const [exporting, setExporting] = useState(false);
+   const [exportError, setExportError] = useState<string | null>(null);
++  const [downloadingAllTemplates, setDownloadingAllTemplates] = useState(false);
++  const EXPORT_ENTITIES = ["owners", "buildings", "rooms", "tenants", "leases"] as const;
++  const [selectedEntities, setSelectedEntities] = useState<Record<string, boolean>>({
++    owners: true,
++    buildings: true,
++    rooms: true,
++    tenants: true,
++    leases: true,
++  });
+ 
+   const [team, setTeam] = useState<TeamMember[] | null>(null);
+   const [inviteModalOpen, setInviteModalOpen] = useState(false);
+@@ -198,10 +225,19 @@ export default function SettingsPage() {
+   }
+ 
+   async function handleExport() {
++    const chosen = EXPORT_ENTITIES.filter((e) => selectedEntities[e]);
++    if (chosen.length === 0) {
++      setExportError("Select at least one entity to export.");
++      return;
++    }
+     setExporting(true);
+     setExportError(null);
+     try {
+-      await downloadFile("/data-transfer/export", "oneaccounts_export.xlsx");
++      const suffix = chosen.length === EXPORT_ENTITIES.length ? "all" : chosen.join("_");
++      await downloadFile(
++        `/data-transfer/export?entities=${chosen.join(",")}`,
++        `oneaccounts_export_${suffix}.xlsx`
++      );
+     } catch (err: any) {
+       setExportError(err.message);
+     } finally {
+@@ -209,6 +245,18 @@ export default function SettingsPage() {
+     }
+   }
+ 
++  async function handleDownloadAllTemplates() {
++    setDownloadingAllTemplates(true);
++    setExportError(null);
++    try {
++      await downloadFile("/data-transfer/templates", "oneaccounts_import_template.xlsx");
++    } catch (err: any) {
++      setExportError(`Couldn't get the templates — ${err.message}`);
++    } finally {
++      setDownloadingAllTemplates(false);
++    }
++  }
++
+   if (!company || !profile) {
+     return <p className="text-sm text-ink/50">Loading settings…</p>;
+   }
+@@ -333,15 +381,18 @@ export default function SettingsPage() {
+         <Card
+           title="Import & export"
+           action={
+-            <Button variant="secondary" onClick={handleExport} disabled={exporting}>
+-              {exporting ? "Preparing…" : "Export to Excel"}
++            <Button variant="ghost" onClick={handleDownloadAllTemplates} disabled={downloadingAllTemplates}>
++              {downloadingAllTemplates ? "Preparing…" : "Download all templates"}
+             </Button>
+           }
+         >
+           <p className="text-sm text-ink/55 mb-1">
+-            Export gives you one workbook with a sheet for each entity below —
+-            useful as a backup, or as a starting template for a bulk import
+-            (fill in new rows underneath your existing ones and re-upload).
++            Export gives you one workbook with a sheet for each entity you
++            select below — useful as a backup, or as a starting template for
++            a bulk import (fill in new rows underneath your existing ones and
++            re-upload). Each import slot further down also has its own
++            "Template" button if you'd rather start from a blank sheet with
++            just one example row and the validation rules spelled out.
+           </p>
+           <p className="text-xs text-ink/45 mb-4">
+             Import order matters: Owners → Buildings → Rooms → Tenants → Leases.
+@@ -352,32 +403,57 @@ export default function SettingsPage() {
+             duplicate active lease) before anything is saved, and a lease
+             import posts to your ledger exactly like creating one by hand does.
+           </p>
+-          {exportError && <p className="text-sm text-stamp-red mb-4">{exportError}</p>}
++          {exportError && <p className="text-sm text-stamp-red mb-3">{exportError}</p>}
++
++          <div className="flex items-center justify-between gap-3 flex-wrap border border-border rounded-card p-4 mb-6">
++            <div className="flex items-center gap-4 flex-wrap">
++              {EXPORT_ENTITIES.map((entity) => (
++                <label key={entity} className="flex items-center gap-1.5 text-sm capitalize">
++                  <input
++                    type="checkbox"
++                    checked={selectedEntities[entity]}
++                    onChange={(e) =>
++                      setSelectedEntities((prev) => ({ ...prev, [entity]: e.target.checked }))
++                    }
++                  />
++                  {entity}
++                </label>
++              ))}
++            </div>
++            <Button variant="secondary" onClick={handleExport} disabled={exporting}>
++              {exporting ? "Preparing…" : "Export selected to Excel"}
++            </Button>
++          </div>
+ 
+           <div className="space-y-3">
+             <ImportSlot
+               label="Owners"
+               endpoint="/data-transfer/import/owners"
++              templateEndpoint="/data-transfer/templates/owners"
+               hint="Columns: name, phone, cnic, address"
+             />
+             <ImportSlot
+               label="Buildings"
+               endpoint="/data-transfer/import/buildings"
++              templateEndpoint="/data-transfer/templates/buildings"
+               hint="Columns: name, address"
+             />
+             <ImportSlot
+               label="Rooms"
+               endpoint="/data-transfer/import/rooms"
++              templateEndpoint="/data-transfer/templates/rooms"
+               hint="Columns: building_name, floor_number, room_number, room_type, base_rent, owner_name (blank = inherit the building's owner)"
+             />
+             <ImportSlot
+               label="Tenants"
+               endpoint="/data-transfer/import/tenants"
++              templateEndpoint="/data-transfer/templates/tenants"
+               hint="Columns: full_name, cnic, phone, email, emergency_contact_name, emergency_contact_phone"
+             />
+             <ImportSlot
+               label="Leases"
+               endpoint="/data-transfer/import/leases"
++              templateEndpoint="/data-transfer/templates/leases"
+               hint="Columns: tenant_cnic, building_name, room_number, start_date, end_date, rent_amount, security_deposit_amount, security_deposit_date_received, security_deposit_is_received (yes/no), security_deposit_received_account_code"
+             />
+           </div>

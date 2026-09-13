@@ -42,12 +42,15 @@ WHAT'S STILL NEEDED TO FINISH THE LEASE IMPORT PRECISELY:
 """
 
 import re
+from datetime import date
 from io import BytesIO
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill
+from openpyxl.worksheet.worksheet import Worksheet
 from supabase import Client
 
 from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
@@ -55,6 +58,15 @@ from app.crud.generic import write_audit_log, friendly_db_error
 from postgrest.exceptions import APIError
 
 router = APIRouter(prefix="/data-transfer", tags=["Import / Export"])
+
+ENTITY_SHEETS = ["Owners", "Buildings", "Rooms", "Tenants", "Leases"]
+ENTITY_KEY_TO_SHEET = {
+    "owners": "Owners",
+    "buildings": "Buildings",
+    "rooms": "Rooms",
+    "tenants": "Tenants",
+    "leases": "Leases",
+}
 
 
 # ============================================================================
@@ -107,74 +119,125 @@ def read_sheet(wb, sheet_name: str) -> List[Dict[str, Any]]:
     return out
 
 
+HEADER_FONT = Font(bold=True, color="FFFFFF")
+HEADER_FILL = PatternFill("solid", fgColor="2F4F3E")  # matches the app's "ledger" green
+NOTE_FONT = Font(italic=True, size=9, color="6B7280")
+
+
+def style_header_row(ws: Worksheet, num_columns: int) -> None:
+    for col in range(1, num_columns + 1):
+        cell = ws.cell(row=1, column=col)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+    ws.freeze_panes = "A2"
+
+
+def autosize_columns(ws: Worksheet, widths: List[int]) -> None:
+    for i, width in enumerate(widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
+
+
 # ============================================================================
-# EXPORT — one workbook, one sheet per entity, current data
+# TEMPLATES — a ready-to-fill starting point per entity, with the exact
+# column headers the importer expects, one realistic example row, and a
+# second "Instructions" sheet spelling out the same validation rules the
+# manual Add/Edit forms enforce. This is the single source of truth for
+# column names -- if you add a column here, add the matching check in the
+# import function below it, and vice versa.
 # ============================================================================
 
-@router.get("/export")
-def export_workbook(
-    supabase: Client = Depends(get_supabase),
-):
-    buildings = supabase.table("buildings").select("*").eq("is_archived", False).execute().data
-    owners = supabase.table("owners").select("*").execute().data
-    rooms = supabase.table("rooms").select("*").eq("is_archived", False).execute().data
-    tenants = supabase.table("tenants").select("*").eq("is_archived", False).execute().data
-    leases = supabase.table("leases").select("*").execute().data
-
-    building_name = {b["id"]: b["name"] for b in buildings}
-    owner_name = {o["id"]: o["name"] for o in owners}
-    room_label = {r["id"]: r["room_number"] for r in rooms}
-    tenant_label = {t["id"]: f'{t["full_name"]} ({t["cnic"]})' for t in tenants}
-
-    wb = Workbook()
-    wb.remove(wb.active)
-
-    ws = wb.create_sheet("Owners")
+def _build_owners_template(ws: Worksheet) -> None:
     ws.append(["name", "phone", "cnic", "address"])
-    for o in owners:
-        ws.append([o.get("name"), o.get("phone"), o.get("cnic"), o.get("address")])
+    ws.append(["Mr Khan", "0300-1234567", "35202-1234567-1", "House 12, Model Town, Lahore"])
+    style_header_row(ws, 4)
+    autosize_columns(ws, [22, 16, 18, 32])
 
-    ws = wb.create_sheet("Buildings")
+
+def _build_buildings_template(ws: Worksheet) -> None:
     ws.append(["name", "address"])
-    for b in buildings:
-        ws.append([b.get("name"), b.get("address")])
+    ws.append(["Sunrise Heights", "Main Boulevard, Gulberg, Lahore"])
+    style_header_row(ws, 2)
+    autosize_columns(ws, [24, 36])
 
-    ws = wb.create_sheet("Rooms")
+
+def _build_rooms_template(ws: Worksheet) -> None:
     ws.append(["building_name", "floor_number", "room_number", "room_type", "base_rent", "owner_name"])
-    for r in rooms:
-        ws.append([
-            building_name.get(r["building_id"]),
-            None,  # floor_number filled on request only -- rooms carry floor_id, not floor_number, directly
-            r.get("room_number"),
-            r.get("room_type"),
-            float(r["base_rent"]) if r.get("base_rent") is not None else None,
-            owner_name.get(r.get("owner_id"), "") if r.get("owner_id") else "",
-        ])
+    ws.append(["Sunrise Heights", 1, "A-101", "1-bed", 20000, ""])
+    style_header_row(ws, 6)
+    autosize_columns(ws, [20, 12, 14, 14, 12, 20])
 
-    ws = wb.create_sheet("Tenants")
+
+def _build_tenants_template(ws: Worksheet) -> None:
     ws.append(["full_name", "cnic", "phone", "email", "emergency_contact_name", "emergency_contact_phone"])
-    for t in tenants:
-        ws.append([
-            t.get("full_name"), t.get("cnic"), t.get("phone"), t.get("email"),
-            t.get("emergency_contact_name"), t.get("emergency_contact_phone"),
-        ])
+    ws.append(["Bilal Ahmed", "35202-1234567-1", "0300-1234567", "bilal@example.com", "Ahmed Khan", "0321-7654321"])
+    style_header_row(ws, 6)
+    autosize_columns(ws, [20, 18, 16, 24, 22, 20])
 
-    ws = wb.create_sheet("Leases")
+
+def _build_leases_template(ws: Worksheet) -> None:
     ws.append([
         "tenant_cnic", "building_name", "room_number", "start_date", "end_date",
         "rent_amount", "security_deposit_amount", "security_deposit_date_received",
     ])
-    tenant_cnic = {t["id"]: t["cnic"] for t in tenants}
-    room_building = {r["id"]: building_name.get(r["building_id"]) for r in rooms}
-    for l in leases:
-        ws.append([
-            tenant_cnic.get(l["tenant_id"]),
-            room_building.get(l["room_id"]),
-            room_label.get(l["room_id"]),
-            l.get("start_date"), l.get("end_date"),
-            None,  # rent_amount lives on lease_charges, left blank in the export summary sheet
-            None, None,
-        ])
+    ws.append(["35202-1234567-1", "Sunrise Heights", "A-101", "2026-01-01", "2026-12-31", 20000, 40000, "2026-01-01"])
+    style_header_row(ws, 8)
+    autosize_columns(ws, [18, 20, 14, 14, 14, 14, 20, 26])
+
+
+TEMPLATE_BUILDERS = {
+    "Owners": _build_owners_template,
+    "Buildings": _build_buildings_template,
+    "Rooms": _build_rooms_template,
+    "Tenants": _build_tenants_template,
+    "Leases": _build_leases_template,
+}
+
+INSTRUCTIONS = [
+    ("Owners", "name", "Required."),
+    ("Owners", "phone, cnic, address", "Optional."),
+    ("Buildings", "name", "Required."),
+    ("Buildings", "address", "Optional."),
+    ("Rooms", "building_name", "Required. Must exactly match an existing building's name -- import Buildings first if it doesn't exist yet."),
+    ("Rooms", "room_number", "Required. Must be unique within that building (matches the Add Room rule) -- a duplicate is skipped, not an error."),
+    ("Rooms", "floor_number", "Optional, defaults to 1. Created automatically if that floor doesn't exist yet."),
+    ("Rooms", "owner_name", "Optional. Leave blank to inherit the building's owner. If filled, must exactly match an existing owner's name -- import Owners first."),
+    ("Rooms", "room_type, base_rent", "Optional."),
+    ("Tenants", "full_name", "Required."),
+    ("Tenants", "cnic", "Required. Exactly 13 digits (dashes optional) -- e.g. 35202-1234567-1. Same rule as the Add Tenant form. Duplicate CNICs are skipped, not an error."),
+    ("Tenants", "phone", "Required. A valid Pakistani mobile number -- e.g. 0300-1234567 (11 digits starting with 0) or 3001234567 (10 digits). Same rule as the Add Tenant form."),
+    ("Tenants", "email, emergency_contact_name, emergency_contact_phone", "Optional."),
+    ("Leases", "tenant_cnic", "Required. Must exactly match a tenant already imported/created -- import Tenants first."),
+    ("Leases", "building_name, room_number", "Required. Must match an existing building + room -- import Buildings and Rooms first."),
+    ("Leases", "start_date, end_date", "Required. Format YYYY-MM-DD (e.g. 2026-01-01)."),
+    ("Leases", "rent_amount", "Required. Must be greater than 0. Creates a single 'Rent' charge on the lease."),
+    ("Leases", "security_deposit_amount, security_deposit_date_received", "Optional -- leave both blank for no deposit."),
+    ("General", "Blank rows", "Skipped automatically -- fine to leave extra empty rows below your data."),
+    ("General", "Import order", "Owners -> Buildings -> Rooms -> Tenants -> Leases. Later sheets look up earlier ones by name/CNIC, not by ID."),
+    ("General", "Partial success", "Each row is independent. A bad row is reported with the exact reason and everything else still imports -- fix just that row and re-upload."),
+]
+
+
+def _build_instructions_sheet(ws: Worksheet) -> None:
+    ws.append(["Sheet", "Column(s)", "Rule"])
+    for sheet, cols, rule in INSTRUCTIONS:
+        ws.append([sheet, cols, rule])
+    style_header_row(ws, 3)
+    autosize_columns(ws, [12, 34, 80])
+    for row in range(2, len(INSTRUCTIONS) + 2):
+        ws.cell(row=row, column=3).alignment = ws.cell(row=row, column=3).alignment.copy(wrap_text=True)
+
+
+@router.get("/templates")
+def download_all_templates():
+    """One workbook with all five entity sheets (each header + one example
+    row) plus an Instructions sheet listing every validation rule -- the
+    safest starting point since it can't drift from what the importer
+    actually checks (both live in this same file)."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    for sheet_name, builder in TEMPLATE_BUILDERS.items():
+        builder(wb.create_sheet(sheet_name))
+    _build_instructions_sheet(wb.create_sheet("Instructions"))
 
     buf = BytesIO()
     wb.save(buf)
@@ -182,7 +245,166 @@ def export_workbook(
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="oneaccounts_export.xlsx"'},
+        headers={"Content-Disposition": 'attachment; filename="oneaccounts_import_template.xlsx"'},
+    )
+
+
+@router.get("/templates/{entity}")
+def download_template(entity: str):
+    """Same as above but scoped to one entity -- what each 'Template' button
+    next to an individual import slot downloads."""
+    sheet_name = ENTITY_KEY_TO_SHEET.get(entity.lower())
+    if not sheet_name:
+        raise HTTPException(status_code=404, detail=f'Unknown entity "{entity}".')
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    TEMPLATE_BUILDERS[sheet_name](wb.create_sheet(sheet_name))
+    _build_instructions_sheet(wb.create_sheet("Instructions"))
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{sheet_name.lower()}_template.xlsx"'},
+    )
+
+
+# ============================================================================
+# EXPORT — one workbook, one sheet per entity, current data
+# ============================================================================
+
+@router.get("/export")
+def export_workbook(
+    entities: Optional[str] = Query(
+        None,
+        description='Comma-separated subset to export: "owners,buildings,rooms,tenants,leases". Omit for all.',
+    ),
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+):
+    requested = (
+        {e.strip().lower() for e in entities.split(",") if e.strip()}
+        if entities
+        else set(ENTITY_KEY_TO_SHEET.keys())
+    )
+    unknown = requested - set(ENTITY_KEY_TO_SHEET.keys())
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown entities: {', '.join(sorted(unknown))}")
+
+    try:
+        buildings = (
+            supabase.table("buildings").select("*").eq("company_id", company_id).eq("is_archived", False).execute().data
+            if ("buildings" in requested or "rooms" in requested or "leases" in requested)
+            else []
+        )
+        owners = (
+            supabase.table("owners").select("*").eq("company_id", company_id).execute().data
+            if ("owners" in requested or "rooms" in requested)
+            else []
+        )
+        rooms = (
+            supabase.table("rooms").select("*").eq("company_id", company_id).eq("is_archived", False).execute().data
+            if ("rooms" in requested or "leases" in requested)
+            else []
+        )
+        tenants = (
+            supabase.table("tenants").select("*").eq("company_id", company_id).eq("is_archived", False).execute().data
+            if ("tenants" in requested or "leases" in requested)
+            else []
+        )
+        leases = (
+            supabase.table("leases").select("*").eq("company_id", company_id).execute().data
+            if "leases" in requested
+            else []
+        )
+    except APIError as e:
+        status, detail = friendly_db_error(e)
+        raise HTTPException(status_code=status, detail=f"Couldn't read your data to export it: {detail}")
+
+    building_name = {b["id"]: b["name"] for b in buildings}
+    owner_name = {o["id"]: o["name"] for o in owners}
+    room_label = {r["id"]: r["room_number"] for r in rooms}
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    if "owners" in requested:
+        ws = wb.create_sheet("Owners")
+        ws.append(["name", "phone", "cnic", "address"])
+        for o in owners:
+            ws.append([o.get("name"), o.get("phone"), o.get("cnic"), o.get("address")])
+        style_header_row(ws, 4)
+        autosize_columns(ws, [22, 16, 18, 32])
+
+    if "buildings" in requested:
+        ws = wb.create_sheet("Buildings")
+        ws.append(["name", "address"])
+        for b in buildings:
+            ws.append([b.get("name"), b.get("address")])
+        style_header_row(ws, 2)
+        autosize_columns(ws, [24, 36])
+
+    if "rooms" in requested:
+        ws = wb.create_sheet("Rooms")
+        ws.append(["building_name", "floor_number", "room_number", "room_type", "base_rent", "owner_name"])
+        for r in rooms:
+            ws.append([
+                building_name.get(r["building_id"]),
+                None,  # floor_number filled on request only -- rooms carry floor_id, not floor_number, directly
+                r.get("room_number"),
+                r.get("room_type"),
+                float(r["base_rent"]) if r.get("base_rent") is not None else None,
+                owner_name.get(r.get("owner_id"), "") if r.get("owner_id") else "",
+            ])
+        style_header_row(ws, 6)
+        autosize_columns(ws, [20, 12, 14, 14, 12, 20])
+
+    if "tenants" in requested:
+        ws = wb.create_sheet("Tenants")
+        ws.append(["full_name", "cnic", "phone", "email", "emergency_contact_name", "emergency_contact_phone"])
+        for t in tenants:
+            ws.append([
+                t.get("full_name"), t.get("cnic"), t.get("phone"), t.get("email"),
+                t.get("emergency_contact_name"), t.get("emergency_contact_phone"),
+            ])
+        style_header_row(ws, 6)
+        autosize_columns(ws, [20, 18, 16, 24, 22, 20])
+
+    if "leases" in requested:
+        ws = wb.create_sheet("Leases")
+        ws.append([
+            "tenant_cnic", "building_name", "room_number", "start_date", "end_date",
+            "rent_amount", "security_deposit_amount", "security_deposit_date_received",
+        ])
+        tenant_cnic = {t["id"]: t["cnic"] for t in tenants}
+        room_building = {r["id"]: building_name.get(r["building_id"]) for r in rooms}
+        for l in leases:
+            ws.append([
+                tenant_cnic.get(l["tenant_id"]),
+                room_building.get(l["room_id"]),
+                room_label.get(l["room_id"]),
+                l.get("start_date"), l.get("end_date"),
+                None,  # rent_amount lives on lease_charges, left blank in the export summary sheet
+                None, None,
+            ])
+        style_header_row(ws, 8)
+        autosize_columns(ws, [18, 20, 14, 14, 14, 14, 20, 26])
+
+    if len(wb.sheetnames) == 0:
+        raise HTTPException(status_code=400, detail="Nothing selected to export.")
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    suffix = "all" if len(requested) == len(ENTITY_KEY_TO_SHEET) else "_".join(sorted(requested))
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="oneaccounts_export_{suffix}.xlsx"'},
     )
 
 

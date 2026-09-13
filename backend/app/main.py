@@ -9,6 +9,7 @@ from app.routers import (
     auth_activity,
     chart_of_accounts,
     company_settings,
+    data_transfer,
     expenses,
     financials,
     implementation,
@@ -45,6 +46,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Browsers hide all response headers from JS by default except a small
+    # "simple" set -- Content-Disposition isn't one of them. Without this,
+    # file downloads (backup .json, Excel export/templates) still work, but
+    # the frontend can't read the server's suggested filename and falls
+    # back to a generic one.
+    expose_headers=["Content-Disposition"],
 )
 
 # Safety net for any endpoint that raises an exception nobody caught.
@@ -97,6 +104,7 @@ app.include_router(chart_of_accounts.router, prefix=API_PREFIX)
 app.include_router(ledger.router, prefix=API_PREFIX)
 app.include_router(financials.router, prefix=API_PREFIX)
 app.include_router(implementation.router, prefix=API_PREFIX)
+app.include_router(data_transfer.router, prefix=API_PREFIX)
 
 
 @app.get("/")
