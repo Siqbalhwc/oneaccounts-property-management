@@ -140,7 +140,7 @@ def room_wise_receivables(
     lease_ids = [l["id"] for l in leases]
     invoices = (
         supabase.table("invoices")
-        .select("id, lease_id, invoice_month, total_amount")
+        .select("id, lease_id, invoice_month, due_date, total_amount, status")
         .in_("lease_id", lease_ids)
         .neq("status", "cancelled")
         .execute()
@@ -155,7 +155,7 @@ def room_wise_receivables(
 
     payments = (
         supabase.table("payments")
-        .select("id, invoice_id, amount, discount_amount, payment_date")
+        .select("id, invoice_id, amount, discount_amount, payment_date, payment_method")
         .in_("invoice_id", invoice_ids)
         .execute()
         .data
@@ -240,6 +240,34 @@ def room_wise_receivables(
                     if period_start <= pay_date <= period_end:
                         period_received += float(pay["amount"]) + float(pay.get("discount_amount") or 0)
 
+        # "Current invoice" for the drill-down (report row -> current
+        # invoice + its payments -> full invoice detail): the most recently
+        # dated invoice for this lease, independent of the report's own
+        # period filter, so the drill-down always reflects the latest bill
+        # even when looking at an older period.
+        current_invoice = None
+        if current_lease:
+            lease_invoices = invoices_by_lease.get(current_lease["id"], [])
+            if lease_invoices:
+                current_invoice = sorted(
+                    lease_invoices, key=lambda i: str(i["invoice_month"]), reverse=True
+                )[0]
+
+        current_invoice_payments: List[dict] = []
+        current_invoice_received = 0.0
+        if current_invoice:
+            for pay in payments_by_invoice.get(current_invoice["id"], []):
+                current_invoice_payments.append(
+                    {
+                        "id": pay["id"],
+                        "amount": float(pay["amount"]),
+                        "discount_amount": float(pay.get("discount_amount") or 0),
+                        "payment_date": str(pay["payment_date"]),
+                        "payment_method": pay.get("payment_method"),
+                    }
+                )
+                current_invoice_received += float(pay["amount"]) + float(pay.get("discount_amount") or 0)
+
         rows.append(
             {
                 "room_id": room["id"],
@@ -252,6 +280,16 @@ def room_wise_receivables(
                 "invoiced_period": round(period_invoiced, 2),
                 "received_period": round(period_received, 2),
                 "receivable_total": receivable_total,
+                "current_lease_id": current_lease["id"] if current_lease else None,
+                "current_invoice_id": current_invoice["id"] if current_invoice else None,
+                "current_invoice_month": str(current_invoice["invoice_month"]) if current_invoice else None,
+                "current_invoice_due_date": str(current_invoice["due_date"]) if current_invoice else None,
+                "current_invoice_status": current_invoice["status"] if current_invoice else None,
+                "current_invoice_total": round(float(current_invoice["total_amount"]), 2)
+                if current_invoice
+                else None,
+                "current_invoice_received": round(current_invoice_received, 2) if current_invoice else None,
+                "current_invoice_payments": current_invoice_payments,
             }
         )
 

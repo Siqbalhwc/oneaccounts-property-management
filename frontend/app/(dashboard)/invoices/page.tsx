@@ -57,9 +57,20 @@ export default function InvoicesPage() {
 
   useEffect(() => {
     load();
-    api.get<Building[]>("/buildings").then(setBuildings);
-    api.get<Tenant[]>("/tenants").then(setTenants);
-    api.get<Room[]>("/rooms").then(setRooms);
+    // Archived buildings/tenants/rooms are still valid history for past
+    // invoices (e.g. a room that's since been archived after the tenant
+    // moved out) -- include_archived=true here so an invoice never loses
+    // its room/tenant label, and stays findable by search, just because
+    // the record behind it was later archived. Without this, GET /rooms
+    // silently drops archived rooms (see app/crud/generic.py's default),
+    // propertyAndRoom() falls back to "—" for that invoice, and both the
+    // displayed column AND the free-text search below go blank/unmatched
+    // for that room -- exactly the "room 202 not found, but tenant search
+    // still works" symptom, since /tenants has the same default but that
+    // tenant hadn't been archived.
+    api.get<Building[]>("/buildings?include_archived=true").then(setBuildings);
+    api.get<Tenant[]>("/tenants?include_archived=true").then(setTenants);
+    api.get<Room[]>("/rooms?include_archived=true").then(setRooms);
   }, []);
 
   async function handleGenerate(e: React.FormEvent) {
@@ -137,13 +148,16 @@ export default function InvoicesPage() {
   const leaseById = (id: string) => leases?.find((l) => l.id === id);
   const tenantName = (leaseId: string) => {
     const tenantId = leaseById(leaseId)?.tenant_id;
-    return tenants?.find((t) => t.id === tenantId)?.full_name ?? "—";
+    const tenant = tenants?.find((t) => t.id === tenantId);
+    if (!tenant) return "—";
+    return `${tenant.full_name}${tenant.is_archived ? " (archived)" : ""}`;
   };
   const propertyAndRoom = (leaseId: string) => {
     const roomId = leaseById(leaseId)?.room_id;
     const room = rooms?.find((r) => r.id === roomId);
     const building = buildings?.find((b) => b.id === room?.building_id);
-    return room ? `${building?.name ?? "—"} — ${room.room_number}` : "—";
+    if (!room) return "—";
+    return `${building?.name ?? "—"} — ${room.room_number}${room.is_archived ? " (archived)" : ""}`;
   };
 
   const availableMonths = Array.from(new Set((invoices ?? []).map((i) => i.invoice_month.slice(0, 7)))).sort(

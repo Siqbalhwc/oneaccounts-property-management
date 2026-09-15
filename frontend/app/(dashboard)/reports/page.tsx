@@ -8,7 +8,7 @@ import { Select, Field, Input, AmountInput } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { PrintHeader } from "@/components/ui/PrintHeader";
-import { api, Tenant, Lease, Room, Building, Invoice, Company } from "@/lib/api";
+import { api, Tenant, Lease, Room, Building, Invoice, Company, fetchPdfBlob } from "@/lib/api";
 
 type PnlRow = {
   month: string;
@@ -37,6 +37,13 @@ type Payment = {
 type ExpenseCategory = { id: string; name: string };
 type Expense = { id: string; category_id: string; building_id?: string; amount: number; expense_date: string };
 type SalaryPayment = { id: string; staff_id: string; salary_month: string; amount_paid: number };
+type RoomWisePayment = {
+  id: string;
+  amount: number;
+  discount_amount: number;
+  payment_date: string;
+  payment_method: string | null;
+};
 type RoomWiseRow = {
   room_id: string;
   room_number: string;
@@ -48,7 +55,17 @@ type RoomWiseRow = {
   invoiced_period: number;
   received_period: number;
   receivable_total: number;
+  current_lease_id: string | null;
+  current_invoice_id: string | null;
+  current_invoice_month: string | null;
+  current_invoice_due_date: string | null;
+  current_invoice_status: string | null;
+  current_invoice_total: number | null;
+  current_invoice_received: number | null;
+  current_invoice_payments: RoomWisePayment[];
 };
+type InvoiceLineItem = { id: string; label: string; amount: number };
+type InvoiceDetail = Invoice & { line_items: InvoiceLineItem[] };
 type CollectionVsExpenseRow = {
   building_id: string;
   building_name: string;
@@ -113,6 +130,14 @@ export default function ReportsPage() {
   const [roomWisePeriodEnd, setRoomWisePeriodEnd] = useState(new Date().toISOString().slice(0, 10));
   const [roomWiseBuildingFilter, setRoomWiseBuildingFilter] = useState("");
 
+  // Room-wise drill-down: click a room row -> see its current invoice +
+  // payments -> click that invoice -> full invoice detail (line items).
+  const [roomDrilldownRow, setRoomDrilldownRow] = useState<RoomWiseRow | null>(null);
+  const [invoiceDetail, setInvoiceDetail] = useState<InvoiceDetail | null>(null);
+  const [invoiceDetailLoading, setInvoiceDetailLoading] = useState(false);
+  const [invoiceDetailError, setInvoiceDetailError] = useState<string | null>(null);
+  const [invoicePdfLoading, setInvoicePdfLoading] = useState(false);
+
   function loadDeposits() {
     api.get<SecurityDeposit[]>("/security-deposits").then(setDeposits);
   }
@@ -161,6 +186,46 @@ export default function ReportsPage() {
     loadRoomWise();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function openRoomDrilldown(row: RoomWiseRow) {
+    setRoomDrilldownRow(row);
+  }
+
+  function closeRoomDrilldown() {
+    setRoomDrilldownRow(null);
+  }
+
+  async function openInvoiceDetail(invoiceId: string) {
+    setInvoiceDetail(null);
+    setInvoiceDetailError(null);
+    setInvoiceDetailLoading(true);
+    try {
+      const detail = await api.get<InvoiceDetail>(`/invoices/${invoiceId}`);
+      setInvoiceDetail(detail);
+    } catch (err: any) {
+      setInvoiceDetailError(err.message);
+    } finally {
+      setInvoiceDetailLoading(false);
+    }
+  }
+
+  function closeInvoiceDetail() {
+    setInvoiceDetail(null);
+    setInvoiceDetailError(null);
+  }
+
+  async function handleViewInvoicePdf(invoiceId: string) {
+    setInvoicePdfLoading(true);
+    try {
+      const blob = await fetchPdfBlob(`/invoices/${invoiceId}/pdf`);
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank");
+    } catch (err: any) {
+      alert(err.message || "Couldn't open the invoice PDF.");
+    } finally {
+      setInvoicePdfLoading(false);
+    }
+  }
 
   function mergeLeasesIn(newOnes: Lease[]) {
     setLeases((prev) => {
@@ -514,10 +579,14 @@ export default function ReportsPage() {
           )}
 
           <Card>
+            <p className="text-xs text-ink/45 mb-3 no-print">
+              Click a room to drill down into its current invoice and payments.
+            </p>
             <DataTable
               keyField="room_id"
               rows={roomWiseRows ?? []}
               emptyMessage="No rooms match this filter."
+              onRowClick={(r) => openRoomDrilldown(r)}
               columns={[
                 {
                   header: "Room",
@@ -804,6 +873,162 @@ export default function ReportsPage() {
               <p className="text-xs text-stamp-red">Deductions can&apos;t exceed the amount held.</p>
             )}
           </form>
+        )}
+      </Modal>
+
+      {/* Room-wise Receivables drill-down, step 1: current invoice + its payments */}
+      <Modal
+        open={!!roomDrilldownRow}
+        onClose={closeRoomDrilldown}
+        title={
+          roomDrilldownRow
+            ? `${roomDrilldownRow.building_name} — ${roomDrilldownRow.room_number}`
+            : "Room detail"
+        }
+      >
+        {roomDrilldownRow && (
+          <div className="space-y-4">
+            <div className="text-sm bg-accent/5 border border-accent/15 rounded-card px-3 py-2 space-y-1">
+              <div className="flex justify-between">
+                <span className="text-ink/50">Tenant</span>
+                <span className="font-medium">{roomDrilldownRow.tenant_name ?? "—"}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-ink/50">Receivable (as of period end)</span>
+                <span
+                  className={`figures font-medium ${
+                    roomDrilldownRow.receivable_total > 0 ? "text-stamp-red" : ""
+                  }`}
+                >
+                  {formatPkr(roomDrilldownRow.receivable_total)}
+                </span>
+              </div>
+            </div>
+
+            {!roomDrilldownRow.current_invoice_id ? (
+              <p className="text-sm text-ink/45 py-4 text-center border border-dashed border-border rounded-card">
+                No invoice has been generated for this room&apos;s current tenant yet.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-xs uppercase tracking-wider text-ink/45 font-medium">Current invoice</p>
+                <button
+                  onClick={() => openInvoiceDetail(roomDrilldownRow.current_invoice_id!)}
+                  className="group w-full text-left border border-border rounded-card px-3 py-3 hover:border-accent/50 transition-colors"
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="font-medium text-sm">{roomDrilldownRow.current_invoice_month}</span>
+                    <StampBadge status={roomDrilldownRow.current_invoice_status ?? "draft"} />
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-ink/50">Due {roomDrilldownRow.current_invoice_due_date}</span>
+                    <span className="figures font-medium">{formatPkr(roomDrilldownRow.current_invoice_total ?? 0)}</span>
+                  </div>
+                  <p className="text-xs text-accent mt-2 group-hover:underline">
+                    Click to view complete invoice details →
+                  </p>
+                </button>
+
+                <div>
+                  <p className="text-xs uppercase tracking-wider text-ink/45 font-medium mb-2">
+                    Payments against this invoice
+                  </p>
+                  {roomDrilldownRow.current_invoice_payments.length === 0 ? (
+                    <p className="text-sm text-ink/40">No payments recorded against this invoice yet.</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {roomDrilldownRow.current_invoice_payments.map((p) => (
+                        <div key={p.id} className="flex justify-between text-sm">
+                          <span className="text-ink/70">
+                            {p.payment_date}
+                            {p.payment_method ? ` · ${p.payment_method}` : ""}
+                          </span>
+                          <span className="figures">
+                            {formatPkr(p.amount + (p.discount_amount || 0))}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex justify-between text-sm font-semibold pt-2 mt-2 border-t border-border">
+                    <span>Received on this invoice</span>
+                    <span className="figures">{formatPkr(roomDrilldownRow.current_invoice_received ?? 0)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-ink/50">Balance on this invoice</span>
+                    <span className="figures">
+                      {formatPkr(
+                        (roomDrilldownRow.current_invoice_total ?? 0) -
+                          (roomDrilldownRow.current_invoice_received ?? 0)
+                      )}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
+
+      {/* Room-wise Receivables drill-down, step 2: complete invoice details */}
+      <Modal
+        open={!!invoiceDetail || invoiceDetailLoading || !!invoiceDetailError}
+        onClose={closeInvoiceDetail}
+        title={invoiceDetail ? `Invoice ${invoiceDetail.invoice_number ?? ""}` : "Invoice detail"}
+      >
+        {invoiceDetailLoading && <p className="text-sm text-ink/45 py-6 text-center">Loading invoice…</p>}
+        {invoiceDetailError && <p className="text-sm text-stamp-red">{invoiceDetailError}</p>}
+        {invoiceDetail && !invoiceDetailLoading && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div>
+                <p className="text-ink/50">Invoice month</p>
+                <p className="font-medium">{invoiceDetail.invoice_month}</p>
+              </div>
+              <div>
+                <p className="text-ink/50">Due date</p>
+                <p className="font-medium">{invoiceDetail.due_date}</p>
+              </div>
+              <div>
+                <p className="text-ink/50">Status</p>
+                <StampBadge status={invoiceDetail.status} />
+              </div>
+              <div>
+                <p className="text-ink/50">Total amount</p>
+                <p className="figures font-semibold">{formatPkr(invoiceDetail.total_amount)}</p>
+              </div>
+            </div>
+
+            <div>
+              <p className="text-xs uppercase tracking-wider text-ink/45 font-medium mb-2">Line items</p>
+              <div className="space-y-1.5">
+                {invoiceDetail.line_items.map((li) => (
+                  <div key={li.id} className="flex justify-between text-sm">
+                    <span className="text-ink/70">{li.label}</span>
+                    <span className="figures">{formatPkr(li.amount)}</span>
+                  </div>
+                ))}
+                <div className="flex justify-between text-sm font-semibold pt-2 mt-1 border-t border-border">
+                  <span>Total</span>
+                  <span className="figures">{formatPkr(invoiceDetail.total_amount)}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-border">
+              <Button type="button" variant="ghost" onClick={closeInvoiceDetail}>
+                Close
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => handleViewInvoicePdf(invoiceDetail.id)}
+                disabled={invoicePdfLoading}
+              >
+                {invoicePdfLoading ? "Opening…" : "View / print PDF"}
+              </Button>
+            </div>
+          </div>
         )}
       </Modal>
     </div>

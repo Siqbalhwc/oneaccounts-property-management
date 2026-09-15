@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Field, Input, Select } from "@/components/ui/Field";
 import { WhatsAppIcon } from "@/components/ui/WhatsAppIcon";
-import { Banknote, Printer } from "lucide-react";
+import { Banknote, Printer, Receipt } from "lucide-react";
 
 function formatPkr(n: number) {
   return `Rs ${n.toLocaleString("en-PK")}`;
@@ -23,6 +23,7 @@ export default function InvoicesPage() {
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
   const [rooms, setRooms] = useState<Room[] | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [printingReceiptId, setPrintingReceiptId] = useState<string | null>(null);
   const [sendingWhatsappId, setSendingWhatsappId] = useState<string | null>(null);
   const [monthFilter, setMonthFilter] = useState<string>("");
   const [searchTerm, setSearchTerm] = useState("");
@@ -103,6 +104,19 @@ export default function InvoicesPage() {
       window.open(url, "_blank");
     } finally {
       setDownloadingId(null);
+    }
+  }
+
+  async function handlePrintReceipt(invoiceId: string) {
+    setPrintingReceiptId(invoiceId);
+    try {
+      const blob = await fetchPdfBlob(`/invoices/${invoiceId}/receipt-pdf`);
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank");
+    } catch (err: any) {
+      alert(err.message || "Couldn't open the receipt.");
+    } finally {
+      setPrintingReceiptId(null);
     }
   }
 
@@ -200,6 +214,16 @@ export default function InvoicesPage() {
                       className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink"
                     >
                       <Banknote size={16} />
+                    </button>
+                  )}
+                  {(i.status === "paid" || i.status === "partial") && (
+                    <button
+                      onClick={() => handlePrintReceipt(i.id)}
+                      disabled={printingReceiptId === i.id}
+                      title="Print receipt"
+                      className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink disabled:opacity-50"
+                    >
+                      <Receipt size={16} />
                     </button>
                   )}
                   <button
