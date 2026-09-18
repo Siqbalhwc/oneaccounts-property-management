@@ -73,6 +73,7 @@ const BASE_SECTIONS: NavSection[] = [
       { href: "/profit-and-loss", label: "Profit & loss", icon: IconTrend },
       { href: "/balance-sheet", label: "Balance sheet", icon: IconBalanceSheet },
       { href: "/reports", label: "Reports", icon: IconReports },
+      { href: "/reports/income-by-head", label: "Receipts by head", icon: IconReports },
     ],
   },
   {

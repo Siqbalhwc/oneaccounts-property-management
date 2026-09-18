@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from supabase import Client
 
 from app.core.deps import get_current_company_id, get_current_user, get_service_client, get_supabase
+from app.services.income_allocation import allocate_payment_to_line_items
 from app.services.ledger import (
     UnbalancedJournalEntry,
     get_account_id,
@@ -115,6 +116,25 @@ def record_payment(
                 room = supabase.table("rooms").select("building_id").eq("id", room_id).single().execute().data
                 building_id = room["building_id"] if room else None
                 owner_id = resolve_room_owner(supabase, room_id)
+
+            # Best-effort, reporting-only: explains which of the invoice's
+            # income heads (Rent/Parking/Internet/etc.) this cash actually
+            # paid off, for the "Receipts by Head" report. Never allowed to
+            # block or roll back the payment itself -- same principle as
+            # write_audit_log in generic.py. If this ever fails, re-running
+            # POST /reports/income-by-head/backfill fixes it retroactively.
+            try:
+                allocate_payment_to_line_items(
+                    supabase,
+                    company_id=company_id,
+                    payment_id=payment["id"],
+                    invoice_id=invoice_id,
+                    tenant_id=tenant_id,
+                    lease_id=lease_id,
+                    cash_amount=float(payload["amount"]),
+                )
+            except Exception:
+                logger.exception("Income-head allocation failed for payment_id=%s invoice_id=%s", payment["id"], invoice_id)
     elif tenant_id:
         # No invoice given (e.g. an advance/on-account payment) -- best-effort
         # resolve tags via the tenant's current active lease, so this entry
@@ -498,6 +518,7 @@ def record_receipt(
             "amount": round(opening_balance_cash, 2),
             "discount_amount": round(opening_balance_discount, 2),
             "discount_account_id": payload.discount_account_id if opening_balance_discount > 0 else None,
+            "account_id": payload.account_id,
             "payment_date": str(payload.receipt_date),
             "payment_method": payload.payment_method,
             "notes": ((payload.notes or "") + " (applied to opening balance)").strip(),
@@ -517,12 +538,34 @@ def record_receipt(
             "amount": c,
             "discount_amount": d,
             "discount_account_id": payload.discount_account_id if d > 0 else None,
+            "account_id": payload.account_id,
             "payment_date": str(payload.receipt_date),
             "payment_method": payload.payment_method,
             "notes": payload.notes,
             "receipt_group_id": receipt_group_id,
         }
-        created_payments.append(supabase.table("payments").insert(row).execute().data[0])
+        new_payment_row = supabase.table("payments").insert(row).execute().data[0]
+        created_payments.append(new_payment_row)
+
+        # Best-effort, reporting-only allocation across this invoice's
+        # income heads -- see the comment on the single-invoice /payments
+        # endpoint above for why this is never allowed to block the
+        # receipt itself.
+        try:
+            allocate_payment_to_line_items(
+                supabase,
+                company_id=company_id,
+                payment_id=new_payment_row["id"],
+                invoice_id=inv["id"],
+                tenant_id=tenant_id,
+                lease_id=payload.lease_id,
+                cash_amount=c,
+                discount_amount=d,
+            )
+        except Exception:
+            logger.exception(
+                "Income-head allocation failed for payment_id=%s invoice_id=%s", new_payment_row["id"], inv["id"]
+            )
 
         all_payments = (
             supabase.table("payments").select("amount, discount_amount").eq("invoice_id", inv["id"]).execute().data
@@ -540,6 +583,7 @@ def record_receipt(
             "tenant_id": tenant_id,
             "amount": advance_amount,
             "discount_amount": 0,
+            "account_id": payload.account_id,
             "payment_date": str(payload.receipt_date),
             "payment_method": payload.payment_method,
             "notes": (payload.notes or "") + " (advance -- exceeds current balance owed)",
