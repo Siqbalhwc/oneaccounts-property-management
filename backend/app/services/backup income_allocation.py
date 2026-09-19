@@ -60,12 +60,11 @@ def _one_time_labels_for_lease(supabase: Client, lease_id: Optional[str]) -> set
 
 def _line_items_sorted_for_allocation(supabase: Client, invoice_id: str, lease_id: Optional[str]) -> List[dict]:
     """Invoice's line items, ordered one-time-first then smallest-amount-first
-    (ties on equal amounts broken by id, for a stable order) -- the priority
-    a partial payment fills
+    (ties broken by creation order) -- the priority a partial payment fills
     them in."""
     items = (
         supabase.table("invoice_line_items")
-        .select("id, label, amount")
+        .select("id, label, amount, created_at")
         .eq("invoice_id", invoice_id)
         .execute()
         .data
@@ -77,6 +76,7 @@ def _line_items_sorted_for_allocation(supabase: Client, invoice_id: str, lease_i
         key=lambda it: (
             0 if it["_is_one_time"] else 1,
             float(it["amount"]),
+            it.get("created_at") or "",
             it["id"],
         )
     )
