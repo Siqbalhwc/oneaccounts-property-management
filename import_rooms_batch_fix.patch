@@ -1,0 +1,91 @@
+diff --git a/backend/app/routers/data_transfer.py b/backend/app/routers/data_transfer.py
+index a227bf8..e6f5804 100644
+--- a/backend/app/routers/data_transfer.py
++++ b/backend/app/routers/data_transfer.py
+@@ -494,10 +494,17 @@ def import_rooms(
+     buildings = supabase.table("buildings").select("id, name").execute().data
+     owners = supabase.table("owners").select("id, name").execute().data
+     existing_rooms = supabase.table("rooms").select("room_number, building_id").execute().data
++    # Pre-fetched once, same as buildings/owners/existing_rooms above, so a
++    # sheet with many rows doesn't do a floors round-trip per row -- that
++    # was the main reason a big Rooms import could run long enough to hit
++    # the backend's 30s Vercel timeout and surface as "Failed to fetch"
++    # with no readable error at all.
++    existing_floors = supabase.table("floors").select("id, building_id, floor_number").execute().data
+ 
+     building_by_name = {b["name"].strip().lower(): b["id"] for b in buildings}
+     owner_by_name = {o["name"].strip().lower(): o["id"] for o in owners}
+     seen_room_numbers = {(r["room_number"].strip().lower(), r["building_id"]) for r in existing_rooms}
++    floor_by_key = {(f["building_id"], f["floor_number"]): f["id"] for f in existing_floors}
+ 
+     report = []
+     for i, row in enumerate(rows, start=2):
+@@ -528,34 +535,41 @@ def import_rooms(
+ 
+         # A room needs a floor_id, but the sheet only carries a floor_number
+         # for readability -- resolve-or-create the floor the same way the
+-        # Add Room modal's "+ Add a new floor..." path does.
+-        floor_number = row.get("floor_number") or 1
+-        existing_floor = (
+-            supabase.table("floors")
+-            .select("id")
+-            .eq("building_id", building_id)
+-            .eq("floor_number", int(floor_number))
+-            .execute()
+-            .data
+-        )
+-        if existing_floor:
+-            floor_id = existing_floor[0]["id"]
+-        else:
+-            new_floor = supabase.table("floors").insert(
+-                {"company_id": company_id, "building_id": building_id, "floor_number": int(floor_number)}
+-            ).execute().data[0]
+-            floor_id = new_floor["id"]
+-
+-        payload = {
+-            "company_id": company_id,
+-            "building_id": building_id,
+-            "floor_id": floor_id,
+-            "room_number": room_number,
+-            "room_type": row.get("room_type") or None,
+-            "base_rent": row.get("base_rent") or None,
+-            "owner_id": owner_id,
+-        }
++        # Add Room modal's "+ Add a new floor..." path does. This whole
++        # block now lives inside the same try/except as the room insert
++        # below, so a problem with one row's floor (bad floor_number text,
++        # a DB error creating it) is reported for that row only, instead
++        # of crashing the entire import for every other row in the sheet.
+         try:
++            floor_number_raw = row.get("floor_number") or 1
++            try:
++                floor_number = int(floor_number_raw)
++            except (TypeError, ValueError):
++                report.append({
++                    "row": i,
++                    "status": "error",
++                    "detail": f'floor_number "{floor_number_raw}" must be a whole number (leave blank for floor 1).',
++                })
++                continue
++
++            floor_key = (building_id, floor_number)
++            floor_id = floor_by_key.get(floor_key)
++            if not floor_id:
++                new_floor = supabase.table("floors").insert(
++                    {"company_id": company_id, "building_id": building_id, "floor_number": floor_number}
++                ).execute().data[0]
++                floor_id = new_floor["id"]
++                floor_by_key[floor_key] = floor_id
++
++            payload = {
++                "company_id": company_id,
++                "building_id": building_id,
++                "floor_id": floor_id,
++                "room_number": room_number,
++                "room_type": row.get("room_type") or None,
++                "base_rent": row.get("base_rent") or None,
++                "owner_id": owner_id,
++            }
+             res = supabase.table("rooms").insert(payload).execute()
+             created = res.data[0]
+             write_audit_log(supabase, company_id, user["user_id"], "create", "rooms", created["id"])
