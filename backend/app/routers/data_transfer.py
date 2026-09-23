@@ -168,10 +168,10 @@ def _build_rooms_template(ws: Worksheet) -> None:
 
 
 def _build_tenants_template(ws: Worksheet) -> None:
-    ws.append(["full_name", "cnic", "phone", "email", "emergency_contact_name", "emergency_contact_phone"])
-    ws.append(["Bilal Ahmed", "35202-1234567-1", "0300-1234567", "bilal@example.com", "Ahmed Khan", "0321-7654321"])
-    style_header_row(ws, 6)
-    autosize_columns(ws, [20, 18, 16, 24, 22, 20])
+    ws.append(["full_name", "cnic", "phone", "email", "address"])
+    ws.append(["Bilal Ahmed", "35202-1234567-1", "0300-1234567", "bilal@example.com", "House 12, Model Town, Lahore"])
+    style_header_row(ws, 5)
+    autosize_columns(ws, [20, 18, 16, 24, 32])
 
 
 def _build_leases_template(ws: Worksheet) -> None:
@@ -205,7 +205,7 @@ INSTRUCTIONS = [
     ("Tenants", "full_name", "Required."),
     ("Tenants", "cnic", "Required. Exactly 13 digits (dashes optional) -- e.g. 35202-1234567-1. Same rule as the Add Tenant form. Duplicate CNICs are skipped, not an error."),
     ("Tenants", "phone", "Required. A valid Pakistani mobile number -- e.g. 0300-1234567 (11 digits starting with 0) or 3001234567 (10 digits). Same rule as the Add Tenant form."),
-    ("Tenants", "email, emergency_contact_name, emergency_contact_phone", "Optional."),
+    ("Tenants", "email, address", "Optional."),
     ("Leases", "tenant_cnic", "Required. Must exactly match a tenant already imported/created -- import Tenants first."),
     ("Leases", "building_name, room_number", "Required. Must match an existing building + room -- import Buildings and Rooms first."),
     ("Leases", "start_date, end_date", "Required. Format YYYY-MM-DD (e.g. 2026-01-01)."),
@@ -364,14 +364,13 @@ def export_workbook(
 
     if "tenants" in requested:
         ws = wb.create_sheet("Tenants")
-        ws.append(["full_name", "cnic", "phone", "email", "emergency_contact_name", "emergency_contact_phone"])
+        ws.append(["full_name", "cnic", "phone", "email", "address"])
         for t in tenants:
             ws.append([
-                t.get("full_name"), t.get("cnic"), t.get("phone"), t.get("email"),
-                t.get("emergency_contact_name"), t.get("emergency_contact_phone"),
+                t.get("full_name"), t.get("cnic"), t.get("phone"), t.get("email"), t.get("address"),
             ])
-        style_header_row(ws, 6)
-        autosize_columns(ws, [20, 18, 16, 24, 22, 20])
+        style_header_row(ws, 5)
+        autosize_columns(ws, [20, 18, 16, 24, 32])
 
     if "leases" in requested:
         ws = wb.create_sheet("Leases")
@@ -637,8 +636,7 @@ def import_tenants(
             "cnic": cnic_raw,
             "phone": normalized_phone,
             "email": row.get("email") or None,
-            "emergency_contact_name": row.get("emergency_contact_name") or None,
-            "emergency_contact_phone": row.get("emergency_contact_phone") or None,
+            "address": row.get("address") or None,
         }
         # Mark seen right away (not just after a real insert) so a second
         # occurrence of the same CNIC later in this same sheet still gets
