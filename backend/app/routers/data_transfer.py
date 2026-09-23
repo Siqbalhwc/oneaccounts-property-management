@@ -506,6 +506,13 @@ def import_rooms(
     floor_by_key = {(f["building_id"], f["floor_number"]): f["id"] for f in existing_floors}
 
     report = []
+    # Validate every row and resolve/create its floor first (no room
+    # inserts yet), then write rooms in batches instead of one row (plus
+    # one audit-log row) at a time. A sheet of a few hundred rooms was
+    # doing a few hundred sequential round trips -- easily enough to run
+    # past the backend's 30s limit and surface as "Failed to fetch", the
+    # same underlying cause already fixed for Tenants.
+    to_insert = []  # (report_row, label, payload)
     for i, row in enumerate(rows, start=2):
         building_name = (row.get("building_name") or "").strip()
         room_number = (row.get("room_number") or "").strip()
@@ -534,11 +541,10 @@ def import_rooms(
 
         # A room needs a floor_id, but the sheet only carries a floor_number
         # for readability -- resolve-or-create the floor the same way the
-        # Add Room modal's "+ Add a new floor..." path does. This whole
-        # block now lives inside the same try/except as the room insert
-        # below, so a problem with one row's floor (bad floor_number text,
-        # a DB error creating it) is reported for that row only, instead
-        # of crashing the entire import for every other row in the sheet.
+        # Add Room modal's "+ Add a new floor..." path does. Kept in its
+        # own try/except so a problem with one row's floor (bad
+        # floor_number text, a DB error creating it) is reported for that
+        # row only.
         try:
             floor_number_raw = row.get("floor_number") or 1
             try:
@@ -559,24 +565,66 @@ def import_rooms(
                 ).execute().data[0]
                 floor_id = new_floor["id"]
                 floor_by_key[floor_key] = floor_id
-
-            payload = {
-                "company_id": company_id,
-                "building_id": building_id,
-                "floor_id": floor_id,
-                "room_number": room_number,
-                "room_type": row.get("room_type") or None,
-                "base_rent": row.get("base_rent") or None,
-                "owner_id": owner_id,
-            }
-            res = supabase.table("rooms").insert(payload).execute()
-            created = res.data[0]
-            write_audit_log(supabase, company_id, user["user_id"], "create", "rooms", created["id"])
-            seen_room_numbers.add(key)
-            report.append({"row": i, "status": "created", "detail": f"{building_name} — {room_number}"})
         except APIError as e:
             status, detail = friendly_db_error(e)
             report.append({"row": i, "status": "error", "detail": detail})
+            continue
+
+        payload = {
+            "company_id": company_id,
+            "building_id": building_id,
+            "floor_id": floor_id,
+            "room_number": room_number,
+            "room_type": row.get("room_type") or None,
+            "base_rent": row.get("base_rent") or None,
+            "owner_id": owner_id,
+        }
+        # Mark seen right away (not just after a real insert) so a second
+        # occurrence of the same room number later in this same sheet
+        # still gets caught by the check above -- rows are no longer
+        # inserted one at a time as they're validated.
+        seen_room_numbers.add(key)
+        to_insert.append((i, f"{building_name} — {room_number}", payload))
+
+    BATCH_SIZE = 50
+    for start in range(0, len(to_insert), BATCH_SIZE):
+        batch = to_insert[start:start + BATCH_SIZE]
+        payloads = [b[2] for b in batch]
+        try:
+            res = supabase.table("rooms").insert(payloads).execute()
+            created_rows = res.data
+            audit_rows = [
+                {
+                    "company_id": company_id,
+                    "user_id": user["user_id"],
+                    "action": "create",
+                    "table_name": "rooms",
+                    "record_id": created["id"],
+                    "details": None,
+                }
+                for created in created_rows
+            ]
+            try:
+                if audit_rows:
+                    supabase.table("audit_log").insert(audit_rows).execute()
+            except Exception:
+                pass  # best-effort, same principle as write_audit_log's own try/except
+            for (i, label, _), created in zip(batch, created_rows):
+                report.append({"row": i, "status": "created", "detail": label})
+        except APIError:
+            # Something in this batch failed as a whole (e.g. a constraint
+            # this function doesn't pre-check for) -- fall back to one row
+            # at a time for just this batch, so each row is still reported
+            # individually instead of the whole batch silently vanishing.
+            for i, label, payload in batch:
+                try:
+                    res = supabase.table("rooms").insert(payload).execute()
+                    created = res.data[0]
+                    write_audit_log(supabase, company_id, user["user_id"], "create", "rooms", created["id"])
+                    report.append({"row": i, "status": "created", "detail": label})
+                except APIError as e:
+                    status, detail = friendly_db_error(e)
+                    report.append({"row": i, "status": "error", "detail": detail})
     return {"report": report}
 
 
