@@ -8,7 +8,7 @@ import { Select, Field, Input, AmountInput } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { PrintHeader } from "@/components/ui/PrintHeader";
-import { api, Tenant, Lease, Room, Building, Invoice, Company, fetchPdfBlob } from "@/lib/api";
+import { api, Tenant, Lease, Room, Building, Invoice, Company, fetchPdfBlob, downloadFile } from "@/lib/api";
 
 type SecurityDeposit = {
   id: string;
@@ -156,6 +156,7 @@ export default function ReportsPage() {
   const [ibhError, setIbhError] = useState<string | null>(null);
   const [ibhBackfilling, setIbhBackfilling] = useState(false);
   const [ibhBackfillMessage, setIbhBackfillMessage] = useState<string | null>(null);
+  const [ibhDownloadingPdf, setIbhDownloadingPdf] = useState(false);
   const [ibhDrilldown, setIbhDrilldown] = useState<{
     row: IncomeByHeadRow;
     label: string;
@@ -256,6 +257,22 @@ export default function ReportsPage() {
       setIbhBackfillMessage(`Couldn't backfill — ${err.message}`);
     } finally {
       setIbhBackfilling(false);
+    }
+  }
+
+  async function downloadIncomeByHeadPdf() {
+    setIbhDownloadingPdf(true);
+    try {
+      const params = new URLSearchParams({ date_from: ibhDateFrom, date_to: ibhDateTo });
+      if (ibhBuildingFilter) params.set("building_id", ibhBuildingFilter);
+      await downloadFile(
+        `/reports/income-by-head/pdf?${params.toString()}`,
+        `receipts-by-head_${ibhDateFrom}_to_${ibhDateTo}.pdf`
+      );
+    } catch (err: any) {
+      setIbhError(err.message || "Couldn't download the PDF.");
+    } finally {
+      setIbhDownloadingPdf(false);
     }
   }
 
@@ -485,7 +502,7 @@ export default function ReportsPage() {
 
       {tab === "Receipts by Head" && (
         <div className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 no-print">
+          <div className="grid grid-cols-1 sm:grid-cols-5 gap-3 no-print">
             <Field label="From">
               <Input type="date" value={ibhDateFrom} onChange={(e) => setIbhDateFrom(e.target.value)} />
             </Field>
@@ -505,6 +522,16 @@ export default function ReportsPage() {
             <div className="flex items-end">
               <Button variant="secondary" onClick={loadIncomeByHead} disabled={ibhLoading} className="w-full">
                 {ibhLoading ? "Loading…" : "Apply"}
+              </Button>
+            </div>
+            <div className="flex items-end">
+              <Button
+                variant="secondary"
+                onClick={downloadIncomeByHeadPdf}
+                disabled={ibhDownloadingPdf || !ibhData?.rows.length}
+                className="w-full"
+              >
+                {ibhDownloadingPdf ? "Preparing…" : "Download PDF (landscape)"}
               </Button>
             </div>
           </div>
@@ -534,49 +561,115 @@ export default function ReportsPage() {
           )}
 
           <Card>
+            <div className="text-center mb-5">
+              <p className="font-display text-lg font-semibold">{company?.name || "One Accounts Properties"}</p>
+              <p className="text-sm text-ink/60">Receipts by Head</p>
+              <p className="text-xs text-ink/40 mt-0.5">
+                {ibhDateFrom} to {ibhDateTo}
+                {ibhBuildingFilter ? ` — ${buildings?.find((b) => b.id === ibhBuildingFilter)?.name ?? ""}` : ""}
+              </p>
+            </div>
+
             <p className="text-xs text-ink/45 mb-3 no-print">
               Click any amount to see exactly which receipt(s) — and which bank/cash account(s) — made it up.
+              Scroll sideways for more heads; Sr and Tenant stay in place.
             </p>
-            <DataTable
-              keyField="sr"
-              rows={ibhData?.rows ?? []}
-              emptyMessage="No receipts recorded against any invoice in this period."
-              columns={[
-                { header: "Sr", accessor: (r) => r.sr },
-                { header: "Tenant", accessor: (r) => <span className="font-medium">{r.tenant_name}</span> },
-                { header: "Room / Apartment", accessor: (r) => r.room_label },
-                ...(ibhData?.columns ?? []).map((c) => ({
-                  header: c,
-                  accessor: (r: IncomeByHeadRow) =>
-                    r.heads[c] ? (
-                      <button
-                        onClick={() => openIncomeByHeadCell(r, c)}
-                        className="figures underline decoration-dotted decoration-ink/30 hover:decoration-ink hover:text-brass-dark"
-                      >
-                        {formatPkr(r.heads[c])}
-                      </button>
-                    ) : (
-                      <span className="text-ink/30">—</span>
-                    ),
-                  align: "right" as const,
-                })),
-                {
-                  header: "Total",
-                  accessor: (r) => <span className="figures font-semibold">{formatPkr(r.total)}</span>,
-                  align: "right",
-                },
-              ]}
-            />
+
+            {(!ibhData || ibhData.rows.length === 0) && (
+              <div className="py-12 text-center text-sm text-ink/45 border border-dashed border-border rounded-card">
+                No receipts recorded against any invoice in this period.
+              </div>
+            )}
+
             {ibhData && ibhData.rows.length > 0 && (
-              <div className="flex flex-wrap justify-end gap-6 pt-3 mt-3 border-t border-border text-sm font-medium">
-                {ibhData.columns.map((c) => (
-                  <span key={c}>
-                    {c}: <span className="figures">{formatPkr(ibhData.totals[c] ?? 0)}</span>
-                  </span>
-                ))}
-                <span>
-                  Grand total: <span className="figures">{formatPkr(ibhData.grand_total)}</span>
-                </span>
+              <div className="overflow-x-auto scrollbar-brass border border-border rounded-card">
+                <table
+                  className="text-sm border-collapse"
+                  style={{ minWidth: `${420 + ibhData.columns.length * 108 + 120}px`, width: "100%" }}
+                >
+                  <thead>
+                    <tr className="bg-accent/5 border-b border-border">
+                      <th className="sticky left-0 z-10 bg-paper text-left text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 pl-3 pr-2 whitespace-nowrap w-12">
+                        Sr
+                      </th>
+                      <th className="sticky left-12 z-10 bg-paper text-left text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 pl-2 pr-4 whitespace-nowrap shadow-[2px_0_0_rgba(31,45,36,0.04)] min-w-[210px]">
+                        Tenant / Room
+                      </th>
+                      {ibhData.columns.map((c) => (
+                        <th
+                          key={c}
+                          className="text-right text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 px-3 whitespace-nowrap min-w-[100px]"
+                        >
+                          {c}
+                        </th>
+                      ))}
+                      <th className="text-right text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 pl-3 pr-4 whitespace-nowrap min-w-[110px]">
+                        Total
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ibhData.rows.map((r, i) => (
+                      <tr
+                        key={r.sr}
+                        className={`border-b border-border/60 last:border-0 hover:bg-accent/[0.02] ${
+                          i % 2 === 1 ? "bg-accent/[0.015]" : ""
+                        }`}
+                      >
+                        <td
+                          className={`sticky left-0 z-10 py-2.5 pl-3 pr-2 align-top text-ink/60 ${
+                            i % 2 === 1 ? "bg-[#fbfaf6]" : "bg-paper-card"
+                          }`}
+                        >
+                          {r.sr}
+                        </td>
+                        <td
+                          className={`sticky left-12 z-10 py-2.5 pl-2 pr-4 align-top shadow-[2px_0_0_rgba(31,45,36,0.04)] ${
+                            i % 2 === 1 ? "bg-[#fbfaf6]" : "bg-paper-card"
+                          }`}
+                        >
+                          <p className="font-medium leading-snug">{r.tenant_name}</p>
+                          <p className="text-xs text-ink/50 leading-snug">{r.room_label}</p>
+                        </td>
+                        {ibhData.columns.map((c) =>
+                          r.heads[c] ? (
+                            <td key={c} className="py-2.5 px-3 text-right align-top">
+                              <button
+                                onClick={() => openIncomeByHeadCell(r, c)}
+                                className="figures underline decoration-dotted decoration-ink/25 hover:decoration-ink hover:text-brass-dark"
+                              >
+                                {formatPkr(r.heads[c])}
+                              </button>
+                            </td>
+                          ) : (
+                            <td key={c} className="py-2.5 px-3 text-right align-top text-ink/25">
+                              —
+                            </td>
+                          )
+                        )}
+                        <td className="py-2.5 pl-3 pr-4 text-right align-top">
+                          <span className="figures font-semibold">{formatPkr(r.total)}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="border-t-2 border-ink/20 font-semibold">
+                      <td className="sticky left-0 z-10 bg-paper py-3 pl-3 pr-2"></td>
+                      <td className="sticky left-12 z-10 bg-paper py-3 pl-2 pr-4 shadow-[2px_0_0_rgba(31,45,36,0.04)]">
+                        Total
+                      </td>
+                      {ibhData.columns.map((c) => (
+                        <td key={c} className="py-3 px-3 text-right">
+                          <span className="figures">{formatPkr(ibhData.totals[c] ?? 0)}</span>
+                        </td>
+                      ))}
+                      <td className="py-3 pl-3 pr-4 text-right">
+                        <span className="figures text-accent">{formatPkr(ibhData.grand_total)}</span>
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
               </div>
             )}
           </Card>

@@ -444,137 +444,6 @@ def _self_heal_allocations_for_range(supabase: Client, date_from: date, date_to:
         logging.getLogger("app.reports").exception("Self-heal of payment_allocations failed for %s to %s", date_from, date_to)
 
 
-def _compute_income_by_head(
-    supabase: Client, date_from: date, date_to: date, building_id: Optional[str] = None
-) -> dict:
-    """
-    The actual Receipts-by-Head computation, shared by the JSON endpoint
-    below and the PDF endpoint in income_by_head_pdf.py -- both call this
-    SAME function, so the numbers on the page and the numbers in the
-    downloaded PDF can never drift apart from each other.
-    """
-    _self_heal_allocations_for_range(supabase, date_from, date_to)
-
-    allocations = (
-        supabase.table("payment_allocations")
-        .select("amount, label, lease_id, tenant_id, payment_id, payments(payment_date)")
-        .eq("allocation_type", "cash")
-        .execute()
-        .data
-    )
-    allocations = [
-        a for a in allocations
-        if a.get("payments") and date_from <= date.fromisoformat(str(a["payments"]["payment_date"])) <= date_to
-    ]
-
-    lease_ids = list({a["lease_id"] for a in allocations if a.get("lease_id")})
-    leases = (
-        {l["id"]: l for l in supabase.table("leases").select("id, room_id, tenant_id").in_("id", lease_ids).execute().data}
-        if lease_ids
-        else {}
-    )
-    room_ids = list({l["room_id"] for l in leases.values() if l.get("room_id")})
-    rooms = (
-        {r["id"]: r for r in supabase.table("rooms").select("id, room_number, building_id").in_("id", room_ids).execute().data}
-        if room_ids
-        else {}
-    )
-    building_ids = list({r["building_id"] for r in rooms.values() if r.get("building_id")})
-    buildings = (
-        {b["id"]: b["name"] for b in supabase.table("buildings").select("id, name").in_("id", building_ids).execute().data}
-        if building_ids
-        else {}
-    )
-    tenant_ids = list({a["tenant_id"] for a in allocations if a.get("tenant_id")})
-    tenants = (
-        {t["id"]: t["full_name"] for t in supabase.table("tenants").select("id, full_name").in_("id", tenant_ids).execute().data}
-        if tenant_ids
-        else {}
-    )
-
-    # Group by lease_id (falls back to tenant_id for the rare payment with
-    # no lease tag) -- this is the same grain a room's invoice was actually
-    # issued against, so heads for two different leases in the same room
-    # over time are never blended into one row.
-    grouped: Dict[str, dict] = {}
-    for a in allocations:
-        key = a.get("lease_id") or f"tenant:{a.get('tenant_id')}"
-        lease = leases.get(a.get("lease_id")) if a.get("lease_id") else None
-        room = rooms.get(lease["room_id"]) if lease else None
-        row = grouped.setdefault(
-            key,
-            {
-                "lease_id": a.get("lease_id"),
-                "tenant_id": a.get("tenant_id") or (lease["tenant_id"] if lease else None),
-                "room_id": lease["room_id"] if lease else None,
-                "building_id": room["building_id"] if room else None,
-                "heads": {},
-                "total": 0.0,
-            },
-        )
-        row["heads"][a["label"]] = round(row["heads"].get(a["label"], 0.0) + float(a["amount"]), 2)
-        row["total"] = round(row["total"] + float(a["amount"]), 2)
-
-    rows = list(grouped.values())
-    if building_id:
-        rows = [r for r in rows if r["building_id"] == building_id]
-
-    columns = sorted({label for r in rows for label in r["heads"].keys()}, key=_label_sort_key)
-
-    out_rows = []
-    for i, r in enumerate(sorted(
-        rows,
-        key=lambda r: (buildings.get(r["building_id"], "—"), rooms.get(r["room_id"], {}).get("room_number", "")),
-    )):
-        room = rooms.get(r["room_id"])
-        out_rows.append(
-            {
-                "sr": i + 1,
-                "lease_id": r["lease_id"],
-                "tenant_id": r["tenant_id"],
-                "tenant_name": tenants.get(r["tenant_id"], "—"),
-                "room_id": r["room_id"],
-                "room_label": f"{buildings.get(r['building_id'], '—')} — {room['room_number']}" if room else "—",
-                "building_id": r["building_id"],
-                "heads": {c: r["heads"].get(c, 0.0) for c in columns},
-                "total": r["total"],
-            }
-        )
-
-    totals = {c: round(sum(r["heads"][c] for r in out_rows), 2) for c in columns}
-    grand_total = round(sum(r["total"] for r in out_rows), 2)
-
-    # Independent cross-check: every invoice-tied cash payment in the same
-    # window, summed straight off `payments` -- should always equal
-    # grand_total above, since that's exactly the universe payment_allocations
-    # is built from.
-    all_payments = (
-        supabase.table("payments")
-        .select("amount, invoice_id, payment_date")
-        .gte("payment_date", str(date_from))
-        .lte("payment_date", str(date_to))
-        .execute()
-        .data
-    )
-    total_cash_receipts = round(sum(float(p["amount"]) for p in all_payments if p.get("invoice_id")), 2)
-
-    return {
-        "columns": columns,
-        "rows": out_rows,
-        "totals": totals,
-        "grand_total": grand_total,
-        "reconciliation": {
-            "allocated_total": grand_total,
-            "invoice_tied_cash_receipts_total": total_cash_receipts,
-            "matches": abs(grand_total - total_cash_receipts) < 0.01,
-            "note": (
-                "If this doesn't match, some receipts in this period haven't been split by head yet -- "
-                "run POST /reports/income-by-head/backfill once (owner/admin) to fix it retroactively."
-            ),
-        },
-    }
-
-
 @router.get("/income-by-head")
 def income_by_head(
     date_from: date = Query(..., description="Receipts on/after this date (payment_date)"),
@@ -606,51 +475,129 @@ def income_by_head(
     `reconciliation` stays in the response as a live self-check regardless.
     """
     try:
-        return _compute_income_by_head(supabase, date_from, date_to, building_id)
+        _self_heal_allocations_for_range(supabase, date_from, date_to)
+
+        allocations = (
+            supabase.table("payment_allocations")
+            .select("amount, label, lease_id, tenant_id, payment_id, payments(payment_date)")
+            .eq("allocation_type", "cash")
+            .execute()
+            .data
+        )
+        allocations = [
+            a for a in allocations
+            if a.get("payments") and date_from <= date.fromisoformat(str(a["payments"]["payment_date"])) <= date_to
+        ]
+
+        lease_ids = list({a["lease_id"] for a in allocations if a.get("lease_id")})
+        leases = (
+            {l["id"]: l for l in supabase.table("leases").select("id, room_id, tenant_id").in_("id", lease_ids).execute().data}
+            if lease_ids
+            else {}
+        )
+        room_ids = list({l["room_id"] for l in leases.values() if l.get("room_id")})
+        rooms = (
+            {r["id"]: r for r in supabase.table("rooms").select("id, room_number, building_id").in_("id", room_ids).execute().data}
+            if room_ids
+            else {}
+        )
+        building_ids = list({r["building_id"] for r in rooms.values() if r.get("building_id")})
+        buildings = (
+            {b["id"]: b["name"] for b in supabase.table("buildings").select("id, name").in_("id", building_ids).execute().data}
+            if building_ids
+            else {}
+        )
+        tenant_ids = list({a["tenant_id"] for a in allocations if a.get("tenant_id")})
+        tenants = (
+            {t["id"]: t["full_name"] for t in supabase.table("tenants").select("id, full_name").in_("id", tenant_ids).execute().data}
+            if tenant_ids
+            else {}
+        )
+
+        # Group by lease_id (falls back to tenant_id for the rare payment with
+        # no lease tag) -- this is the same grain a room's invoice was actually
+        # issued against, so heads for two different leases in the same room
+        # over time are never blended into one row.
+        grouped: Dict[str, dict] = {}
+        for a in allocations:
+            key = a.get("lease_id") or f"tenant:{a.get('tenant_id')}"
+            lease = leases.get(a.get("lease_id")) if a.get("lease_id") else None
+            room = rooms.get(lease["room_id"]) if lease else None
+            row = grouped.setdefault(
+                key,
+                {
+                    "lease_id": a.get("lease_id"),
+                    "tenant_id": a.get("tenant_id") or (lease["tenant_id"] if lease else None),
+                    "room_id": lease["room_id"] if lease else None,
+                    "building_id": room["building_id"] if room else None,
+                    "heads": {},
+                    "total": 0.0,
+                },
+            )
+            row["heads"][a["label"]] = round(row["heads"].get(a["label"], 0.0) + float(a["amount"]), 2)
+            row["total"] = round(row["total"] + float(a["amount"]), 2)
+
+        rows = list(grouped.values())
+        if building_id:
+            rows = [r for r in rows if r["building_id"] == building_id]
+
+        columns = sorted({label for r in rows for label in r["heads"].keys()}, key=_label_sort_key)
+
+        out_rows = []
+        for i, r in enumerate(sorted(
+            rows,
+            key=lambda r: (buildings.get(r["building_id"], "—"), rooms.get(r["room_id"], {}).get("room_number", "")),
+        )):
+            room = rooms.get(r["room_id"])
+            out_rows.append(
+                {
+                    "sr": i + 1,
+                    "lease_id": r["lease_id"],
+                    "tenant_id": r["tenant_id"],
+                    "tenant_name": tenants.get(r["tenant_id"], "—"),
+                    "room_id": r["room_id"],
+                    "room_label": f"{buildings.get(r['building_id'], '—')} — {room['room_number']}" if room else "—",
+                    "building_id": r["building_id"],
+                    "heads": {c: r["heads"].get(c, 0.0) for c in columns},
+                    "total": r["total"],
+                }
+            )
+
+        totals = {c: round(sum(r["heads"][c] for r in out_rows), 2) for c in columns}
+        grand_total = round(sum(r["total"] for r in out_rows), 2)
+
+        # Independent cross-check: every invoice-tied cash payment in the same
+        # window, summed straight off `payments` -- should always equal
+        # grand_total above, since that's exactly the universe payment_allocations
+        # is built from.
+        all_payments = (
+            supabase.table("payments")
+            .select("amount, invoice_id, payment_date")
+            .gte("payment_date", str(date_from))
+            .lte("payment_date", str(date_to))
+            .execute()
+            .data
+        )
+        total_cash_receipts = round(sum(float(p["amount"]) for p in all_payments if p.get("invoice_id")), 2)
+
+        return {
+            "columns": columns,
+            "rows": out_rows,
+            "totals": totals,
+            "grand_total": grand_total,
+            "reconciliation": {
+                "allocated_total": grand_total,
+                "invoice_tied_cash_receipts_total": total_cash_receipts,
+                "matches": abs(grand_total - total_cash_receipts) < 0.01,
+                "note": (
+                    "If this doesn't match, some receipts in this period haven't been split by head yet -- "
+                    "run POST /reports/income-by-head/backfill once (owner/admin) to fix it retroactively."
+                ),
+            },
+        }
     except Exception as e:
         logging.getLogger("app.reports").exception("income_by_head failed for %s to %s", date_from, date_to)
         raise HTTPException(status_code=500, detail=f"Couldn't build the report: {e}")
-
-
-@router.get("/income-by-head/pdf")
-def income_by_head_pdf(
-    date_from: date = Query(...),
-    date_to: date = Query(...),
-    building_id: Optional[str] = Query(None),
-    supabase: Client = Depends(get_supabase),
-    company_id: str = Depends(get_current_company_id),
-):
-    """
-    The same report as GET /income-by-head, laid out as a branded, landscape
-    A4 PDF for download -- same header band / palette as the invoice and
-    receipt PDFs, so every document out of this app looks like it came from
-    the same place. Built from the exact same _compute_income_by_head() the
-    on-screen report uses, so the PDF can never show different numbers than
-    what you were just looking at.
-    """
-    from fastapi.responses import StreamingResponse
-    import io
-
-    from app.services.income_by_head_pdf import render_income_by_head_pdf
-
-    try:
-        report = _compute_income_by_head(supabase, date_from, date_to, building_id)
-        company = supabase.table("companies").select("name, address, phone, logo_url").eq("id", company_id).single().execute().data
-        building_name = None
-        if building_id:
-            b = supabase.table("buildings").select("name").eq("id", building_id).single().execute()
-            building_name = b.data["name"] if b.data else None
-        pdf_bytes = render_income_by_head_pdf(report, company, date_from, date_to, building_name)
-    except Exception as e:
-        logging.getLogger("app.reports").exception("income_by_head_pdf failed for %s to %s", date_from, date_to)
-        raise HTTPException(status_code=500, detail=f"Couldn't build the PDF: {e}")
-
-    filename = f"receipts-by-head_{date_from}_to_{date_to}.pdf"
-    return StreamingResponse(
-        io.BytesIO(pdf_bytes),
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
 
 
 @router.get("/income-by-head/drilldown")
