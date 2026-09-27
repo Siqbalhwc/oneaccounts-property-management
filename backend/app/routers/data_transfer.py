@@ -119,6 +119,28 @@ def read_sheet(wb, sheet_name: str) -> List[Dict[str, Any]]:
     return out
 
 
+def cell_str(value: Any) -> str:
+    """
+    Safely turns any Excel cell value into a stripped string, for columns a
+    person would normally type text into (a name, a room number, a CNIC).
+    Excel silently stores a cell like "301" as a number if it wasn't
+    explicitly formatted as text -- openpyxl then hands that back as a
+    Python int/float, not a str, and every import here used to do
+    `(row.get("x") or "").strip()`, which crashes with an unhandled
+    AttributeError the instant it hits one of those cells (ints/floats have
+    no .strip()). Since that crash sat outside every row's try/except, it
+    didn't just fail that one row -- it took down the entire import, for
+    every row, with no readable error at all. This is the one place that
+    conversion happens, so every import shares the same safe behavior:
+    a whole-number float (301.0) becomes "301", not "301.0".
+    """
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
 HEADER_FONT = Font(bold=True, color="FFFFFF")
 HEADER_FILL = PatternFill("solid", fgColor="2F4F3E")  # matches the app's "ledger" green
 NOTE_FONT = Font(italic=True, size=9, color="6B7280")
@@ -422,7 +444,7 @@ def import_owners(
     rows = read_sheet(wb, "Owners")
     report = []
     for i, row in enumerate(rows, start=2):
-        name = (row.get("name") or "").strip()
+        name = cell_str(row.get("name"))
         if not name:
             report.append({"row": i, "status": "error", "detail": "Missing owner name."})
             continue
@@ -438,7 +460,7 @@ def import_owners(
             created = res.data[0]
             write_audit_log(supabase, company_id, user["user_id"], "create", "owners", created["id"])
             report.append({"row": i, "status": "created", "detail": name})
-        except APIError as e:
+        except Exception as e:
             status, detail = friendly_db_error(e)
             report.append({"row": i, "status": "error", "detail": detail})
     return {"report": report}
@@ -459,7 +481,7 @@ def import_buildings(
     rows = read_sheet(wb, "Buildings")
     report = []
     for i, row in enumerate(rows, start=2):
-        name = (row.get("name") or "").strip()
+        name = cell_str(row.get("name"))
         if not name:
             report.append({"row": i, "status": "error", "detail": "Missing building name."})
             continue
@@ -469,7 +491,7 @@ def import_buildings(
             created = res.data[0]
             write_audit_log(supabase, company_id, user["user_id"], "create", "buildings", created["id"])
             report.append({"row": i, "status": "created", "detail": name})
-        except APIError as e:
+        except Exception as e:
             status, detail = friendly_db_error(e)
             report.append({"row": i, "status": "error", "detail": detail})
     return {"report": report}
@@ -514,9 +536,9 @@ def import_rooms(
     # same underlying cause already fixed for Tenants.
     to_insert = []  # (report_row, label, payload)
     for i, row in enumerate(rows, start=2):
-        building_name = (row.get("building_name") or "").strip()
-        room_number = (row.get("room_number") or "").strip()
-        owner_name = (row.get("owner_name") or "").strip()
+        building_name = cell_str(row.get("building_name"))
+        room_number = cell_str(row.get("room_number"))
+        owner_name = cell_str(row.get("owner_name"))
 
         if not building_name or not room_number:
             report.append({"row": i, "status": "error", "detail": "building_name and room_number are required."})
@@ -565,7 +587,7 @@ def import_rooms(
                 ).execute().data[0]
                 floor_id = new_floor["id"]
                 floor_by_key[floor_key] = floor_id
-        except APIError as e:
+        except Exception as e:
             status, detail = friendly_db_error(e)
             report.append({"row": i, "status": "error", "detail": detail})
             continue
@@ -611,7 +633,7 @@ def import_rooms(
                 pass  # best-effort, same principle as write_audit_log's own try/except
             for (i, label, _), created in zip(batch, created_rows):
                 report.append({"row": i, "status": "created", "detail": label})
-        except APIError:
+        except Exception:
             # Something in this batch failed as a whole (e.g. a constraint
             # this function doesn't pre-check for) -- fall back to one row
             # at a time for just this batch, so each row is still reported
@@ -622,7 +644,7 @@ def import_rooms(
                     created = res.data[0]
                     write_audit_log(supabase, company_id, user["user_id"], "create", "rooms", created["id"])
                     report.append({"row": i, "status": "created", "detail": label})
-                except APIError as e:
+                except Exception as e:
                     status, detail = friendly_db_error(e)
                     report.append({"row": i, "status": "error", "detail": detail})
     return {"report": report}
@@ -655,7 +677,7 @@ def import_tenants(
     # restore timeout.
     to_insert = []  # (report_row, full_name, payload)
     for i, row in enumerate(rows, start=2):
-        full_name = (row.get("full_name") or "").strip()
+        full_name = cell_str(row.get("full_name"))
         cnic_raw = str(row.get("cnic") or "").strip()
         phone_raw = str(row.get("phone") or "").strip()
 
@@ -719,7 +741,7 @@ def import_tenants(
                 pass  # best-effort, same principle as write_audit_log's own try/except
             for (i, full_name, _), created in zip(batch, created_rows):
                 report.append({"row": i, "status": "created", "detail": full_name})
-        except APIError:
+        except Exception:
             # Something in this batch failed as a whole (e.g. a constraint
             # this function doesn't pre-check for) -- fall back to one row
             # at a time for just this batch, so each row is still reported
@@ -730,7 +752,7 @@ def import_tenants(
                     created = res.data[0]
                     write_audit_log(supabase, company_id, user["user_id"], "create", "tenants", created["id"])
                     report.append({"row": i, "status": "created", "detail": full_name})
-                except APIError as e:
+                except Exception as e:
                     status, detail = friendly_db_error(e)
                     report.append({"row": i, "status": "error", "detail": detail})
     return {"report": report}
@@ -773,8 +795,8 @@ def import_leases(
     report = []
     for i, row in enumerate(rows, start=2):
         tenant_cnic = re.sub(r"\D", "", str(row.get("tenant_cnic") or ""))
-        building_name = (row.get("building_name") or "").strip()
-        room_number = (row.get("room_number") or "").strip()
+        building_name = cell_str(row.get("building_name"))
+        room_number = cell_str(row.get("room_number"))
 
         tenant_id = tenant_by_cnic.get(tenant_cnic)
         if not tenant_id:
