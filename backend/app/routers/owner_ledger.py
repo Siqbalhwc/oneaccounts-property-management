@@ -1,12 +1,13 @@
 from datetime import date
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import Client
 
 from app.core.deps import get_current_company_id, get_supabase
-from app.services.ledger import get_account_id, post_journal_entry
+from app.services.ledger import get_account_id, post_journal_entry, reverse_journal_entry
+from app.services.owner_settlement import EPS, load_owner_settlement
 
 router = APIRouter(prefix="/owner-ledger", tags=["Owner Ledger"])
 
@@ -167,6 +168,201 @@ def owner_balance_breakdown(
         r["running_balance"] = round(running, 2)
 
     return {"lines": rows, "balance": round(running, 2)}
+
+
+# ---------------------------------------------------------------------------
+# Per-room / per-invoice settlement (see app/services/owner_settlement.py)
+# ---------------------------------------------------------------------------
+@router.get("/settlement/{owner_id}")
+def owner_settlement(
+    owner_id: str,
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+):
+    """
+    Everything the payout screen needs for one owner: every rent invoice line
+    (per room, per month) with how much has already been paid to the owner
+    and how much is still open; every expense charged to the owner that can
+    be netted off a payout; and a per-room rollup marking each room payable
+    or settled. Totals reconcile to the owner's General Ledger balance.
+    """
+    return load_owner_settlement(supabase, company_id, owner_id)
+
+
+class PayoutSelection(BaseModel):
+    line_id: str
+    amount: float  # how much of this line to settle now (partial allowed)
+
+
+class AllocatedPayoutRequest(BaseModel):
+    owner_id: str
+    selections: List[PayoutSelection]
+    paid_date: Optional[date] = None
+    account_id: Optional[str] = None  # required when the net payout is > 0
+    payment_method: str = "bank_transfer"
+    notes: Optional[str] = None
+
+
+@router.post("/pay-owner-allocated")
+def pay_owner_allocated(
+    payload: AllocatedPayoutRequest,
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+):
+    """
+    Pays an owner against specific lines: rent invoice lines (in full or
+    part) and, optionally, expenses to net off. Cash paid out =
+    rent settled - expenses netted. One Dr Due to Owners / Cr <paid from>
+    entry is posted for that net amount, and each settled line is recorded
+    in owner_payout_allocations so the system knows exactly which room /
+    invoice was paid.
+    """
+    if not payload.selections:
+        raise HTTPException(status_code=400, detail="Select at least one invoice or expense.")
+
+    view = load_owner_settlement(supabase, company_id, payload.owner_id)
+    unit_by_line = {u["line_id"]: u for u in view["units"]}
+
+    rent_total = exp_total = 0.0
+    seen: set[str] = set()
+    picked: list[tuple[dict, float]] = []
+    for sel in payload.selections:
+        if sel.line_id in seen:
+            raise HTTPException(status_code=400, detail="The same line was selected twice.")
+        seen.add(sel.line_id)
+        unit = unit_by_line.get(sel.line_id)
+        if not unit:
+            raise HTTPException(status_code=400, detail="A selected line no longer belongs to this owner. Refresh and try again.")
+        amt = round(float(sel.amount), 2)
+        if amt <= 0:
+            raise HTTPException(status_code=400, detail="Every selected amount must be greater than zero.")
+        if amt > unit["remaining"] + EPS:
+            label = f"{unit.get('building_name') or ''} {unit.get('room_number') or ''}".strip()
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label or 'A line'} has only Rs {unit['remaining']:,.2f} left to settle — you entered Rs {amt:,.2f}.",
+            )
+        picked.append((unit, amt))
+        if unit["kind"] == "expense":
+            exp_total += amt
+        else:
+            rent_total += amt
+
+    net = round(rent_total - exp_total, 2)
+    if net < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Selected expenses are more than the selected rent — select more rent, or fewer expenses.",
+        )
+
+    paid_date = payload.paid_date or date.today()
+    entry = None
+    if net > 0:
+        if not payload.account_id:
+            raise HTTPException(status_code=400, detail="Select which account this payout is coming out of.")
+        account = (
+            supabase.table("chart_of_accounts").select("id")
+            .eq("id", payload.account_id).eq("company_id", company_id).execute().data
+        )
+        if not account:
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        building_ids = {u["building_id"] for u, _ in picked if u.get("building_id")}
+        building_id = next(iter(building_ids)) if len(building_ids) == 1 else None
+        due_to_owners_id = get_account_id(supabase, company_id, "2200")
+        rooms_label = ", ".join(
+            sorted({f"{u.get('room_number')}" for u, _ in picked if u["kind"] != "expense" and u.get("room_number")})
+        )
+        default_desc = f"Owner payout — {paid_date}" + (f" (rooms {rooms_label})" if rooms_label else "")
+        entry = post_journal_entry(
+            supabase,
+            company_id=company_id,
+            entry_date=str(paid_date),
+            source_type="owner_payout",
+            source_id=None,
+            description=payload.notes or default_desc,
+            lines=[
+                {"account_id": due_to_owners_id, "direction": "debit", "amount": net,
+                 "building_id": building_id, "owner_id": payload.owner_id},
+                {"account_id": payload.account_id, "direction": "credit", "amount": net,
+                 "building_id": building_id, "owner_id": payload.owner_id},
+            ],
+        )
+
+    rows = [
+        {
+            "company_id": company_id,
+            "owner_id": payload.owner_id,
+            "payout_entry_id": entry["id"] if entry else None,
+            "source_line_id": u["line_id"],
+            "kind": u["kind"],
+            "invoice_id": u.get("invoice_id"),
+            "room_id": u.get("room_id"),
+            "building_id": u.get("building_id"),
+            "amount": amt,
+            "paid_date": str(paid_date),
+        }
+        for u, amt in picked
+    ]
+    try:
+        supabase.table("owner_payout_allocations").insert(rows).execute()
+    except Exception as e:
+        # Not a single DB transaction: undo the cash entry so the ledger and
+        # the per-room tracking can never disagree.
+        if entry:
+            reverse_journal_entry(supabase, company_id, entry["id"], "Allocation tracking failed")
+        raise HTTPException(status_code=400, detail=f"Could not record the payout: {e}")
+
+    return {
+        "message": "Payout recorded",
+        "owner_id": payload.owner_id,
+        "rent_settled": round(rent_total, 2),
+        "expenses_netted": round(exp_total, 2),
+        "net_paid": net,
+        "lines": len(rows),
+    }
+
+
+@router.post("/apply-earlier-payouts/{owner_id}")
+def apply_earlier_payouts(
+    owner_id: str,
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+):
+    """
+    One-time back-fill for payouts made before per-room tracking existed:
+    matches each earlier lump-sum payout to this owner's oldest open rent
+    lines (oldest first) so room statuses reflect money already paid. Only
+    touches tracking rows -- posts no journal entry, so the ledger balance
+    doesn't change.
+    """
+    view = load_owner_settlement(supabase, company_id, owner_id)
+    open_units = [u for u in view["units"] if u["kind"] != "expense" and u["remaining"] > EPS]
+    rows = []
+    for pe in sorted(
+        (p for p in view["unapplied_entries"] if p["source_type"] == "owner_payout"),
+        key=lambda p: p["entry_date"] or "",
+    ):
+        left = pe["uncovered"]
+        for u in open_units:
+            if left <= EPS:
+                break
+            take = round(min(left, u["remaining"]), 2)
+            if take <= 0:
+                continue
+            rows.append(
+                {
+                    "company_id": company_id, "owner_id": owner_id, "payout_entry_id": pe["entry_id"],
+                    "source_line_id": u["line_id"], "kind": u["kind"], "invoice_id": u.get("invoice_id"),
+                    "room_id": u.get("room_id"), "building_id": u.get("building_id"), "amount": take,
+                    "paid_date": pe["entry_date"] or str(date.today()), "is_legacy_apply": True,
+                }
+            )
+            u["remaining"] = round(u["remaining"] - take, 2)
+            left = round(left - take, 2)
+    if rows:
+        supabase.table("owner_payout_allocations").insert(rows).execute()
+    return {"message": "Earlier payouts applied to oldest open rent", "allocations_created": len(rows)}
 
 
 class PayOwnerDirectRequest(BaseModel):
