@@ -5,9 +5,10 @@ Every journal line on a transfers_to_owner account that is tagged to an
 owner is a "settlement unit":
   * credit                       -> owed to the owner (rent when it comes
                                     from an invoice, otherwise 'other_credit')
-  * debit from an expense        -> an expense charged to the owner that can
-                                    be netted off a payout
-  * any other debit              -> a payout / adjustment already made
+  * debit that is not a payout   -> an expense/charge against the owner
+                                    (Expenses page OR manual journal entry)
+                                    that can be netted off a payout
+  * debit from an owner payout   -> money already paid out
 
 owner_payout_allocations records how much of each unit a payout settled, so
 a unit's open balance = its amount - sum(allocations). The math lives in the
@@ -79,7 +80,10 @@ def build_settlement(lines: list, entries: dict, allocations: list) -> dict:
 
         if l["direction"] == "credit":
             kind = "rent" if e.get("source_type") == "invoice" else "other_credit"
-        elif e.get("source_type") == "expense":
+        elif e.get("source_type") != "owner_payout":
+            # Any debit that isn't a payout is a charge against the owner --
+            # an expense posted via the Expenses page ('expense'), or one
+            # posted by hand through a journal entry ('manual_adjustment').
             kind = "expense"
         else:
             # An earlier payout/adjustment: fully covered if made through the
