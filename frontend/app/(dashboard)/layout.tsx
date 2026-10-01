@@ -9,6 +9,7 @@ import { GlobalSearch } from "@/components/ui/GlobalSearch";
 import { NotificationBell } from "@/components/ui/NotificationBell";
 import { Company, api } from "@/lib/api";
 import { ThemeProvider } from "@/lib/theme";
+import { AccessContext, AccessInfo } from "@/lib/access";
 
 type ProfileInfo = {
   full_name: string;
@@ -32,6 +33,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [company, setCompany] = useState<Company | null>(null);
   const [checking, setChecking] = useState(true);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [access, setAccess] = useState<AccessInfo | null>(null);
   const [companyBlocked, setCompanyBlocked] = useState(false);
   const [blockedReason, setBlockedReason] = useState<"pending" | "suspended" | null>(null);
   const [blockedMessage, setBlockedMessage] = useState<string | null>(null);
@@ -95,6 +97,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         }
       }
       setChecking(false);
+
+      // Roles / building scope (Access Control). Deliberately NOT awaited
+      // before the page renders, and a failure just leaves `access` null,
+      // which keeps everything visible -- the server is what enforces the
+      // rules, this only decides which menu items to show.
+      api.get<AccessInfo>("/access/me").then(setAccess).catch(() => setAccess(null));
     }
 
     checkSessionAndLoadProfile();
@@ -159,8 +167,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   return (
     <ThemeProvider initialTheme={profile?.theme_preference}>
+    <AccessContext.Provider value={access}>
     <div className="flex items-start gap-4 p-4 min-h-screen">
       <Sidebar
+        access={access}
         company={company}
         mobileOpen={mobileNavOpen}
         onClose={() => setMobileNavOpen(false)}
@@ -210,10 +220,22 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </div>
         </header>
         <main className="content flex-1 w-full">
+          {access?.access_control_enabled && (access.read_only || access.scoped) && (
+            <div className="no-print mb-4 rounded-card border border-brass/30 bg-brass/10 px-4 py-2.5 text-xs text-ink/70">
+              {access.read_only && <span className="font-medium">View-only access. </span>}
+              {access.scoped && (
+                <span>
+                  Showing your {access.building_ids.length} assigned building
+                  {access.building_ids.length === 1 ? "" : "s"} only.
+                </span>
+              )}
+            </div>
+          )}
           {children}
         </main>
       </div>
     </div>
+    </AccessContext.Provider>
     </ThemeProvider>
   );
 }

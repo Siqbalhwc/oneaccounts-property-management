@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Field, Input, AmountInput, Select } from "@/components/ui/Field";
 import { api, Building, Account } from "@/lib/api";
+import { useAccess } from "@/lib/access";
 import { ChevronRight, ChevronDown, Pencil, ScrollText, SplitSquareHorizontal, SlidersHorizontal } from "lucide-react";
 
 type ExpenseCategory = { id: string; name: string; account_id?: string };
@@ -36,6 +37,8 @@ function formatPkr(n: number) {
 }
 
 export default function ExpensesPage() {
+  // Access Control ON => every expense must reference a building room.
+  const strictRoom = !!useAccess()?.access_control_enabled;
   const [expenses, setExpenses] = useState<Expense[] | null>(null);
   const [categories, setCategories] = useState<ExpenseCategory[] | null>(null);
   const [buildings, setBuildings] = useState<BuildingWithOwner[] | null>(null);
@@ -186,8 +189,13 @@ export default function ExpensesPage() {
           return;
         }
         const ownerCharged = isOwnerChargeable(form.category_id);
-        if (ownerCharged && !form.room_id) {
-          setError("This category is charged to an owner — select the room so the correct owner can be found.");
+        const needsRoom = ownerCharged || strictRoom;
+        if (needsRoom && !form.room_id) {
+          setError(
+            ownerCharged
+              ? "This category is charged to an owner — select the room so the correct owner can be found."
+              : "Every expense must reference a building and room — select the room."
+          );
           setSaving(false);
           return;
         }
@@ -197,8 +205,8 @@ export default function ExpensesPage() {
           // owner-chargeable one the backend derives it FROM the room, so
           // there's never a second, independently-set value to drift out
           // of sync with the room actually picked.
-          building_id: ownerCharged ? undefined : form.building_id || undefined,
-          room_id: ownerCharged ? form.room_id : undefined,
+          building_id: needsRoom ? undefined : form.building_id || undefined,
+          room_id: needsRoom ? form.room_id : undefined,
           vendor_name: form.vendor_name || undefined,
           amount: parseFloat(form.amount),
           expense_date: form.expense_date,
@@ -629,9 +637,16 @@ export default function ExpensesPage() {
               ))}
             </Select>
           </Field>
-          {isOwnerChargeable(form.category_id) ? (
+          {isOwnerChargeable(form.category_id) || strictRoom ? (
             <>
-              <Field label="Room" hint="Required for an owner-chargeable category, so the correct owner can be found.">
+              <Field
+                label="Room"
+                hint={
+                  isOwnerChargeable(form.category_id)
+                    ? "Required for an owner-chargeable category, so the correct owner can be found."
+                    : "Required — every expense must reference a building and room."
+                }
+              >
                 <Select
                   value={form.room_id}
                   disabled={!!editingId}
@@ -653,12 +668,16 @@ export default function ExpensesPage() {
                       {buildings?.find((b) => b.id === rooms?.find((r) => r.id === form.room_id)?.building_id)?.name ?? "—"}
                     </span>
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-ink/50">Owner</span>
-                    <span className="font-medium">{resolveRoomOwnerName(form.room_id)}</span>
-                  </div>
+                  {isOwnerChargeable(form.category_id) && (
+                    <div className="flex justify-between">
+                      <span className="text-ink/50">Owner</span>
+                      <span className="font-medium">{resolveRoomOwnerName(form.room_id)}</span>
+                    </div>
+                  )}
                   <p className="text-xs text-ink/45 pt-1">
-                    Derived from the room — not editable here. This expense will reduce what&apos;s owed to this owner instead of posting as a company expense.
+                    {isOwnerChargeable(form.category_id)
+                      ? "Derived from the room — not editable here. This expense will reduce what's owed to this owner instead of posting as a company expense."
+                      : "Building is taken from the room — not editable here."}
                   </p>
                 </div>
               )}

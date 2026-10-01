@@ -13,7 +13,7 @@ from app.core.deps import get_current_company_id, get_current_user, get_service_
 
 router = APIRouter(prefix="/company/team", tags=["Team"])
 
-ALLOWED_ROLES = {"admin", "manager", "accountant", "staff", "auditor"}  # owner is not grantable via invite
+ALLOWED_ROLES = {"admin", "manager", "accountant", "staff"}  # owner is not grantable via invite
 
 
 class InviteRequest(BaseModel):

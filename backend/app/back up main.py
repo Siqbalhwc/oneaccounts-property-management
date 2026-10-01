@@ -1,12 +1,10 @@
 import logging
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.core.access import enforce_access
 from app.routers import (
-    access,
     audit_log,
     auth_activity,
     chart_of_accounts,
@@ -77,42 +75,36 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 API_PREFIX = "/api"
 
-# Role gate (schema_patch_027 / app/core/access.py). Attached once per router so
-# no individual endpoint needs editing; a complete no-op for any company that
-# has not had Access Control switched on.
-_GUARD = [Depends(enforce_access)]
+app.include_router(simple_resources.buildings_router, prefix=API_PREFIX)
+app.include_router(simple_resources.owners_router, prefix=API_PREFIX)
+app.include_router(simple_resources.floors_router, prefix=API_PREFIX)
+app.include_router(simple_resources.rooms_router, prefix=API_PREFIX)
+app.include_router(simple_resources.room_history_router, prefix=API_PREFIX)
+app.include_router(simple_resources.tenants_router, prefix=API_PREFIX)
+app.include_router(simple_resources.expense_categories_router, prefix=API_PREFIX)
+app.include_router(simple_resources.staff_router, prefix=API_PREFIX)
+app.include_router(expenses.router, prefix=API_PREFIX)
+app.include_router(salary_payments.router, prefix=API_PREFIX)
+app.include_router(room_occupants.router, prefix=API_PREFIX)
 
-app.include_router(simple_resources.buildings_router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(simple_resources.owners_router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(simple_resources.floors_router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(simple_resources.rooms_router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(simple_resources.room_history_router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(simple_resources.tenants_router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(simple_resources.expense_categories_router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(simple_resources.staff_router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(expenses.router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(salary_payments.router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(room_occupants.router, prefix=API_PREFIX, dependencies=_GUARD)
-
-app.include_router(leases.router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(security_deposits.router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(invoices.router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(payments.router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(owner_ledger.router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(reports.router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(company_settings.router, prefix=API_PREFIX, dependencies=_GUARD)
+app.include_router(leases.router, prefix=API_PREFIX)
+app.include_router(security_deposits.router, prefix=API_PREFIX)
+app.include_router(invoices.router, prefix=API_PREFIX)
+app.include_router(payments.router, prefix=API_PREFIX)
+app.include_router(owner_ledger.router, prefix=API_PREFIX)
+app.include_router(reports.router, prefix=API_PREFIX)
+app.include_router(company_settings.router, prefix=API_PREFIX)
 app.include_router(signup.router, prefix=API_PREFIX)
 app.include_router(auth_activity.router, prefix=API_PREFIX)
-app.include_router(team.router, prefix=API_PREFIX, dependencies=_GUARD)
+app.include_router(team.router, prefix=API_PREFIX)
 app.include_router(platform_admin.router, prefix=API_PREFIX)
-app.include_router(audit_log.router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(staff_allocations.router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(chart_of_accounts.router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(ledger.router, prefix=API_PREFIX, dependencies=_GUARD)
-app.include_router(financials.router, prefix=API_PREFIX, dependencies=_GUARD)
+app.include_router(audit_log.router, prefix=API_PREFIX)
+app.include_router(staff_allocations.router, prefix=API_PREFIX)
+app.include_router(chart_of_accounts.router, prefix=API_PREFIX)
+app.include_router(ledger.router, prefix=API_PREFIX)
+app.include_router(financials.router, prefix=API_PREFIX)
 app.include_router(implementation.router, prefix=API_PREFIX)
-app.include_router(access.router, prefix=API_PREFIX)
-app.include_router(data_transfer.router, prefix=API_PREFIX, dependencies=_GUARD)
+app.include_router(data_transfer.router, prefix=API_PREFIX)
 
 
 @app.get("/")

@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { X } from "lucide-react";
+import { X, Users } from "lucide-react";
+import type { AccessInfo } from "@/lib/access";
 import { Company } from "@/lib/api";
 import { ThemeSwitcher } from "@/components/ui/ThemeSwitcher";
 import {
@@ -83,18 +84,29 @@ const BASE_SECTIONS: NavSection[] = [
   },
 ];
 
+// lucide icons aren't plain functions, so adapt to the NavItem icon shape.
+const IconUsers = ({ size = 14, className }: { size?: number; className?: string }) => (
+  <Users size={size} className={className} />
+);
+
+// Pages hidden from roles that may not open them (the server enforces this
+// too -- hiding is only so people aren't shown links that would be refused).
+const STATEMENT_HREFS = ["/trial-balance", "/balance-sheet"];
+
 export function Sidebar({
   company,
   mobileOpen,
   onClose,
   isPlatformAdmin,
   showImplementation,
+  access,
 }: {
   company: Company | null;
   mobileOpen: boolean;
   onClose: () => void;
   isPlatformAdmin?: boolean;
   showImplementation?: boolean;
+  access?: AccessInfo | null;
 }) {
   const pathname = usePathname();
 
@@ -120,8 +132,17 @@ export function Sidebar({
         items: [{ href: "/implementation", label: "My Implementation", icon: IconImplementation }],
       });
     }
-    return [...BASE_SECTIONS, ...extra];
-  }, [isPlatformAdmin, showImplementation]);
+    const hideStatements = !!access && !access.can_view_statements;
+    const base = BASE_SECTIONS.map((sec) => {
+      let items = sec.items;
+      if (hideStatements) items = items.filter((i) => !STATEMENT_HREFS.includes(i.href));
+      if (sec.key === "company" && access?.can_manage_users) {
+        items = [...items, { href: "/users", label: "Users & access", icon: IconUsers }];
+      }
+      return { ...sec, items };
+    });
+    return [...base, ...extra];
+  }, [isPlatformAdmin, showImplementation, access]);
 
   const [openSection, setOpenSection] = useState<string | null>(null);
 

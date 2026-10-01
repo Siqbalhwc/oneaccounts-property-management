@@ -5,7 +5,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from supabase import Client
 
-from app.core.access import load_access_context
 from app.core.deps import get_current_company_id, get_current_user, get_supabase
 from app.crud.generic import write_audit_log
 from app.services.ledger import get_account_id, post_journal_entry, resolve_room_owner
@@ -214,31 +213,19 @@ def create_expense(
 
     account = _resolve_expense_account(supabase, company_id, payload.category_id)
     row = payload.model_dump()
-
-    # Access Control ON for this company => EVERY expense must reference a
-    # building room (and so a building). No company-wide / building-less
-    # expenses can be posted. A complete no-op while the feature is off.
-    ctx = load_access_context(user["user_id"])
-    strict = bool(ctx and ctx["enabled"])
-
-    if account.get("transfers_to_owner") or strict:
+    if account.get("transfers_to_owner"):
         if not row.get("room_id"):
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "This category is charged to an owner — select the room so the correct owner can be found."
-                    if account.get("transfers_to_owner")
-                    else "Every expense must reference a building and room. Select the room this expense belongs to."
-                ),
+                detail="This category is charged to an owner — select the room so the correct owner can be found.",
             )
         # building_id always comes FROM the room here, never entered
         # separately -- it's shown as read-only info on the form, not a
         # second thing the user could set inconsistently with the room.
-        found = supabase.table("rooms").select("building_id").eq("id", row["room_id"]).execute().data
-        if not found:
-            # Also what a building-scoped user gets for a room outside their buildings.
-            raise HTTPException(status_code=404, detail="Room not found, or it isn't in a building you can access.")
-        row["building_id"] = found[0]["building_id"]
+        room = supabase.table("rooms").select("building_id").eq("id", row["room_id"]).single().execute().data
+        if not room:
+            raise HTTPException(status_code=404, detail="Room not found")
+        row["building_id"] = room["building_id"]
 
     row["expense_date"] = str(row["expense_date"])
     row["company_id"] = company_id
@@ -289,7 +276,6 @@ def generate_recurring_expenses(
     payload: GenerateRecurringRequest,
     supabase: Client = Depends(get_supabase),
     company_id: str = Depends(get_current_company_id),
-    user: dict = Depends(get_current_user),
 ):
     """
     Mirrors how invoice generation already works: every expense marked
@@ -315,16 +301,8 @@ def generate_recurring_expenses(
         .data
     )
 
-    ctx = load_access_context(user["user_id"])
-    strict = bool(ctx and ctx["enabled"])
-
-    created, skipped, skipped_no_room = [], [], []
+    created, skipped = [], []
     for template in templates:
-        # Access Control ON: no building-less expenses, so a template that
-        # predates the rule (no room) is reported, not silently generated.
-        if strict and not template.get("room_id"):
-            skipped_no_room.append(template["id"])
-            continue
         existing = (
             supabase.table("expenses")
             .select("id")
@@ -355,10 +333,7 @@ def generate_recurring_expenses(
         _post_expense_journal(supabase, company_id, expense)
         created.append(expense["id"])
 
-    result = {"created": created, "skipped_already_generated": skipped}
-    if skipped_no_room:
-        result["skipped_missing_room"] = skipped_no_room
-    return result
+    return {"created": created, "skipped_already_generated": skipped}
 
 
 @router.get("/{expense_id}/allocations")
