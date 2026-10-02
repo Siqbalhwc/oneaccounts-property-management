@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, Invoice, Lease, Building, Tenant, Room, fetchPdfBlob } from "@/lib/api";
 import { Card, DataTable } from "@/components/ui/Card";
@@ -13,6 +13,20 @@ import { Banknote, Printer, Receipt } from "lucide-react";
 
 function formatPkr(n: number) {
   return `Rs ${n.toLocaleString("en-PK")}`;
+}
+
+type GenerateResult = {
+  created: number;
+  skipped: number; // nothing to bill (no charges / lease doesn't overlap the month)
+  alreadyInvoiced: number;
+  failed: { lease_id: string; error: string }[];
+  stopped: boolean; // cancelled, or aborted after repeated errors -- running again continues
+};
+
+const GENERATE_BATCH_SIZE = 100;
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 export default function InvoicesPage() {
@@ -31,7 +45,9 @@ export default function InvoicesPage() {
   const [generateModalOpen, setGenerateModalOpen] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
-  const [generateResult, setGenerateResult] = useState<{ created: string[]; skipped_existing_or_no_charges: string[] } | null>(null);
+  const [generateResult, setGenerateResult] = useState<GenerateResult | null>(null);
+  const [generateProgress, setGenerateProgress] = useState<{ done: number; total: number } | null>(null);
+  const cancelGenerateRef = useRef(false);
   const [generateForm, setGenerateForm] = useState({
     month: new Date().toISOString().slice(0, 7) + "-15",
     building_id: "",
@@ -73,24 +89,85 @@ export default function InvoicesPage() {
     api.get<Room[]>("/rooms?include_archived=true").then(setRooms);
   }, []);
 
+  // Generates in slices of GENERATE_BATCH_SIZE leases instead of one giant
+  // request (which the server's time limit killed -> "Failed to fetch").
+  // Safe to retry or re-run at any point: the server skips any lease that
+  // already has an invoice for the month, so nothing is ever duplicated.
   async function handleGenerate(e: React.FormEvent) {
     e.preventDefault();
     setGenerating(true);
     setGenerateError(null);
     setGenerateResult(null);
+    setGenerateProgress(null);
+    cancelGenerateRef.current = false;
+
+    const tally: GenerateResult = { created: 0, skipped: 0, alreadyInvoiced: 0, failed: [], stopped: false };
+    const base = {
+      month: generateForm.month,
+      due_in_days: parseInt(generateForm.due_in_days, 10) || 7,
+    };
+
     try {
-      const result = await api.post<{ created: string[]; skipped_existing_or_no_charges: string[] }>(
-        "/invoices/generate",
-        {
-          month: generateForm.month,
-          building_id: generateForm.building_id || undefined,
-          due_in_days: parseInt(generateForm.due_in_days, 10) || 7,
-        }
+      const plan = await api.post<{ lease_ids: string[]; total_active: number; already_invoiced: number }>(
+        "/invoices/generate/plan",
+        { ...base, building_id: generateForm.building_id || undefined }
       );
-      setGenerateResult(result);
+      tally.alreadyInvoiced = plan.already_invoiced;
+
+      let pending = plan.lease_ids;
+      const total = pending.length;
+      let processed = 0;
+      let stalls = 0;
+      setGenerateProgress({ done: 0, total });
+
+      while (pending.length > 0) {
+        if (cancelGenerateRef.current) {
+          tally.stopped = true;
+          break;
+        }
+        const slice = pending.slice(0, GENERATE_BATCH_SIZE);
+        const rest = pending.slice(GENERATE_BATCH_SIZE);
+
+        let res: { created: string[]; skipped: string[]; failed: { lease_id: string; error: string }[]; remaining: string[] } | null = null;
+        let lastErr: any = null;
+        for (let attempt = 1; attempt <= 4 && !res; attempt++) {
+          try {
+            res = await api.post("/invoices/generate/batch", { ...base, lease_ids: slice });
+          } catch (err: any) {
+            lastErr = err;
+            await sleep(1500 * attempt);
+          }
+        }
+        if (!res) {
+          tally.stopped = true;
+          setGenerateError(
+            `Stopped after repeated errors (${lastErr?.message ?? "network problem"}). Nothing is lost — click Generate again to continue from where it stopped.`
+          );
+          break;
+        }
+
+        tally.created += res.created.length;
+        tally.skipped += res.skipped.length;
+        tally.failed.push(...res.failed);
+        const handled = res.created.length + res.skipped.length + res.failed.length;
+        processed += handled;
+        setGenerateProgress({ done: Math.min(processed, total), total });
+
+        // Anything the server ran out of time for goes back on the queue.
+        pending = [...res.remaining, ...rest];
+        stalls = handled === 0 ? stalls + 1 : 0;
+        if (stalls >= 3) {
+          tally.stopped = true;
+          setGenerateError("The server isn't making progress. Click Generate again in a minute to continue.");
+          break;
+        }
+      }
+      setGenerateResult(tally);
       load();
     } catch (err: any) {
-      setGenerateError(err.message);
+      setGenerateError(err.message || "Couldn't start generation.");
+      if (tally.created > 0) setGenerateResult({ ...tally, stopped: true });
+      load();
     } finally {
       setGenerating(false);
     }
@@ -99,6 +176,7 @@ export default function InvoicesPage() {
   function openGenerateModal() {
     setGenerateError(null);
     setGenerateResult(null);
+    setGenerateProgress(null);
     setGenerateForm({
       month: new Date().toISOString().slice(0, 7) + "-15",
       building_id: "",
@@ -295,22 +373,51 @@ export default function InvoicesPage() {
             />
           </Field>
           {generateError && <p className="text-sm text-stamp-red">{generateError}</p>}
+          {generating && generateProgress && (
+            <div className="space-y-1.5">
+              <div className="h-2 rounded-full bg-border overflow-hidden">
+                <div
+                  className="h-full bg-ledger transition-all"
+                  style={{ width: `${generateProgress.total ? (generateProgress.done / generateProgress.total) * 100 : 100}%` }}
+                />
+              </div>
+              <p className="text-xs text-ink/55 figures">
+                {generateProgress.done.toLocaleString()} of {generateProgress.total.toLocaleString()} leases processed — keep this window open…
+              </p>
+            </div>
+          )}
           {generateResult && (
             <div className="text-sm bg-accent/5 border border-accent/20 rounded-card px-3 py-2 space-y-1">
               <p className="text-stamp-green font-medium">
-                {generateResult.created.length} invoice(s) created.
+                {generateResult.created.toLocaleString()} invoice(s) created{generateResult.stopped ? " so far" : ""}.
               </p>
-              {generateResult.skipped_existing_or_no_charges.length > 0 && (
-                <p className="text-ink/50 text-xs">
-                  {generateResult.skipped_existing_or_no_charges.length} skipped (already existed for that month, or no active charges).
-                </p>
+              {generateResult.alreadyInvoiced > 0 && (
+                <p className="text-ink/50 text-xs">{generateResult.alreadyInvoiced.toLocaleString()} already had an invoice for that month.</p>
+              )}
+              {generateResult.skipped > 0 && (
+                <p className="text-ink/50 text-xs">{generateResult.skipped.toLocaleString()} skipped (no active charges for that month).</p>
+              )}
+              {generateResult.failed.length > 0 && (
+                <div className="text-xs text-stamp-red space-y-0.5">
+                  <p className="font-medium">{generateResult.failed.length} could not be invoiced — click Generate again to retry them:</p>
+                  {generateResult.failed.slice(0, 5).map((f) => (
+                    <p key={f.lease_id} className="truncate">• {f.error}</p>
+                  ))}
+                  {generateResult.failed.length > 5 && <p>…and {generateResult.failed.length - 5} more.</p>}
+                </div>
               )}
             </div>
           )}
           <div className="flex justify-end gap-2 pt-2">
-            <Button type="button" variant="ghost" onClick={() => setGenerateModalOpen(false)}>
-              Close
-            </Button>
+            {generating ? (
+              <Button type="button" variant="ghost" onClick={() => (cancelGenerateRef.current = true)}>
+                Stop
+              </Button>
+            ) : (
+              <Button type="button" variant="ghost" onClick={() => setGenerateModalOpen(false)}>
+                Close
+              </Button>
+            )}
             <Button type="submit" disabled={generating}>
               {generating ? "Generating…" : "Generate"}
             </Button>

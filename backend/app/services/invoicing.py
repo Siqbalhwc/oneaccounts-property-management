@@ -42,7 +42,13 @@ def current_charges_with_earliest_start(supabase: Client, lease_id: str) -> list
     month, computes from this point forward.
     """
     all_charges = supabase.table("lease_charges").select("*").eq("lease_id", lease_id).execute().data
+    return merge_current_charges(all_charges)
 
+
+def merge_current_charges(all_charges: list[dict]) -> list[dict]:
+    """Pure half of current_charges_with_earliest_start (no DB access), so
+    the bulk invoice generator can apply the exact same rule to charges it
+    already fetched for many leases at once."""
     active_by_label: dict = {}
     earliest_by_label: dict = {}
     for c in all_charges:
