@@ -50,6 +50,7 @@ const BASE_SECTIONS: NavSection[] = [
       { href: "/owners", label: "Owners", icon: IconOwners },
       { href: "/tenants", label: "Tenants", icon: IconTenants },
       { href: "/leases", label: "Leases", icon: IconLeases },
+      { href: "/residents", label: "Residents & facilities", icon: IconTenants },
     ],
   },
   {

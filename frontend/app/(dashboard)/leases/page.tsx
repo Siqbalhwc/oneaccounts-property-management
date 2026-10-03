@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { HistoryPanel } from "@/components/ui/HistoryPanel";
 import { Field, Input, Select } from "@/components/ui/Field";
-import { ChevronRight, ChevronDown, FileText, Pencil, Printer, Banknote, SlidersHorizontal } from "lucide-react";
+import { ChevronRight, ChevronDown, FileText, Pencil, Printer, Banknote, SlidersHorizontal, Users } from "lucide-react";
 
 type LeaseCharge = {
   id: string;
@@ -568,6 +568,13 @@ export default function LeasesPage() {
                         )}
                         <td className="py-3 text-right no-print" onClick={(e) => e.stopPropagation()}>
                           <div className="flex gap-1 justify-end">
+                            <Link
+                              href={`/leases/${l.id}/residents`}
+                              title="Roommates & facilities"
+                              className="p-1.5 rounded inline-flex hover:bg-accent/5 text-ink/50 hover:text-ink"
+                            >
+                              <Users size={16} />
+                            </Link>
                             <Link
                               href={`/leases/${l.id}/settlement`}
                               title="Settlement"

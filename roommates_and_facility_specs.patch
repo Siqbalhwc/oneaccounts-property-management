@@ -1,0 +1,2108 @@
+diff --git a/012_schema_patch_028_roommates_and_facility_specs.sql b/012_schema_patch_028_roommates_and_facility_specs.sql
+new file mode 100644
+index 0000000..0f17359
+--- /dev/null
++++ b/012_schema_patch_028_roommates_and_facility_specs.sql
+@@ -0,0 +1,105 @@
++-- ============================================================================
++-- PATCH 028 -- roommates (police/monitoring register) + facility specs
++-- Run in Supabase SQL Editor. Safe to re-run (everything is IF NOT EXISTS).
++--
++-- 1. room_occupants (roommates): the table already exists in production, but
++--    its CREATE was never committed to the repo. This patch declares it
++--    idempotently (no-op if present) and adds the columns the new features
++--    need. Nothing is ever hard-deleted: "removing" a roommate stamps
++--    moved_out_date + who/when/why, so the police register keeps history.
++--
++-- 2. lease_facilities: one row per facility spec on a lease, e.g. one row per
++--    parked vehicle, one for the internet connection, one per meter. Specs
++--    live in a jsonb column so ANY facility (including custom ones) can carry
++--    its own fields without another schema change.
++-- ============================================================================
++
++-- ---------------------------------------------------------------- roommates
++create table if not exists room_occupants (
++  id uuid primary key default uuid_generate_v4(),
++  company_id uuid not null references companies(id) on delete cascade,
++  tenant_id uuid not null references tenants(id) on delete restrict,
++  room_id uuid not null references rooms(id) on delete restrict,
++  full_name text not null,
++  cnic text,
++  phone text,
++  address text,
++  moved_in_date date not null default current_date,
++  moved_out_date date,
++  created_at timestamptz not null default now()
++);
++
++alter table room_occupants add column if not exists lease_id uuid references leases(id) on delete set null;
++alter table room_occupants add column if not exists relationship text;
++alter table room_occupants add column if not exists removed_at timestamptz;
++alter table room_occupants add column if not exists removed_by uuid references profiles(id);
++alter table room_occupants add column if not exists removal_reason text;
++alter table room_occupants add column if not exists added_by uuid references profiles(id);
++
++create index if not exists idx_room_occupants_company on room_occupants(company_id);
++create index if not exists idx_room_occupants_tenant on room_occupants(tenant_id);
++create index if not exists idx_room_occupants_room on room_occupants(room_id);
++
++alter table room_occupants enable row level security;
++
++do $$
++begin
++  if not exists (
++    select 1 from pg_policies
++    where schemaname = 'public' and tablename = 'room_occupants'
++      and policyname = 'room_occupants_isolation'
++  ) then
++    create policy room_occupants_isolation on room_occupants
++      for all using (company_id = auth_company_id());
++  end if;
++end;
++$$;
++
++-- --------------------------------------------------------- facility specs
++create table if not exists lease_facilities (
++  id uuid primary key default uuid_generate_v4(),
++  company_id uuid not null references companies(id) on delete cascade,
++  lease_id uuid not null references leases(id) on delete cascade,
++  tenant_id uuid not null references tenants(id) on delete restrict,
++  room_id uuid not null references rooms(id) on delete restrict,
++  label text not null,                       -- 'Parking', 'Internet', 'Electricity', or any custom name
++  kind text not null default 'other'
++    check (kind in ('parking','internet','electricity','water','gas','other')),
++  specs jsonb not null default '{}'::jsonb,  -- e.g. {"vehicle_number":"LEA-1234","card_number":"0042"}
++  notes text,
++  is_active boolean not null default true,
++  ended_on date,
++  created_by uuid references profiles(id),
++  created_at timestamptz not null default now(),
++  updated_at timestamptz not null default now()
++);
++
++create index if not exists idx_lease_facilities_company on lease_facilities(company_id);
++create index if not exists idx_lease_facilities_lease on lease_facilities(lease_id);
++create index if not exists idx_lease_facilities_tenant on lease_facilities(tenant_id);
++create index if not exists idx_lease_facilities_kind on lease_facilities(company_id, kind) where is_active;
++
++alter table lease_facilities enable row level security;
++
++do $$
++begin
++  if not exists (
++    select 1 from pg_policies
++    where schemaname = 'public' and tablename = 'lease_facilities'
++      and policyname = 'lease_facilities_isolation'
++  ) then
++    create policy lease_facilities_isolation on lease_facilities
++      for all using (company_id = auth_company_id());
++  end if;
++end;
++$$;
++
++drop trigger if exists trg_lease_facilities_updated_at on lease_facilities;
++create trigger trg_lease_facilities_updated_at
++before update on lease_facilities
++for each row execute function set_updated_at();
++
++-- Verify
++select 'room_occupants' as table_name, count(*) from room_occupants
++union all
++select 'lease_facilities', count(*) from lease_facilities;
+diff --git a/backend/app/core/access.py b/backend/app/core/access.py
+index a7e15b4..baf0291 100644
+--- a/backend/app/core/access.py
++++ b/backend/app/core/access.py
+@@ -86,6 +86,11 @@ ACCOUNTANT_WRITES = {
+     ("POST", "/owner-ledger/pay-owner-allocated"),
+     ("POST", "/owner-ledger/{ledger_id}/pay"),
+     ("POST", "/owner-ledger/apply-earlier-payouts/{owner_id}"),
++    # Adding a roommate is a record-keeping entry the accountant is trusted
++    # with. Editing a roommate's details and ALL facility-spec changes stay
++    # with Admin/Owner; removing a roommate is Owner/Admin only (the endpoint
++    # re-checks this itself, so it holds even with Access Control switched off).
++    ("POST", "/room-occupants"),
+ }
+ 
+ # Admin can do everything an accountant can plus master data, WhatsApp,
+@@ -151,6 +156,13 @@ def permissions_for(ctx: dict) -> dict:
+         "can_manage_master_data": eff in ("owner", "admin"),
+         "can_use_data_transfer": eff in ("owner", "admin"),
+         "read_only": eff == "auditor",
++        # Roommates / facility specs. Removal deliberately keys off the REAL
++        # role, not the feature switch, because the endpoint enforces it that
++        # way too -- the UI never offers a button the server would refuse.
++        "can_add_roommates": eff in ("owner", "admin", "accountant"),
++        "can_edit_roommates": eff in ("owner", "admin"),
++        "can_remove_roommates": EFFECTIVE_ROLE.get(ctx.get("role")) in ("owner", "admin") or bool(ctx.get("is_platform_admin")),
++        "can_manage_facilities": eff in ("owner", "admin"),
+     }
+ 
+ 
+diff --git a/backend/app/main.py b/backend/app/main.py
+index c4a6ea6..2bf10b3 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -13,6 +13,7 @@ from app.routers import (
+     company_settings,
+     data_transfer,
+     expenses,
++    facilities,
+     financials,
+     implementation,
+     invoices,
+@@ -93,6 +94,7 @@ app.include_router(simple_resources.staff_router, prefix=API_PREFIX, dependencie
+ app.include_router(expenses.router, prefix=API_PREFIX, dependencies=_GUARD)
+ app.include_router(salary_payments.router, prefix=API_PREFIX, dependencies=_GUARD)
+ app.include_router(room_occupants.router, prefix=API_PREFIX, dependencies=_GUARD)
++app.include_router(facilities.router, prefix=API_PREFIX, dependencies=_GUARD)
+ 
+ app.include_router(leases.router, prefix=API_PREFIX, dependencies=_GUARD)
+ app.include_router(security_deposits.router, prefix=API_PREFIX, dependencies=_GUARD)
+diff --git a/backend/app/routers/facilities.py b/backend/app/routers/facilities.py
+new file mode 100644
+index 0000000..5bca1d2
+--- /dev/null
++++ b/backend/app/routers/facilities.py
+@@ -0,0 +1,450 @@
++"""
++Facility specs -- the details of what a tenant has actually opted into.
++
++A lease's *charges* say what a tenant pays for (Parking, Internet, ...).
++This router records the specifics behind each: the vehicle/card number for
++parking, the allowed speed for internet, meter number and allowed units for
++electricity/water/gas, or free-form fields for anything else.
++
++One row = one spec entry. A tenant with two vehicles has two Parking rows.
++Specs are stored as jsonb so any facility, including custom ones, can carry
++its own fields without another schema change.
++
++Who may do what (central policy in app/core/access.py -- these are NOT in the
++accountant's allowed-writes list, so the default rules apply):
++  * Owner / Admin   create, edit, end
++  * Accountant      view only
++  * Auditor         view only
++
++Nothing is hard-deleted: "ending" a facility keeps the record with an end date.
++"""
++
++import re
++from datetime import date
++from typing import Any, Dict, Optional
++
++from fastapi import APIRouter, Depends, HTTPException, Query
++from pydantic import BaseModel
++from supabase import Client
++
++from app.core.deps import get_current_company_id, get_current_user, get_supabase
++from app.crud.generic import write_audit_log
++
++router = APIRouter(prefix="/facilities", tags=["Facilities"])
++
++KINDS = ("parking", "internet", "electricity", "water", "gas", "other")
++
++# Single source of truth for the fields each facility kind asks for. The
++# frontend renders its forms from GET /facilities/templates, and the report
++# uses the same labels, so the two can never drift apart.
++TEMPLATES: Dict[str, Dict[str, Any]] = {
++    "parking": {
++        "label": "Parking",
++        "hint": "Add one entry per vehicle. At least a vehicle number or card number is needed.",
++        "fields": [
++            {"key": "vehicle_type", "label": "Vehicle type", "type": "select", "options": ["Car", "Motorbike", "Bicycle", "Other"]},
++            {"key": "vehicle_number", "label": "Vehicle number", "type": "text", "placeholder": "e.g. LEA-1234"},
++            {"key": "card_number", "label": "Parking card number", "type": "text"},
++            {"key": "slot", "label": "Slot / bay", "type": "text"},
++        ],
++    },
++    "internet": {
++        "label": "Internet",
++        "hint": "Allowed speed is required.",
++        "fields": [
++            {"key": "speed_mbps", "label": "Allowed speed", "type": "number", "unit": "Mbps"},
++            {"key": "connection_id", "label": "Connection / account ID", "type": "text"},
++            {"key": "router_serial", "label": "Router serial", "type": "text"},
++        ],
++    },
++    "electricity": {
++        "label": "Electricity",
++        "hint": "Meter number and the units the tenant may consume per month.",
++        "fields": [
++            {"key": "meter_number", "label": "Meter number", "type": "text"},
++            {"key": "allowed_units", "label": "Allowed units", "type": "number", "unit": "units / month"},
++            {"key": "opening_reading", "label": "Opening reading", "type": "number"},
++        ],
++    },
++    "water": {
++        "label": "Water",
++        "hint": "Meter number and the units the tenant may consume per month.",
++        "fields": [
++            {"key": "meter_number", "label": "Meter number", "type": "text"},
++            {"key": "allowed_units", "label": "Allowed units", "type": "number", "unit": "units / month"},
++            {"key": "opening_reading", "label": "Opening reading", "type": "number"},
++        ],
++    },
++    "gas": {
++        "label": "Gas",
++        "hint": "Meter number and the units the tenant may consume per month.",
++        "fields": [
++            {"key": "meter_number", "label": "Meter number", "type": "text"},
++            {"key": "allowed_units", "label": "Allowed units", "type": "number", "unit": "units / month"},
++            {"key": "opening_reading", "label": "Opening reading", "type": "number"},
++        ],
++    },
++    "other": {
++        "label": "Other facility",
++        "hint": "Describe it in your own fields below (e.g. generator: 5 kVA, locker: L-12).",
++        "fields": [],
++    },
++}
++
++NUMERIC_KEYS = {"speed_mbps", "allowed_units", "opening_reading"}
++UPPERCASE_KEYS = {"vehicle_number", "card_number"}
++MAX_SPEC_KEYS = 20
++MAX_VALUE_LEN = 200
++_KEY_RE = re.compile(r"^[A-Za-z0-9 _.\-]{1,40}$")
++
++
++# ---------------------------------------------------------------------------
++# Schemas
++# ---------------------------------------------------------------------------
++class FacilityCreate(BaseModel):
++    lease_id: str
++    label: str                      # e.g. "Parking" -- usually the lease charge it belongs to
++    specs: Dict[str, Any] = {}
++    notes: Optional[str] = None
++
++
++class FacilityEdit(BaseModel):
++    label: Optional[str] = None
++    specs: Optional[Dict[str, Any]] = None
++    notes: Optional[str] = None
++
++
++class FacilityEnd(BaseModel):
++    ended_on: Optional[date] = None
++
++
++# ---------------------------------------------------------------------------
++# Helpers
++# ---------------------------------------------------------------------------
++def classify_label(label: str) -> str:
++    l = (label or "").lower()
++    if "park" in l:
++        return "parking"
++    if any(w in l for w in ("internet", "wifi", "wi-fi", "broadband")):
++        return "internet"
++    if any(w in l for w in ("electric", "power")):
++        return "electricity"
++    if "water" in l:
++        return "water"
++    if "gas" in l:
++        return "gas"
++    return "other"
++
++
++def _humanize(key: str) -> str:
++    for t in TEMPLATES.values():
++        for f in t["fields"]:
++            if f["key"] == key:
++                return f["label"]
++    return key.replace("_", " ").strip().capitalize()
++
++
++def normalize_specs(kind: str, specs: Dict[str, Any]) -> Dict[str, Any]:
++    if not isinstance(specs, dict):
++        raise HTTPException(status_code=400, detail="Specs must be a set of field/value pairs.")
++    out: Dict[str, Any] = {}
++    for raw_key, raw_val in specs.items():
++        key = str(raw_key).strip()
++        if not _KEY_RE.match(key):
++            raise HTTPException(
++                status_code=400,
++                detail=f"Field name '{key}' isn't allowed (letters, numbers, spaces, - _ . only, up to 40 characters).",
++            )
++        if raw_val is None or (isinstance(raw_val, str) and not raw_val.strip()):
++            continue  # blank fields are simply not stored
++        if isinstance(raw_val, (dict, list, bool)):
++            raise HTTPException(status_code=400, detail=f"'{_humanize(key)}' must be plain text or a number.")
++
++        if key in NUMERIC_KEYS:
++            try:
++                num = float(str(raw_val).replace(",", "").strip())
++            except ValueError:
++                raise HTTPException(status_code=400, detail=f"'{_humanize(key)}' must be a number.")
++            if num < 0 or (key == "speed_mbps" and num == 0):
++                raise HTTPException(status_code=400, detail=f"'{_humanize(key)}' must be greater than zero." if key == "speed_mbps" else f"'{_humanize(key)}' can't be negative.")
++            out[key] = int(num) if num == int(num) else num
++            continue
++
++        text = re.sub(r"\s+", " ", str(raw_val)).strip()
++        if len(text) > MAX_VALUE_LEN:
++            raise HTTPException(status_code=400, detail=f"'{_humanize(key)}' is too long (max {MAX_VALUE_LEN} characters).")
++        out[key] = text.upper() if key in UPPERCASE_KEYS else text
++
++    if len(out) > MAX_SPEC_KEYS:
++        raise HTTPException(status_code=400, detail=f"Too many fields (max {MAX_SPEC_KEYS}).")
++    return out
++
++
++def validate_for_kind(kind: str, specs: Dict[str, Any], notes: Optional[str]) -> None:
++    if kind == "parking" and not (specs.get("vehicle_number") or specs.get("card_number")):
++        raise HTTPException(status_code=400, detail="Parking needs at least a vehicle number or a card number.")
++    if kind == "internet" and "speed_mbps" not in specs:
++        raise HTTPException(status_code=400, detail="Internet needs the allowed speed (Mbps).")
++    if not specs and not (notes or "").strip():
++        raise HTTPException(status_code=400, detail="Add at least one detail or a note for this facility.")
++
++
++def _check_parking_duplicates(supabase: Client, specs: Dict[str, Any], exclude_id: Optional[str] = None) -> None:
++    """A vehicle or parking card can't belong to two active tenants at once."""
++    for key, what in (("vehicle_number", "vehicle"), ("card_number", "parking card")):
++        value = specs.get(key)
++        if not value:
++            continue
++        rows = (
++            supabase.table("lease_facilities")
++            .select("id, tenant_id")
++            .eq("kind", "parking")
++            .eq("is_active", True)
++            .eq(f"specs->>{key}", value)
++            .execute()
++            .data
++        )
++        rows = [r for r in rows if r["id"] != exclude_id]
++        if rows:
++            t = supabase.table("tenants").select("full_name").eq("id", rows[0]["tenant_id"]).execute().data
++            who = t[0]["full_name"] if t else "another tenant"
++            raise HTTPException(status_code=409, detail=f"This {what} ({value}) is already registered to {who}.")
++
++
++def _clean_notes(notes: Optional[str]) -> Optional[str]:
++    notes = (notes or "").strip()
++    if len(notes) > 1000:
++        raise HTTPException(status_code=400, detail="Notes are too long (max 1000 characters).")
++    return notes or None
++
++
++def _display_specs(kind: str, specs: Dict[str, Any]) -> list[dict]:
++    fields = {f["key"]: f for f in TEMPLATES.get(kind, {}).get("fields", [])}
++    # known fields first in their template order, then any custom ones
++    ordered = [k for k in fields if k in specs] + [k for k in specs if k not in fields]
++    out = []
++    for k in ordered:
++        f = fields.get(k)
++        out.append({"label": f["label"] if f else _humanize(k), "value": specs[k], "unit": (f or {}).get("unit")})
++    return out
++
++
++# ---------------------------------------------------------------------------
++# Read endpoints (static paths first, before "/{facility_id}")
++# ---------------------------------------------------------------------------
++@router.get("/templates")
++def templates():
++    return {"kinds": TEMPLATES}
++
++
++@router.get("/register")
++def register(
++    building_id: Optional[str] = Query(None),
++    kind: Optional[str] = Query(None),
++    search: Optional[str] = Query(None, description="Tenant, room, vehicle/card/meter number, anything in the specs"),
++    include_ended: bool = Query(False),
++    supabase: Client = Depends(get_supabase),
++):
++    """Facilities register across all tenants -- e.g. every vehicle in the
++    building for the guards, every internet connection and its speed, every
++    meter. Visibility comes from the caller's own RLS-scoped client, so a
++    building-restricted user only sees facilities on leases they can see."""
++    if kind and kind not in KINDS:
++        raise HTTPException(status_code=400, detail="Unknown facility type.")
++
++    query = supabase.table("lease_facilities").select("*")
++    if kind:
++        query = query.eq("kind", kind)
++    if not include_ended:
++        query = query.eq("is_active", True)
++    facilities = query.order("created_at", desc=False).execute().data
++
++    leases = {l["id"]: l for l in supabase.table("leases").select("id, status, tenant_id, room_id").execute().data}
++    rooms = {r["id"]: r for r in supabase.table("rooms").select("id, room_number, building_id").execute().data}
++    buildings = {b["id"]: b for b in supabase.table("buildings").select("id, name").execute().data}
++    tenant_ids = sorted({f["tenant_id"] for f in facilities})
++    tenants: dict[str, dict] = {}
++    for i in range(0, len(tenant_ids), 100):
++        for t in supabase.table("tenants").select("id, full_name, phone").in_("id", tenant_ids[i : i + 100]).execute().data:
++            tenants[t["id"]] = t
++
++    q = (search or "").strip().lower()
++    rows = []
++    for f in facilities:
++        lease = leases.get(f["lease_id"])
++        if not lease:
++            continue  # lease not visible to this user (building scope) -> neither is its facility
++        room = rooms.get(f["room_id"], {})
++        if building_id and room.get("building_id") != building_id:
++            continue
++        building = buildings.get(room.get("building_id"), {})
++        tenant = tenants.get(f["tenant_id"], {})
++        display = _display_specs(f["kind"], f.get("specs") or {})
++        if q:
++            hay = " ".join(
++                [
++                    tenant.get("full_name") or "",
++                    str(room.get("room_number") or ""),
++                    building.get("name") or "",
++                    f.get("label") or "",
++                    f.get("notes") or "",
++                    *[str(d["value"]) for d in display],
++                ]
++            ).lower()
++            if q not in hay:
++                continue
++        rows.append(
++            {
++                **f,
++                "specs_display": display,
++                "tenant_name": tenant.get("full_name"),
++                "tenant_phone": tenant.get("phone"),
++                "room_number": room.get("room_number"),
++                "building_id": room.get("building_id"),
++                "building_name": building.get("name"),
++                "lease_status": lease.get("status"),
++            }
++        )
++    rows.sort(key=lambda r: ((r["building_name"] or "").lower(), str(r["room_number"] or ""), r["label"] or ""))
++    counts = {k: sum(1 for r in rows if r["kind"] == k) for k in KINDS}
++    return {"rows": rows, "total": len(rows), "counts_by_kind": counts}
++
++
++@router.get("")
++def list_facilities(
++    lease_id: Optional[str] = Query(None),
++    tenant_id: Optional[str] = Query(None),
++    kind: Optional[str] = Query(None),
++    include_ended: bool = Query(False),
++    supabase: Client = Depends(get_supabase),
++):
++    query = supabase.table("lease_facilities").select("*")
++    if lease_id:
++        query = query.eq("lease_id", lease_id)
++    if tenant_id:
++        query = query.eq("tenant_id", tenant_id)
++    if kind:
++        query = query.eq("kind", kind)
++    if not include_ended:
++        query = query.eq("is_active", True)
++    rows = query.order("created_at", desc=False).execute().data
++    for r in rows:
++        r["specs_display"] = _display_specs(r["kind"], r.get("specs") or {})
++    return rows
++
++
++# ---------------------------------------------------------------------------
++# Write endpoints (Owner / Admin)
++# ---------------------------------------------------------------------------
++@router.post("", status_code=201)
++def create_facility(
++    payload: FacilityCreate,
++    supabase: Client = Depends(get_supabase),
++    company_id: str = Depends(get_current_company_id),
++    user: dict = Depends(get_current_user),
++):
++    label = (payload.label or "").strip()
++    if not label or len(label) > 60:
++        raise HTTPException(status_code=400, detail="Facility name is required (max 60 characters).")
++
++    lease = supabase.table("leases").select("id, tenant_id, room_id, status").eq("id", payload.lease_id).execute().data
++    if not lease:
++        raise HTTPException(status_code=404, detail="Lease not found.")
++    lease = lease[0]
++    if lease["status"] != "active":
++        raise HTTPException(status_code=400, detail="Facilities can only be added to an active lease.")
++
++    kind = classify_label(label)
++    specs = normalize_specs(kind, payload.specs)
++    notes = _clean_notes(payload.notes)
++    validate_for_kind(kind, specs, notes)
++    if kind == "parking":
++        _check_parking_duplicates(supabase, specs)
++
++    res = (
++        supabase.table("lease_facilities")
++        .insert(
++            {
++                "company_id": company_id,
++                "lease_id": lease["id"],
++                "tenant_id": lease["tenant_id"],
++                "room_id": lease["room_id"],
++                "label": label,
++                "kind": kind,
++                "specs": specs,
++                "notes": notes,
++                "created_by": user["user_id"],
++            }
++        )
++        .execute()
++    )
++    created = res.data[0]
++    write_audit_log(supabase, company_id, user["user_id"], "create", "lease_facilities", created["id"])
++    created["specs_display"] = _display_specs(kind, specs)
++    return created
++
++
++@router.patch("/{facility_id}")
++def edit_facility(
++    facility_id: str,
++    payload: FacilityEdit,
++    supabase: Client = Depends(get_supabase),
++    company_id: str = Depends(get_current_company_id),
++    user: dict = Depends(get_current_user),
++):
++    before = supabase.table("lease_facilities").select("*").eq("id", facility_id).execute().data
++    if not before:
++        raise HTTPException(status_code=404, detail="Not found")
++    before = before[0]
++    if not before["is_active"]:
++        raise HTTPException(status_code=400, detail="This facility has ended; the record is read-only.")
++
++    data = payload.model_dump(exclude_unset=True)
++    label = before["label"]
++    if "label" in data:
++        label = (data["label"] or "").strip()
++        if not label or len(label) > 60:
++            raise HTTPException(status_code=400, detail="Facility name is required (max 60 characters).")
++    kind = classify_label(label)
++    specs = normalize_specs(kind, data["specs"]) if "specs" in data else (before.get("specs") or {})
++    notes = _clean_notes(data["notes"]) if "notes" in data else before.get("notes")
++    validate_for_kind(kind, specs, notes)
++    if kind == "parking":
++        _check_parking_duplicates(supabase, specs, exclude_id=facility_id)
++
++    res = (
++        supabase.table("lease_facilities")
++        .update({"label": label, "kind": kind, "specs": specs, "notes": notes})
++        .eq("id", facility_id)
++        .execute()
++    )
++    after = res.data[0]
++    write_audit_log(supabase, company_id, user["user_id"], "update", "lease_facilities", facility_id, before, after)
++    after["specs_display"] = _display_specs(kind, specs)
++    return after
++
++
++@router.post("/{facility_id}/end")
++def end_facility(
++    facility_id: str,
++    payload: FacilityEnd,
++    supabase: Client = Depends(get_supabase),
++    company_id: str = Depends(get_current_company_id),
++    user: dict = Depends(get_current_user),
++):
++    """Stops a facility (tenant gave up the parking spot, sold the car...).
++    The record stays, with an end date, rather than being deleted."""
++    before = supabase.table("lease_facilities").select("*").eq("id", facility_id).execute().data
++    if not before:
++        raise HTTPException(status_code=404, detail="Not found")
++    if not before[0]["is_active"]:
++        raise HTTPException(status_code=400, detail="This facility has already ended.")
++    res = (
++        supabase.table("lease_facilities")
++        .update({"is_active": False, "ended_on": str(payload.ended_on or date.today())})
++        .eq("id", facility_id)
++        .execute()
++    )
++    after = res.data[0]
++    write_audit_log(supabase, company_id, user["user_id"], "end", "lease_facilities", facility_id, before[0], after)
++    return after
+diff --git a/backend/app/routers/room_occupants.py b/backend/app/routers/room_occupants.py
+index 56864e0..d59380c 100644
+--- a/backend/app/routers/room_occupants.py
++++ b/backend/app/routers/room_occupants.py
+@@ -1,20 +1,47 @@
+-from datetime import date
++"""
++Roommates -- people who live in a room alongside the lease-holding tenant.
++
++The lease and the room stay in the tenant's name. This is a retained
++register for police verification / monitoring, so nothing here is ever
++hard-deleted.
++
++Who may do what (enforced centrally in app/core/access.py, plus the owner
++check on /remove below which holds even when Access Control is switched off):
++  * Owner       add, edit, remove, report
++  * Admin       add, edit, remove, report
++  * Accountant  add, report                      (cannot edit or remove)
++  * Auditor     report only
++"""
++
++import re
++from datetime import date, datetime, timezone
+ from typing import Optional
+ 
+ from fastapi import APIRouter, Depends, HTTPException, Query
+ from pydantic import BaseModel
+ from supabase import Client
+ 
+-from app.core.deps import get_current_company_id, get_current_user, get_supabase
++from app.core.access import EFFECTIVE_ROLE, load_access_context
++from app.core.deps import (
++    get_current_company_id,
++    get_current_user,
++    get_service_client,
++    get_supabase,
++)
+ from app.crud.generic import write_audit_log
++from app.services import phone as phone_service
+ 
+ router = APIRouter(prefix="/room-occupants", tags=["Roommates"])
+ 
+ 
++# ---------------------------------------------------------------------------
++# Schemas
++# ---------------------------------------------------------------------------
+ class OccupantCreate(BaseModel):
+     tenant_id: str      # the lease-holding tenant they're associated with
+     room_id: str
+     full_name: str
++    relationship: Optional[str] = None  # e.g. "Brother", "Friend", "Spouse"
+     cnic: Optional[str] = None
+     phone: Optional[str] = None
+     address: Optional[str] = None
+@@ -23,16 +50,184 @@ class OccupantCreate(BaseModel):
+ 
+ class OccupantEdit(BaseModel):
+     full_name: Optional[str] = None
++    relationship: Optional[str] = None
+     cnic: Optional[str] = None
+     phone: Optional[str] = None
+     address: Optional[str] = None
+-    moved_out_date: Optional[date] = None  # the main way this gets used: recording when someone left
+ 
+ 
++class OccupantRemove(BaseModel):
++    reason: str
++    moved_out_date: Optional[date] = None  # defaults to today
++
++
++# ---------------------------------------------------------------------------
++# Helpers
++# ---------------------------------------------------------------------------
++def _clean(value: Optional[str]) -> Optional[str]:
++    value = (value or "").strip()
++    return value or None
++
++
++def _format_cnic(raw: str) -> str:
++    digits = re.sub(r"\D", "", raw or "")
++    if len(digits) != 13:
++        raise HTTPException(
++            status_code=400,
++            detail="CNIC must be exactly 13 digits (e.g. 35202-1234567-1).",
++        )
++    return f"{digits[:5]}-{digits[5:12]}-{digits[12]}"
++
++
++def _cnic_digits(value: Optional[str]) -> str:
++    return re.sub(r"\D", "", value or "")
++
++
++def require_owner_or_admin_role(
++    user: dict = Depends(get_current_user),
++    service_client=Depends(get_service_client),
++) -> None:
++    """Only an owner or admin (legacy 'manager' counts as admin), or a platform
++    admin, may pass.
++
++    Deliberately independent of the Access Control feature switch: this is a
++    new action with no legacy behaviour to preserve, and 'accountants can't
++    remove a roommate' must hold for every company."""
++    ctx = load_access_context(user["user_id"], service_client, use_cache=False)
++    allowed = bool(ctx) and (
++        EFFECTIVE_ROLE.get(ctx["role"]) in ("owner", "admin") or ctx["is_platform_admin"]
++    )
++    if not allowed:
++        raise HTTPException(status_code=403, detail="Only an owner or admin can remove a roommate.")
++
++
++def _fetch_by_ids(supabase: Client, table: str, columns: str, ids: list[str]) -> list[dict]:
++    """in_() lookups in chunks so a large portfolio can't blow the URL length."""
++    out: list[dict] = []
++    unique = sorted({i for i in ids if i})
++    for i in range(0, len(unique), 100):
++        out += supabase.table(table).select(columns).in_("id", unique[i : i + 100]).execute().data
++    return out
++
++
++def _check_duplicates(supabase: Client, tenant: dict, cnic: Optional[str], exclude_id: Optional[str] = None) -> None:
++    if not cnic:
++        return
++    digits = _cnic_digits(cnic)
++    if digits == _cnic_digits(tenant.get("cnic")):
++        raise HTTPException(status_code=400, detail="This CNIC belongs to the tenant themselves, not a roommate.")
++    rows = (
++        supabase.table("room_occupants")
++        .select("id, full_name, cnic")
++        .is_("moved_out_date", "null")
++        .not_.is_("cnic", "null")
++        .execute()
++        .data
++    )
++    for r in rows:
++        if r["id"] != exclude_id and _cnic_digits(r.get("cnic")) == digits:
++            raise HTTPException(
++                status_code=409,
++                detail=f"{r['full_name']} with this CNIC is already registered as a current roommate.",
++            )
++
++
++# ---------------------------------------------------------------------------
++# Report (must be declared before "/{occupant_id}")
++# ---------------------------------------------------------------------------
++@router.get("/report")
++def roommates_report(
++    building_id: Optional[str] = Query(None),
++    search: Optional[str] = Query(None, description="Tenant, roommate, CNIC or room"),
++    include_past: bool = Query(False, description="Also list roommates who have moved out"),
++    only_with_roommates: bool = Query(False),
++    supabase: Client = Depends(get_supabase),
++):
++    """Tenant-wise roommates register. Every tenant with an active lease is a
++    row (so 'no roommates declared' is visible too), each with their roommates.
++
++    Visibility is inherited from the caller's own RLS-scoped client: a
++    building-restricted user only sees leases/rooms in their buildings, and
++    therefore only their roommates."""
++    leases = (
++        supabase.table("leases")
++        .select("id, tenant_id, room_id, status, start_date, end_date")
++        .eq("status", "active")
++        .execute()
++        .data
++    )
++    rooms = {r["id"]: r for r in supabase.table("rooms").select("id, room_number, building_id").execute().data}
++    buildings = {b["id"]: b for b in supabase.table("buildings").select("id, name").execute().data}
++    tenants = {
++        t["id"]: t
++        for t in _fetch_by_ids(supabase, "tenants", "id, full_name, cnic, phone", [l["tenant_id"] for l in leases])
++    }
++
++    if building_id:
++        leases = [l for l in leases if rooms.get(l["room_id"], {}).get("building_id") == building_id]
++
++    visible_tenant_ids = {l["tenant_id"] for l in leases}
++    occ_query = supabase.table("room_occupants").select("*").order("moved_in_date", desc=False)
++    if not include_past:
++        occ_query = occ_query.is_("moved_out_date", "null")
++    occupants = [o for o in occ_query.execute().data if o["tenant_id"] in visible_tenant_ids]
++
++    by_tenant: dict[str, list[dict]] = {}
++    for o in occupants:
++        by_tenant.setdefault(o["tenant_id"], []).append(o)
++
++    q = (search or "").strip().lower()
++    rows = []
++    for l in leases:
++        tenant = tenants.get(l["tenant_id"], {})
++        room = rooms.get(l["room_id"], {})
++        building = buildings.get(room.get("building_id"), {})
++        mates = by_tenant.get(l["tenant_id"], [])
++        if only_with_roommates and not mates:
++            continue
++        if q:
++            hay = " ".join(
++                [
++                    tenant.get("full_name") or "",
++                    tenant.get("cnic") or "",
++                    str(room.get("room_number") or ""),
++                    building.get("name") or "",
++                    *[(m.get("full_name") or "") + " " + (m.get("cnic") or "") for m in mates],
++                ]
++            ).lower()
++            if q not in hay:
++                continue
++        rows.append(
++            {
++                "tenant_id": l["tenant_id"],
++                "tenant_name": tenant.get("full_name"),
++                "tenant_cnic": tenant.get("cnic"),
++                "tenant_phone": tenant.get("phone"),
++                "lease_id": l["id"],
++                "room_id": l["room_id"],
++                "room_number": room.get("room_number"),
++                "building_id": room.get("building_id"),
++                "building_name": building.get("name"),
++                "current_roommate_count": sum(1 for m in mates if not m.get("moved_out_date")),
++                "roommates": mates,
++            }
++        )
++    rows.sort(key=lambda r: ((r["building_name"] or "").lower(), str(r["room_number"] or "")))
++    return {
++        "rows": rows,
++        "total_tenants": len(rows),
++        "total_current_roommates": sum(r["current_roommate_count"] for r in rows),
++    }
++
++
++# ---------------------------------------------------------------------------
++# CRUD
++# ---------------------------------------------------------------------------
+ @router.get("")
+ def list_occupants(
+     tenant_id: Optional[str] = Query(None),
+     room_id: Optional[str] = Query(None),
++    lease_id: Optional[str] = Query(None),
+     supabase: Client = Depends(get_supabase),
+ ):
+     """Full history by default -- both current and past roommates -- since
+@@ -42,6 +237,8 @@ def list_occupants(
+         query = query.eq("tenant_id", tenant_id)
+     if room_id:
+         query = query.eq("room_id", room_id)
++    if lease_id:
++        query = query.eq("lease_id", lease_id)
+     return query.order("created_at", desc=True).execute().data
+ 
+ 
+@@ -60,9 +257,47 @@ def add_occupant(
+     company_id: str = Depends(get_current_company_id),
+     user: dict = Depends(get_current_user),
+ ):
+-    row = payload.model_dump()
+-    row["moved_in_date"] = str(row["moved_in_date"]) if row.get("moved_in_date") else str(date.today())
+-    row["company_id"] = company_id
++    full_name = _clean(payload.full_name)
++    if not full_name:
++        raise HTTPException(status_code=400, detail="Roommate's full name is required.")
++
++    # Roommates only attach to a CURRENT tenant: the tenant must hold an active
++    # lease on exactly this room (the lease itself never changes hands).
++    lease = (
++        supabase.table("leases")
++        .select("id, room_id")
++        .eq("tenant_id", payload.tenant_id)
++        .eq("status", "active")
++        .execute()
++        .data
++    )
++    if not lease:
++        raise HTTPException(status_code=400, detail="Roommates can only be added to a tenant with an active lease.")
++    if lease[0]["room_id"] != payload.room_id:
++        raise HTTPException(status_code=400, detail="That room is not this tenant's current room.")
++
++    tenant = supabase.table("tenants").select("id, cnic").eq("id", payload.tenant_id).single().execute().data
++    if not tenant:
++        raise HTTPException(status_code=404, detail="Tenant not found.")
++
++    cnic = _format_cnic(payload.cnic) if _clean(payload.cnic) else None
++    phone = phone_service.validate_and_normalize(payload.phone) if _clean(payload.phone) else None
++    _check_duplicates(supabase, tenant, cnic)
++
++    moved_in = payload.moved_in_date or date.today()
++    row = {
++        "company_id": company_id,
++        "tenant_id": payload.tenant_id,
++        "room_id": payload.room_id,
++        "lease_id": lease[0]["id"],
++        "full_name": full_name,
++        "relationship": _clean(payload.relationship),
++        "cnic": cnic,
++        "phone": phone,
++        "address": _clean(payload.address),
++        "moved_in_date": str(moved_in),
++        "added_by": user["user_id"],
++    }
+     res = supabase.table("room_occupants").insert(row).execute()
+     created = res.data[0]
+     write_audit_log(supabase, company_id, user["user_id"], "create", "room_occupants", created["id"])
+@@ -77,13 +312,34 @@ def edit_occupant(
+     company_id: str = Depends(get_current_company_id),
+     user: dict = Depends(get_current_user),
+ ):
+-    """No delete endpoint on purpose -- this is a retained record for police
+-    reporting, so a roommate who's left gets moved_out_date set, not removed."""
++    """Correct a roommate's details (Owner / Admin). Moving someone out is NOT
++    done here -- that is the owner/admin-only POST /{id}/remove below."""
+     before = supabase.table("room_occupants").select("*").eq("id", occupant_id).single().execute()
+     if not before.data:
+         raise HTTPException(status_code=404, detail="Not found")
++    if before.data.get("moved_out_date"):
++        raise HTTPException(status_code=400, detail="This roommate has already been removed; the record is read-only.")
+ 
+-    updates = {k: (str(v) if isinstance(v, date) else v) for k, v in payload.model_dump(exclude_unset=True).items()}
++    data = payload.model_dump(exclude_unset=True)
++    updates: dict = {}
++    if "full_name" in data:
++        name = _clean(data["full_name"])
++        if not name:
++            raise HTTPException(status_code=400, detail="Roommate's full name can't be blank.")
++        updates["full_name"] = name
++    if "relationship" in data:
++        updates["relationship"] = _clean(data["relationship"])
++    if "address" in data:
++        updates["address"] = _clean(data["address"])
++    if "cnic" in data:
++        updates["cnic"] = _format_cnic(data["cnic"]) if _clean(data["cnic"]) else None
++        if updates["cnic"]:
++            tenant = (
++                supabase.table("tenants").select("id, cnic").eq("id", before.data["tenant_id"]).single().execute().data
++            )
++            _check_duplicates(supabase, tenant or {}, updates["cnic"], exclude_id=occupant_id)
++    if "phone" in data:
++        updates["phone"] = phone_service.validate_and_normalize(data["phone"]) if _clean(data["phone"]) else None
+     if not updates:
+         raise HTTPException(status_code=400, detail="Nothing to update")
+ 
+@@ -91,3 +347,46 @@ def edit_occupant(
+     after = res.data[0]
+     write_audit_log(supabase, company_id, user["user_id"], "update", "room_occupants", occupant_id, before.data, after)
+     return after
++
++
++@router.post("/{occupant_id}/remove")
++def remove_occupant(
++    occupant_id: str,
++    payload: OccupantRemove,
++    supabase: Client = Depends(get_supabase),
++    company_id: str = Depends(get_current_company_id),
++    user: dict = Depends(get_current_user),
++    _perm: None = Depends(require_owner_or_admin_role),
++):
++    """Owner / Admin only. Marks the roommate as moved out (record is kept for the
++    police register -- who removed them, when, and why)."""
++    reason = _clean(payload.reason)
++    if not reason or len(reason) < 3:
++        raise HTTPException(status_code=400, detail="Please give a short reason for removing this roommate.")
++
++    before = supabase.table("room_occupants").select("*").eq("id", occupant_id).single().execute()
++    if not before.data:
++        raise HTTPException(status_code=404, detail="Not found")
++    if before.data.get("moved_out_date"):
++        raise HTTPException(status_code=400, detail="This roommate has already been removed.")
++
++    moved_out = payload.moved_out_date or date.today()
++    if str(moved_out) < str(before.data["moved_in_date"]):
++        raise HTTPException(status_code=400, detail="Move-out date can't be before the move-in date.")
++
++    res = (
++        supabase.table("room_occupants")
++        .update(
++            {
++                "moved_out_date": str(moved_out),
++                "removed_at": datetime.now(timezone.utc).isoformat(),
++                "removed_by": user["user_id"],
++                "removal_reason": reason,
++            }
++        )
++        .eq("id", occupant_id)
++        .execute()
++    )
++    after = res.data[0]
++    write_audit_log(supabase, company_id, user["user_id"], "remove", "room_occupants", occupant_id, before.data, after)
++    return after
+diff --git a/frontend/app/(dashboard)/leases/[id]/residents/page.tsx b/frontend/app/(dashboard)/leases/[id]/residents/page.tsx
+new file mode 100644
+index 0000000..3381b31
+--- /dev/null
++++ b/frontend/app/(dashboard)/leases/[id]/residents/page.tsx
+@@ -0,0 +1,635 @@
++"use client";
++
++import { useCallback, useEffect, useState } from "react";
++import Link from "next/link";
++import { useParams } from "next/navigation";
++import { Pencil, Plus, UserMinus, Power } from "lucide-react";
++import { api, Lease, Tenant, Room, Building } from "@/lib/api";
++import { useAccess } from "@/lib/access";
++import {
++  Roommate,
++  Facility,
++  FacilityTemplates,
++  FacilityKind,
++  classifyLabel,
++  formatSpecValue,
++} from "@/lib/residents";
++import { Card } from "@/components/ui/Card";
++import { Button } from "@/components/ui/Button";
++import { Modal } from "@/components/ui/Modal";
++import { StampBadge } from "@/components/ui/StampBadge";
++import { Field, Input, Select } from "@/components/ui/Field";
++
++type LeaseCharge = { label: string };
++const emptyRoommate = { full_name: "", relationship: "", cnic: "", phone: "", address: "", moved_in_date: "" };
++type ExtraRow = { key: string; value: string };
++
++export default function LeaseResidentsPage() {
++  const params = useParams();
++  const leaseId = params.id as string;
++  const access = useAccess();
++  // While /access/me is loading (null) nothing is hidden; the server enforces
++  // the real rules either way, so this only controls which buttons are shown.
++  const can = (flag: "can_add_roommates" | "can_edit_roommates" | "can_remove_roommates" | "can_manage_facilities") =>
++    access ? access[flag] !== false : true;
++
++  const [lease, setLease] = useState<Lease | null>(null);
++  const [tenant, setTenant] = useState<Tenant | null>(null);
++  const [room, setRoom] = useState<Room | null>(null);
++  const [building, setBuilding] = useState<Building | null>(null);
++  const [charges, setCharges] = useState<LeaseCharge[]>([]);
++  const [loadError, setLoadError] = useState<string | null>(null);
++
++  const [roommates, setRoommates] = useState<Roommate[] | null>(null);
++  const [showPast, setShowPast] = useState(false);
++  const [facilities, setFacilities] = useState<Facility[] | null>(null);
++  const [templates, setTemplates] = useState<FacilityTemplates | null>(null);
++
++  // ---- roommate modal ----
++  const [rmOpen, setRmOpen] = useState(false);
++  const [rmEditingId, setRmEditingId] = useState<string | null>(null);
++  const [rmForm, setRmForm] = useState(emptyRoommate);
++  const [rmSaving, setRmSaving] = useState(false);
++  const [rmError, setRmError] = useState<string | null>(null);
++
++  // ---- remove roommate ----
++  const [removeTarget, setRemoveTarget] = useState<Roommate | null>(null);
++  const [removeReason, setRemoveReason] = useState("");
++  const [removeDate, setRemoveDate] = useState("");
++  const [removing, setRemoving] = useState(false);
++  const [removeError, setRemoveError] = useState<string | null>(null);
++
++  // ---- facility modal ----
++  const [fOpen, setFOpen] = useState(false);
++  const [fEditingId, setFEditingId] = useState<string | null>(null);
++  const [fLabelChoice, setFLabelChoice] = useState("");
++  const [fCustomLabel, setFCustomLabel] = useState("");
++  const [fSpecs, setFSpecs] = useState<Record<string, string>>({});
++  const [fExtras, setFExtras] = useState<ExtraRow[]>([]);
++  const [fNotes, setFNotes] = useState("");
++  const [fSaving, setFSaving] = useState(false);
++  const [fError, setFError] = useState<string | null>(null);
++
++  // ---- end facility ----
++  const [endTarget, setEndTarget] = useState<Facility | null>(null);
++  const [ending, setEnding] = useState(false);
++  const [endError, setEndError] = useState<string | null>(null);
++
++  const leaseActive = lease?.status === "active";
++
++  const loadRoommates = useCallback(() => {
++    api.get<Roommate[]>(`/room-occupants?lease_id=${leaseId}`).then(setRoommates).catch(() => setRoommates([]));
++  }, [leaseId]);
++
++  const loadFacilities = useCallback(() => {
++    api.get<Facility[]>(`/facilities?lease_id=${leaseId}&include_ended=true`).then(setFacilities).catch(() => setFacilities([]));
++  }, [leaseId]);
++
++  useEffect(() => {
++    api
++      .get<Lease>(`/leases/${leaseId}`)
++      .then(async (l) => {
++        setLease(l);
++        api.get<Tenant>(`/tenants/${l.tenant_id}`).then(setTenant).catch(() => {});
++        api.get<Room>(`/rooms/${l.room_id}`).then(async (r) => {
++          setRoom(r);
++          api.get<Building[]>("/buildings").then((bs) => setBuilding(bs.find((b) => b.id === r.building_id) ?? null));
++        }).catch(() => {});
++        api.get<LeaseCharge[]>(`/leases/${leaseId}/charges`).then(setCharges).catch(() => {});
++      })
++      .catch((e) => setLoadError(e.message));
++    api.get<{ kinds: FacilityTemplates }>("/facilities/templates").then((t) => setTemplates(t.kinds)).catch(() => {});
++    loadRoommates();
++    loadFacilities();
++  }, [leaseId, loadRoommates, loadFacilities]);
++
++  // ------------------------------------------------------------ roommates
++  function openAddRoommate() {
++    setRmEditingId(null);
++    setRmForm({ ...emptyRoommate, moved_in_date: new Date().toISOString().slice(0, 10) });
++    setRmError(null);
++    setRmOpen(true);
++  }
++
++  function openEditRoommate(r: Roommate) {
++    setRmEditingId(r.id);
++    setRmForm({
++      full_name: r.full_name,
++      relationship: r.relationship ?? "",
++      cnic: r.cnic ?? "",
++      phone: r.phone ?? "",
++      address: r.address ?? "",
++      moved_in_date: r.moved_in_date,
++    });
++    setRmError(null);
++    setRmOpen(true);
++  }
++
++  async function saveRoommate(e: React.FormEvent) {
++    e.preventDefault();
++    if (!lease) return;
++    setRmSaving(true);
++    setRmError(null);
++    try {
++      if (rmEditingId) {
++        await api.patch(`/room-occupants/${rmEditingId}`, {
++          full_name: rmForm.full_name,
++          relationship: rmForm.relationship,
++          cnic: rmForm.cnic,
++          phone: rmForm.phone,
++          address: rmForm.address,
++        });
++      } else {
++        await api.post("/room-occupants", {
++          tenant_id: lease.tenant_id,
++          room_id: lease.room_id,
++          full_name: rmForm.full_name,
++          relationship: rmForm.relationship || undefined,
++          cnic: rmForm.cnic || undefined,
++          phone: rmForm.phone || undefined,
++          address: rmForm.address || undefined,
++          moved_in_date: rmForm.moved_in_date || undefined,
++        });
++      }
++      setRmOpen(false);
++      loadRoommates();
++    } catch (err: any) {
++      setRmError(err.message);
++    } finally {
++      setRmSaving(false);
++    }
++  }
++
++  async function confirmRemove(e: React.FormEvent) {
++    e.preventDefault();
++    if (!removeTarget) return;
++    setRemoving(true);
++    setRemoveError(null);
++    try {
++      await api.post(`/room-occupants/${removeTarget.id}/remove`, {
++        reason: removeReason,
++        moved_out_date: removeDate || undefined,
++      });
++      setRemoveTarget(null);
++      loadRoommates();
++    } catch (err: any) {
++      setRemoveError(err.message);
++    } finally {
++      setRemoving(false);
++    }
++  }
++
++  // ----------------------------------------------------------- facilities
++  const facilityKind: FacilityKind = classifyLabel(fLabelChoice === "__custom__" ? fCustomLabel : fLabelChoice);
++  const template = templates?.[facilityKind];
++  const resolvedLabel = (fLabelChoice === "__custom__" ? fCustomLabel : fLabelChoice).trim();
++
++  // Charges on this lease (other than Rent) = what the tenant has opted into.
++  const facilityCharges = Array.from(
++    new Set(charges.filter((c) => c.label && c.label.trim().toLowerCase() !== "rent").map((c) => c.label.trim()))
++  );
++  const activeFacilities = (facilities ?? []).filter((f) => f.is_active);
++  const endedFacilities = (facilities ?? []).filter((f) => !f.is_active);
++  const chargesWithoutSpecs = facilityCharges.filter(
++    (label) => !activeFacilities.some((f) => f.label.trim().toLowerCase() === label.toLowerCase())
++  );
++
++  function openAddFacility(prefillLabel?: string) {
++    setFEditingId(null);
++    setFLabelChoice(prefillLabel ?? (facilityCharges[0] ?? "__custom__"));
++    setFCustomLabel("");
++    setFSpecs({});
++    setFExtras([]);
++    setFNotes("");
++    setFError(null);
++    setFOpen(true);
++  }
++
++  function openEditFacility(f: Facility) {
++    const known = templates?.[f.kind]?.fields.map((x) => x.key) ?? [];
++    const specs: Record<string, string> = {};
++    const extras: ExtraRow[] = [];
++    Object.entries(f.specs ?? {}).forEach(([k, v]) => {
++      if (known.includes(k)) specs[k] = String(v);
++      else extras.push({ key: k, value: String(v) });
++    });
++    setFEditingId(f.id);
++    const inCharges = facilityCharges.some((c) => c.toLowerCase() === f.label.toLowerCase());
++    setFLabelChoice(inCharges ? facilityCharges.find((c) => c.toLowerCase() === f.label.toLowerCase())! : "__custom__");
++    setFCustomLabel(inCharges ? "" : f.label);
++    setFSpecs(specs);
++    setFExtras(extras);
++    setFNotes(f.notes ?? "");
++    setFError(null);
++    setFOpen(true);
++  }
++
++  async function saveFacility(e: React.FormEvent) {
++    e.preventDefault();
++    if (!lease) return;
++    if (!resolvedLabel) {
++      setFError("Choose or type a facility name.");
++      return;
++    }
++    const specs: Record<string, string> = { ...fSpecs };
++    for (const row of fExtras) {
++      if (row.key.trim() || row.value.trim()) {
++        if (!row.key.trim()) {
++          setFError("Each extra detail needs a field name.");
++          return;
++        }
++        specs[row.key.trim()] = row.value;
++      }
++    }
++    setFSaving(true);
++    setFError(null);
++    try {
++      if (fEditingId) {
++        await api.patch(`/facilities/${fEditingId}`, { label: resolvedLabel, specs, notes: fNotes });
++      } else {
++        await api.post("/facilities", { lease_id: lease.id, label: resolvedLabel, specs, notes: fNotes || undefined });
++      }
++      setFOpen(false);
++      loadFacilities();
++    } catch (err: any) {
++      setFError(err.message);
++    } finally {
++      setFSaving(false);
++    }
++  }
++
++  async function confirmEndFacility() {
++    if (!endTarget) return;
++    setEnding(true);
++    setEndError(null);
++    try {
++      await api.post(`/facilities/${endTarget.id}/end`, {});
++      setEndTarget(null);
++      loadFacilities();
++    } catch (err: any) {
++      setEndError(err.message);
++    } finally {
++      setEnding(false);
++    }
++  }
++
++  // ----------------------------------------------------------------- view
++  if (loadError) {
++    return (
++      <div className="space-y-4">
++        <Link href="/leases" className="text-sm text-accent hover:underline">← Back to leases</Link>
++        <Card><p className="text-sm text-stamp-red">Couldn&apos;t open this lease — {loadError}</p></Card>
++      </div>
++    );
++  }
++
++  const currentRoommates = (roommates ?? []).filter((r) => !r.moved_out_date);
++  const pastRoommates = (roommates ?? []).filter((r) => r.moved_out_date);
++
++  return (
++    <div className="space-y-6">
++      <div>
++        <Link href="/leases" className="text-sm text-accent hover:underline">← Back to leases</Link>
++        <div className="flex flex-wrap items-center gap-3 mt-2">
++          <h1 className="text-2xl font-display font-semibold">Residents &amp; facilities</h1>
++          {lease && <StampBadge status={lease.status} />}
++        </div>
++        <p className="text-sm text-ink/55 mt-1">
++          {tenant?.full_name ?? "…"} — {building?.name ?? "…"}, room {room?.room_number ?? "…"}. The lease stays in
++          the tenant&apos;s name; roommates are recorded here for verification and monitoring.
++        </p>
++      </div>
++
++      {/* ------------------------------------------------ Roommates */}
++      <Card
++        title="Roommates"
++        action={
++          can("can_add_roommates") && leaseActive ? (
++            <Button variant="secondary" onClick={openAddRoommate}>
++              <Plus size={14} className="inline mr-1 -mt-0.5" />
++              Add roommate
++            </Button>
++          ) : undefined
++        }
++      >
++        {!leaseActive && lease && (
++          <p className="text-xs text-ink/50 mb-3">This lease is no longer active, so roommates can&apos;t be added.</p>
++        )}
++        {roommates === null ? (
++          <p className="text-sm text-ink/40">Loading…</p>
++        ) : currentRoommates.length === 0 ? (
++          <p className="text-sm text-ink/45">No roommates declared for this tenant.</p>
++        ) : (
++          <RoommateTable
++            rows={currentRoommates}
++            canEdit={can("can_edit_roommates")}
++            canRemove={can("can_remove_roommates")}
++            onEdit={openEditRoommate}
++            onRemove={(r) => {
++              setRemoveTarget(r);
++              setRemoveReason("");
++              setRemoveDate(new Date().toISOString().slice(0, 10));
++              setRemoveError(null);
++            }}
++          />
++        )}
++        {pastRoommates.length > 0 && (
++          <div className="mt-4 pt-3 border-t border-border">
++            <label className="flex items-center gap-2 text-xs text-ink/55">
++              <input type="checkbox" checked={showPast} onChange={(e) => setShowPast(e.target.checked)} />
++              Show {pastRoommates.length} former roommate{pastRoommates.length > 1 ? "s" : ""}
++            </label>
++            {showPast && (
++              <div className="mt-3">
++                <RoommateTable rows={pastRoommates} canEdit={false} canRemove={false} past />
++              </div>
++            )}
++          </div>
++        )}
++      </Card>
++
++      {/* ------------------------------------------------ Facilities */}
++      <Card
++        title="Facilities & specifications"
++        action={
++          can("can_manage_facilities") && leaseActive ? (
++            <Button variant="secondary" onClick={() => openAddFacility()}>
++              <Plus size={14} className="inline mr-1 -mt-0.5" />
++              Add facility details
++            </Button>
++          ) : undefined
++        }
++      >
++        {chargesWithoutSpecs.length > 0 && leaseActive && (
++          <div className="mb-4 rounded-card border border-brass/30 bg-brass/10 px-3 py-2.5 text-sm">
++            <p className="font-medium mb-1">Billed on this lease but no details recorded yet</p>
++            <div className="flex flex-wrap gap-2">
++              {chargesWithoutSpecs.map((label) =>
++                can("can_manage_facilities") ? (
++                  <button
++                    key={label}
++                    onClick={() => openAddFacility(label)}
++                    className="text-xs px-2.5 py-1 rounded-full border border-brass/40 bg-paper-card hover:border-brass-dark"
++                  >
++                    + {label}
++                  </button>
++                ) : (
++                  <span key={label} className="text-xs px-2.5 py-1 rounded-full border border-brass/40">{label}</span>
++                )
++              )}
++            </div>
++          </div>
++        )}
++
++        {facilities === null ? (
++          <p className="text-sm text-ink/40">Loading…</p>
++        ) : activeFacilities.length === 0 ? (
++          <p className="text-sm text-ink/45">No facility details recorded for this lease.</p>
++        ) : (
++          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
++            {activeFacilities.map((f) => (
++              <div key={f.id} className="border border-border rounded-card p-3.5">
++                <div className="flex items-start justify-between gap-2 mb-2">
++                  <p className="font-medium text-sm">{f.label}</p>
++                  {can("can_manage_facilities") && (
++                    <div className="flex gap-1 no-print">
++                      <button onClick={() => openEditFacility(f)} title="Edit" className="p-1 rounded hover:bg-accent/5 text-ink/50 hover:text-ink">
++                        <Pencil size={14} />
++                      </button>
++                      <button onClick={() => { setEndTarget(f); setEndError(null); }} title="End this facility" className="p-1 rounded hover:bg-accent/5 text-ink/50 hover:text-ink">
++                        <Power size={14} />
++                      </button>
++                    </div>
++                  )}
++                </div>
++                <dl className="space-y-1">
++                  {f.specs_display.map((d, i) => (
++                    <div key={i} className="flex justify-between gap-3 text-sm">
++                      <dt className="text-ink/50">{d.label}</dt>
++                      <dd className="figures font-medium text-right">{formatSpecValue(d)}</dd>
++                    </div>
++                  ))}
++                </dl>
++                {f.notes && <p className="text-xs text-ink/55 mt-2 pt-2 border-t border-border">{f.notes}</p>}
++              </div>
++            ))}
++          </div>
++        )}
++
++        {endedFacilities.length > 0 && (
++          <details className="mt-4 pt-3 border-t border-border text-xs text-ink/55">
++            <summary className="cursor-pointer select-none">Ended facilities ({endedFacilities.length})</summary>
++            <div className="mt-2 space-y-1.5">
++              {endedFacilities.map((f) => (
++                <div key={f.id} className="border-l-2 border-border pl-2">
++                  {f.label} — {f.specs_display.map(formatSpecValue).join(", ") || "no details"} — ended {f.ended_on}
++                </div>
++              ))}
++            </div>
++          </details>
++        )}
++      </Card>
++
++      {/* ------------------------------------------------ Roommate modal */}
++      <Modal open={rmOpen} onClose={() => setRmOpen(false)} title={rmEditingId ? "Edit roommate" : "Add roommate"}>
++        <form onSubmit={saveRoommate} className="space-y-4">
++          <Field label="Full name">
++            <Input required value={rmForm.full_name} onChange={(e) => setRmForm({ ...rmForm, full_name: e.target.value })} />
++          </Field>
++          <div className="grid grid-cols-2 gap-3">
++            <Field label="Relationship (optional)">
++              <Input placeholder="e.g. Brother, Friend" value={rmForm.relationship} onChange={(e) => setRmForm({ ...rmForm, relationship: e.target.value })} />
++            </Field>
++            {!rmEditingId && (
++              <Field label="Moved in on">
++                <Input type="date" value={rmForm.moved_in_date} onChange={(e) => setRmForm({ ...rmForm, moved_in_date: e.target.value })} />
++              </Field>
++            )}
++          </div>
++          <Field label="CNIC" hint="13 digits, e.g. 35202-1234567-1. Needed for the police record.">
++            <Input value={rmForm.cnic} onChange={(e) => setRmForm({ ...rmForm, cnic: e.target.value })} placeholder="35202-1234567-1" />
++          </Field>
++          <Field label="Phone (optional)" hint="e.g. 0300-1234567">
++            <Input value={rmForm.phone} onChange={(e) => setRmForm({ ...rmForm, phone: e.target.value })} placeholder="0300-1234567" />
++          </Field>
++          <Field label="Permanent address (optional)">
++            <Input value={rmForm.address} onChange={(e) => setRmForm({ ...rmForm, address: e.target.value })} />
++          </Field>
++          {rmError && <p className="text-sm text-stamp-red">{rmError}</p>}
++          <div className="flex justify-end gap-2 pt-2">
++            <Button type="button" variant="ghost" onClick={() => setRmOpen(false)}>Cancel</Button>
++            <Button type="submit" disabled={rmSaving}>{rmSaving ? "Saving…" : rmEditingId ? "Save changes" : "Add roommate"}</Button>
++          </div>
++        </form>
++      </Modal>
++
++      {/* ------------------------------------------------ Remove modal */}
++      <Modal open={!!removeTarget} onClose={() => setRemoveTarget(null)} title="Remove roommate">
++        <form onSubmit={confirmRemove} className="space-y-4">
++          <p className="text-sm text-ink/70">
++            <span className="font-medium">{removeTarget?.full_name}</span> will be marked as moved out. The record is
++            kept in the police register — nothing is deleted.
++          </p>
++          <Field label="Move-out date">
++            <Input type="date" required value={removeDate} onChange={(e) => setRemoveDate(e.target.value)} />
++          </Field>
++          <Field label="Reason">
++            <Input required value={removeReason} onChange={(e) => setRemoveReason(e.target.value)} placeholder="e.g. Moved to another city" />
++          </Field>
++          {removeError && <p className="text-sm text-stamp-red">{removeError}</p>}
++          <div className="flex justify-end gap-2 pt-2">
++            <Button type="button" variant="ghost" onClick={() => setRemoveTarget(null)}>Cancel</Button>
++            <Button type="submit" variant="danger" disabled={removing}>{removing ? "Removing…" : "Remove roommate"}</Button>
++          </div>
++        </form>
++      </Modal>
++
++      {/* ------------------------------------------------ Facility modal */}
++      <Modal open={fOpen} onClose={() => setFOpen(false)} title={fEditingId ? "Edit facility details" : "Add facility details"}>
++        <form onSubmit={saveFacility} className="space-y-4">
++          <Field label="Facility">
++            <Select value={fLabelChoice} onChange={(e) => { setFLabelChoice(e.target.value); setFSpecs({}); }}>
++              {facilityCharges.map((l) => <option key={l} value={l}>{l}</option>)}
++              <option value="__custom__">Other / not on the bill…</option>
++            </Select>
++          </Field>
++          {fLabelChoice === "__custom__" && (
++            <Field label="Facility name" hint="e.g. Parking, Internet, Generator, Locker">
++              <Input required value={fCustomLabel} onChange={(e) => { setFCustomLabel(e.target.value); setFSpecs({}); }} />
++            </Field>
++          )}
++
++          {template && template.fields.length > 0 && (
++            <div className="space-y-3 pl-3 border-l-2 border-border">
++              <p className="text-xs text-ink/50">{template.hint}</p>
++              {template.fields.map((f) => (
++                <Field key={f.key} label={f.unit ? `${f.label} (${f.unit})` : f.label}>
++                  {f.type === "select" ? (
++                    <Select value={fSpecs[f.key] ?? ""} onChange={(e) => setFSpecs({ ...fSpecs, [f.key]: e.target.value })}>
++                      <option value="">—</option>
++                      {f.options?.map((o) => <option key={o} value={o}>{o}</option>)}
++                    </Select>
++                  ) : (
++                    <Input
++                      type={f.type === "number" ? "number" : "text"}
++                      min={f.type === "number" ? 0 : undefined}
++                      step={f.type === "number" ? "any" : undefined}
++                      placeholder={f.placeholder}
++                      value={fSpecs[f.key] ?? ""}
++                      onChange={(e) => setFSpecs({ ...fSpecs, [f.key]: e.target.value })}
++                    />
++                  )}
++                </Field>
++              ))}
++            </div>
++          )}
++          {template && template.fields.length === 0 && <p className="text-xs text-ink/50">{template.hint}</p>}
++
++          <div className="space-y-2">
++            <p className="text-xs uppercase tracking-wider text-ink/45 font-medium">Extra details (optional)</p>
++            {fExtras.map((row, i) => (
++              <div key={i} className="grid grid-cols-[1fr_1fr_auto] gap-2">
++                <Input placeholder="Field, e.g. Capacity" value={row.key} onChange={(e) => setFExtras(fExtras.map((r, j) => (j === i ? { ...r, key: e.target.value } : r)))} />
++                <Input placeholder="Value, e.g. 5 kVA" value={row.value} onChange={(e) => setFExtras(fExtras.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)))} />
++                <Button type="button" variant="ghost" onClick={() => setFExtras(fExtras.filter((_, j) => j !== i))}>Remove</Button>
++              </div>
++            ))}
++            <Button type="button" variant="ghost" onClick={() => setFExtras([...fExtras, { key: "", value: "" }])}>+ Add a detail</Button>
++          </div>
++
++          <Field label="Notes (optional)">
++            <Input value={fNotes} onChange={(e) => setFNotes(e.target.value)} />
++          </Field>
++          {fError && <p className="text-sm text-stamp-red">{fError}</p>}
++          <div className="flex justify-end gap-2 pt-2">
++            <Button type="button" variant="ghost" onClick={() => setFOpen(false)}>Cancel</Button>
++            <Button type="submit" disabled={fSaving}>{fSaving ? "Saving…" : fEditingId ? "Save changes" : "Save details"}</Button>
++          </div>
++        </form>
++      </Modal>
++
++      {/* ------------------------------------------------ End facility */}
++      <Modal open={!!endTarget} onClose={() => setEndTarget(null)} title="End this facility?">
++        <p className="text-sm text-ink/70 mb-4">
++          <span className="font-medium">{endTarget?.label}</span>
++          {endTarget && endTarget.specs_display.length > 0 && <> ({endTarget.specs_display.map(formatSpecValue).join(", ")})</>}{" "}
++          will be marked as ended today. The record stays in history, and the vehicle/card number becomes available again.
++        </p>
++        {endError && <p className="text-sm text-stamp-red mb-3">{endError}</p>}
++        <div className="flex justify-end gap-2">
++          <Button variant="ghost" onClick={() => setEndTarget(null)}>Cancel</Button>
++          <Button variant="danger" onClick={confirmEndFacility} disabled={ending}>{ending ? "Ending…" : "End facility"}</Button>
++        </div>
++      </Modal>
++    </div>
++  );
++}
++
++function RoommateTable({
++  rows,
++  canEdit,
++  canRemove,
++  onEdit,
++  onRemove,
++  past = false,
++}: {
++  rows: Roommate[];
++  canEdit: boolean;
++  canRemove: boolean;
++  onEdit?: (r: Roommate) => void;
++  onRemove?: (r: Roommate) => void;
++  past?: boolean;
++}) {
++  return (
++    <div className="overflow-x-auto">
++      <table className="w-full text-sm">
++        <thead>
++          <tr className="text-left text-[11px] uppercase tracking-wider text-ink/45 border-b border-border">
++            <th className="py-2 pr-3 font-semibold">Name</th>
++            <th className="py-2 pr-3 font-semibold">Relationship</th>
++            <th className="py-2 pr-3 font-semibold">CNIC</th>
++            <th className="py-2 pr-3 font-semibold">Phone</th>
++            <th className="py-2 pr-3 font-semibold">{past ? "Stayed" : "Since"}</th>
++            {!past && <th className="py-2 w-20" />}
++          </tr>
++        </thead>
++        <tbody>
++          {rows.map((r) => (
++            <tr key={r.id} className="border-b border-border/60 align-top">
++              <td className="py-2.5 pr-3 font-medium">{r.full_name}</td>
++              <td className="py-2.5 pr-3 text-ink/70">{r.relationship ?? "—"}</td>
++              <td className="py-2.5 pr-3 figures text-ink/70">{r.cnic ?? "—"}</td>
++              <td className="py-2.5 pr-3 figures text-ink/70">{r.phone ?? "—"}</td>
++              <td className="py-2.5 pr-3 figures text-ink/70">
++                {past ? (
++                  <>
++                    {r.moved_in_date} → {r.moved_out_date}
++                    {r.removal_reason && <span className="block text-xs text-ink/45">{r.removal_reason}</span>}
++                  </>
++                ) : (
++                  r.moved_in_date
++                )}
++              </td>
++              {!past && (
++                <td className="py-2.5 text-right no-print">
++                  <div className="flex gap-1 justify-end">
++                    {canEdit && (
++                      <button onClick={() => onEdit?.(r)} title="Edit" className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink">
++                        <Pencil size={15} />
++                      </button>
++                    )}
++                    {canRemove && (
++                      <button onClick={() => onRemove?.(r)} title="Remove roommate" className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-stamp-red">
++                        <UserMinus size={15} />
++                      </button>
++                    )}
++                  </div>
++                </td>
++              )}
++            </tr>
++          ))}
++        </tbody>
++      </table>
++    </div>
++  );
++}
+diff --git a/frontend/app/(dashboard)/leases/page.tsx b/frontend/app/(dashboard)/leases/page.tsx
+index 2b190f5..7c068e4 100644
+--- a/frontend/app/(dashboard)/leases/page.tsx
++++ b/frontend/app/(dashboard)/leases/page.tsx
+@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/Button";
+ import { Modal } from "@/components/ui/Modal";
+ import { HistoryPanel } from "@/components/ui/HistoryPanel";
+ import { Field, Input, Select } from "@/components/ui/Field";
+-import { ChevronRight, ChevronDown, FileText, Pencil, Printer, Banknote, SlidersHorizontal } from "lucide-react";
++import { ChevronRight, ChevronDown, FileText, Pencil, Printer, Banknote, SlidersHorizontal, Users } from "lucide-react";
+ 
+ type LeaseCharge = {
+   id: string;
+@@ -568,6 +568,13 @@ export default function LeasesPage() {
+                         )}
+                         <td className="py-3 text-right no-print" onClick={(e) => e.stopPropagation()}>
+                           <div className="flex gap-1 justify-end">
++                            <Link
++                              href={`/leases/${l.id}/residents`}
++                              title="Roommates & facilities"
++                              className="p-1.5 rounded inline-flex hover:bg-accent/5 text-ink/50 hover:text-ink"
++                            >
++                              <Users size={16} />
++                            </Link>
+                             <Link
+                               href={`/leases/${l.id}/settlement`}
+                               title="Settlement"
+diff --git a/frontend/app/(dashboard)/residents/page.tsx b/frontend/app/(dashboard)/residents/page.tsx
+new file mode 100644
+index 0000000..7e2a26c
+--- /dev/null
++++ b/frontend/app/(dashboard)/residents/page.tsx
+@@ -0,0 +1,304 @@
++"use client";
++
++import { useEffect, useState } from "react";
++import Link from "next/link";
++import { Printer } from "lucide-react";
++import { api, Building, Company } from "@/lib/api";
++import {
++  RoommateReport,
++  FacilityRegister,
++  FacilityKind,
++  formatSpecValue,
++} from "@/lib/residents";
++import { Card } from "@/components/ui/Card";
++import { Button } from "@/components/ui/Button";
++import { PrintHeader } from "@/components/ui/PrintHeader";
++import { Input, Select } from "@/components/ui/Field";
++
++type Tab = "roommates" | "facilities";
++
++const KIND_LABELS: Record<FacilityKind, string> = {
++  parking: "Parking",
++  internet: "Internet",
++  electricity: "Electricity",
++  water: "Water",
++  gas: "Gas",
++  other: "Other",
++};
++
++export default function ResidentsPage() {
++  const [tab, setTab] = useState<Tab>("roommates");
++  const [company, setCompany] = useState<Company | null>(null);
++  const [buildings, setBuildings] = useState<Building[]>([]);
++
++  const [buildingId, setBuildingId] = useState("");
++  const [search, setSearch] = useState("");
++  const [debouncedSearch, setDebouncedSearch] = useState("");
++
++  // roommates
++  const [includePast, setIncludePast] = useState(false);
++  const [onlyWithRoommates, setOnlyWithRoommates] = useState(false);
++  const [roommateReport, setRoommateReport] = useState<RoommateReport | null>(null);
++
++  // facilities
++  const [kind, setKind] = useState("");
++  const [includeEnded, setIncludeEnded] = useState(false);
++  const [facilityReport, setFacilityReport] = useState<FacilityRegister | null>(null);
++
++  const [error, setError] = useState<string | null>(null);
++
++  useEffect(() => {
++    api.get<Company>("/company/me").then(setCompany).catch(() => {});
++    api.get<Building[]>("/buildings").then(setBuildings).catch(() => {});
++  }, []);
++
++  useEffect(() => {
++    const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
++    return () => clearTimeout(t);
++  }, [search]);
++
++  useEffect(() => {
++    setError(null);
++    const p = new URLSearchParams();
++    if (buildingId) p.set("building_id", buildingId);
++    if (debouncedSearch) p.set("search", debouncedSearch);
++    if (tab === "roommates") {
++      if (includePast) p.set("include_past", "true");
++      if (onlyWithRoommates) p.set("only_with_roommates", "true");
++      setRoommateReport(null);
++      api.get<RoommateReport>(`/room-occupants/report?${p.toString()}`).then(setRoommateReport).catch((e) => setError(e.message));
++    } else {
++      if (kind) p.set("kind", kind);
++      if (includeEnded) p.set("include_ended", "true");
++      setFacilityReport(null);
++      api.get<FacilityRegister>(`/facilities/register?${p.toString()}`).then(setFacilityReport).catch((e) => setError(e.message));
++    }
++  }, [tab, buildingId, debouncedSearch, includePast, onlyWithRoommates, kind, includeEnded]);
++
++  const buildingLabel = buildings.find((b) => b.id === buildingId)?.name;
++  const reportTitle = `${tab === "roommates" ? "Roommates register" : "Facilities register"}${buildingLabel ? ` — ${buildingLabel}` : ""}`;
++
++  return (
++    <div className="space-y-6">
++      <PrintHeader company={company} reportTitle={reportTitle} />
++
++      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
++        <div>
++          <h1 className="text-2xl font-display font-semibold">Residents &amp; facilities</h1>
++          <p className="text-sm text-ink/55 mt-1">
++            Who lives in each apartment, and the vehicle, internet, meter and other facility details tenants have opted
++            for. Add or change entries from a lease&apos;s{" "}
++            <Link href="/leases" className="text-accent hover:underline">Residents</Link> page.
++          </p>
++        </div>
++        <Button variant="secondary" onClick={() => window.print()} className="no-print">
++          <Printer size={14} className="inline mr-1.5 -mt-0.5" />
++          Print
++        </Button>
++      </div>
++
++      <div className="flex gap-1 border-b border-border no-print">
++        {([
++          ["roommates", "Roommates"],
++          ["facilities", "Facilities"],
++        ] as [Tab, string][]).map(([key, label]) => (
++          <button
++            key={key}
++            onClick={() => setTab(key)}
++            className={`px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
++              tab === key ? "border-brass-dark text-ink" : "border-transparent text-ink/50 hover:text-ink"
++            }`}
++          >
++            {label}
++          </button>
++        ))}
++      </div>
++
++      <div className="flex flex-col lg:flex-row gap-3 no-print">
++        <div className="w-full lg:w-72">
++          <Input
++            placeholder={tab === "roommates" ? "Search tenant, roommate, CNIC, room…" : "Search tenant, vehicle, card, meter…"}
++            value={search}
++            onChange={(e) => setSearch(e.target.value)}
++          />
++        </div>
++        <div className="w-full lg:w-52">
++          <Select value={buildingId} onChange={(e) => setBuildingId(e.target.value)}>
++            <option value="">All buildings</option>
++            {buildings.map((b) => (
++              <option key={b.id} value={b.id}>{b.name}</option>
++            ))}
++          </Select>
++        </div>
++        {tab === "facilities" && (
++          <div className="w-full lg:w-44">
++            <Select value={kind} onChange={(e) => setKind(e.target.value)}>
++              <option value="">All facility types</option>
++              {(Object.keys(KIND_LABELS) as FacilityKind[]).map((k) => (
++                <option key={k} value={k}>{KIND_LABELS[k]}</option>
++              ))}
++            </Select>
++          </div>
++        )}
++        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-ink/60">
++          {tab === "roommates" ? (
++            <>
++              <label className="flex items-center gap-2 whitespace-nowrap">
++                <input type="checkbox" checked={onlyWithRoommates} onChange={(e) => setOnlyWithRoommates(e.target.checked)} />
++                Only tenants with roommates
++              </label>
++              <label className="flex items-center gap-2 whitespace-nowrap">
++                <input type="checkbox" checked={includePast} onChange={(e) => setIncludePast(e.target.checked)} />
++                Include former roommates
++              </label>
++            </>
++          ) : (
++            <label className="flex items-center gap-2 whitespace-nowrap">
++              <input type="checkbox" checked={includeEnded} onChange={(e) => setIncludeEnded(e.target.checked)} />
++              Include ended
++            </label>
++          )}
++        </div>
++      </div>
++
++      {error && (
++        <Card className="border-stamp-red/40">
++          <p className="text-sm text-stamp-red">Couldn&apos;t load this report — {error}</p>
++        </Card>
++      )}
++
++      {tab === "roommates" && (
++        <Card>
++          {roommateReport === null && !error ? (
++            <p className="text-sm text-ink/40">Loading…</p>
++          ) : roommateReport && roommateReport.rows.length === 0 ? (
++            <p className="text-sm text-ink/45">Nothing matches these filters.</p>
++          ) : (
++            roommateReport && (
++              <>
++                <p className="text-xs text-ink/50 mb-3">
++                  {roommateReport.total_tenants} tenant{roommateReport.total_tenants === 1 ? "" : "s"} ·{" "}
++                  {roommateReport.total_current_roommates} current roommate
++                  {roommateReport.total_current_roommates === 1 ? "" : "s"}
++                </p>
++                <div className="overflow-x-auto">
++                  <table className="w-full text-sm">
++                    <thead>
++                      <tr className="text-left text-[11px] uppercase tracking-wider text-ink/45 border-b border-border">
++                        <th className="py-2 pr-3 font-semibold">Building / room</th>
++                        <th className="py-2 pr-3 font-semibold">Tenant</th>
++                        <th className="py-2 pr-3 font-semibold">Roommate</th>
++                        <th className="py-2 pr-3 font-semibold">Relationship</th>
++                        <th className="py-2 pr-3 font-semibold">CNIC</th>
++                        <th className="py-2 pr-3 font-semibold">Phone</th>
++                        <th className="py-2 font-semibold">Period</th>
++                      </tr>
++                    </thead>
++                    <tbody>
++                      {roommateReport.rows.map((row) =>
++                        row.roommates.length === 0 ? (
++                          <tr key={row.lease_id} className="border-b border-border/60">
++                            <td className="py-2.5 pr-3">{row.building_name} — {row.room_number}</td>
++                            <td className="py-2.5 pr-3">
++                              <span className="font-medium">{row.tenant_name}</span>
++                              <span className="block text-xs figures text-ink/50">{row.tenant_cnic}</span>
++                            </td>
++                            <td colSpan={5} className="py-2.5 text-ink/40">No roommates declared</td>
++                          </tr>
++                        ) : (
++                          row.roommates.map((m, i) => (
++                            <tr key={m.id} className={`align-top ${i === row.roommates.length - 1 ? "border-b border-border/60" : ""}`}>
++                              <td className="py-2.5 pr-3">{i === 0 ? `${row.building_name} — ${row.room_number}` : ""}</td>
++                              <td className="py-2.5 pr-3">
++                                {i === 0 && (
++                                  <>
++                                    <span className="font-medium">{row.tenant_name}</span>
++                                    <span className="block text-xs figures text-ink/50">{row.tenant_cnic}</span>
++                                  </>
++                                )}
++                              </td>
++                              <td className={`py-2.5 pr-3 font-medium ${m.moved_out_date ? "text-ink/45" : ""}`}>{m.full_name}</td>
++                              <td className="py-2.5 pr-3 text-ink/70">{m.relationship ?? "—"}</td>
++                              <td className="py-2.5 pr-3 figures text-ink/70">{m.cnic ?? "—"}</td>
++                              <td className="py-2.5 pr-3 figures text-ink/70">{m.phone ?? "—"}</td>
++                              <td className="py-2.5 figures text-ink/70">
++                                {m.moved_in_date}
++                                {m.moved_out_date ? ` → ${m.moved_out_date}` : " → present"}
++                              </td>
++                            </tr>
++                          ))
++                        )
++                      )}
++                    </tbody>
++                  </table>
++                </div>
++              </>
++            )
++          )}
++        </Card>
++      )}
++
++      {tab === "facilities" && (
++        <Card>
++          {facilityReport === null && !error ? (
++            <p className="text-sm text-ink/40">Loading…</p>
++          ) : facilityReport && facilityReport.rows.length === 0 ? (
++            <p className="text-sm text-ink/45">Nothing matches these filters.</p>
++          ) : (
++            facilityReport && (
++              <>
++                <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-ink/50 mb-3">
++                  <span className="font-medium text-ink/70">{facilityReport.total} entries</span>
++                  {(Object.keys(KIND_LABELS) as FacilityKind[])
++                    .filter((k) => facilityReport.counts_by_kind[k] > 0)
++                    .map((k) => (
++                      <span key={k}>{KIND_LABELS[k]}: {facilityReport.counts_by_kind[k]}</span>
++                    ))}
++                </div>
++                <div className="overflow-x-auto">
++                  <table className="w-full text-sm">
++                    <thead>
++                      <tr className="text-left text-[11px] uppercase tracking-wider text-ink/45 border-b border-border">
++                        <th className="py-2 pr-3 font-semibold">Building / room</th>
++                        <th className="py-2 pr-3 font-semibold">Tenant</th>
++                        <th className="py-2 pr-3 font-semibold">Facility</th>
++                        <th className="py-2 pr-3 font-semibold">Details</th>
++                        <th className="py-2 font-semibold">Notes</th>
++                      </tr>
++                    </thead>
++                    <tbody>
++                      {facilityReport.rows.map((r) => (
++                        <tr key={r.id} className="border-b border-border/60 align-top">
++                          <td className="py-2.5 pr-3">{r.building_name} — {r.room_number}</td>
++                          <td className="py-2.5 pr-3">
++                            <span className="font-medium">{r.tenant_name}</span>
++                            {r.tenant_phone && <span className="block text-xs figures text-ink/50">{r.tenant_phone}</span>}
++                          </td>
++                          <td className="py-2.5 pr-3">
++                            {r.label}
++                            {!r.is_active && <span className="block text-xs text-ink/45">ended {r.ended_on}</span>}
++                          </td>
++                          <td className="py-2.5 pr-3">
++                            <div className="space-y-0.5">
++                              {r.specs_display.map((d, i) => (
++                                <p key={i}>
++                                  <span className="text-ink/50">{d.label}: </span>
++                                  <span className="figures font-medium">{formatSpecValue(d)}</span>
++                                </p>
++                              ))}
++                            </div>
++                          </td>
++                          <td className="py-2.5 text-ink/65">{r.notes ?? ""}</td>
++                        </tr>
++                      ))}
++                    </tbody>
++                  </table>
++                </div>
++              </>
++            )
++          )}
++        </Card>
++      )}
++    </div>
++  );
++}
+diff --git a/frontend/components/ui/Sidebar.tsx b/frontend/components/ui/Sidebar.tsx
+index ab86812..fa77ba4 100644
+--- a/frontend/components/ui/Sidebar.tsx
++++ b/frontend/components/ui/Sidebar.tsx
+@@ -50,6 +50,7 @@ const BASE_SECTIONS: NavSection[] = [
+       { href: "/owners", label: "Owners", icon: IconOwners },
+       { href: "/tenants", label: "Tenants", icon: IconTenants },
+       { href: "/leases", label: "Leases", icon: IconLeases },
++      { href: "/residents", label: "Residents & facilities", icon: IconTenants },
+     ],
+   },
+   {
+diff --git a/frontend/lib/access.tsx b/frontend/lib/access.tsx
+index 878e462..663440b 100644
+--- a/frontend/lib/access.tsx
++++ b/frontend/lib/access.tsx
+@@ -20,6 +20,11 @@ export type AccessInfo = {
+   can_manage_master_data: boolean;
+   can_use_data_transfer: boolean;
+   read_only: boolean;
++  // Roommates / facility specs (optional so an older API response still type-checks).
++  can_add_roommates?: boolean;
++  can_edit_roommates?: boolean;
++  can_remove_roommates?: boolean;
++  can_manage_facilities?: boolean;
+ };
+ 
+ export const AccessContext = createContext<AccessInfo | null>(null);
+diff --git a/frontend/lib/residents.ts b/frontend/lib/residents.ts
+new file mode 100644
+index 0000000..9b04dfb
+--- /dev/null
++++ b/frontend/lib/residents.ts
+@@ -0,0 +1,94 @@
++// Shared types + helpers for the Roommates and Facility-specs features.
++
++export type Roommate = {
++  id: string;
++  tenant_id: string;
++  room_id: string;
++  lease_id?: string | null;
++  full_name: string;
++  relationship?: string | null;
++  cnic?: string | null;
++  phone?: string | null;
++  address?: string | null;
++  moved_in_date: string;
++  moved_out_date?: string | null;
++  removal_reason?: string | null;
++};
++
++export type RoommateReportRow = {
++  tenant_id: string;
++  tenant_name?: string;
++  tenant_cnic?: string;
++  tenant_phone?: string;
++  lease_id: string;
++  room_id: string;
++  room_number?: string;
++  building_id?: string;
++  building_name?: string;
++  current_roommate_count: number;
++  roommates: Roommate[];
++};
++
++export type RoommateReport = {
++  rows: RoommateReportRow[];
++  total_tenants: number;
++  total_current_roommates: number;
++};
++
++export type FacilityKind = "parking" | "internet" | "electricity" | "water" | "gas" | "other";
++
++export type TemplateField = {
++  key: string;
++  label: string;
++  type: "text" | "number" | "select";
++  options?: string[];
++  unit?: string;
++  placeholder?: string;
++};
++
++export type FacilityTemplates = Record<FacilityKind, { label: string; hint: string; fields: TemplateField[] }>;
++
++export type Facility = {
++  id: string;
++  lease_id: string;
++  tenant_id: string;
++  room_id: string;
++  label: string;
++  kind: FacilityKind;
++  specs: Record<string, string | number>;
++  specs_display: { label: string; value: string | number; unit?: string | null }[];
++  notes?: string | null;
++  is_active: boolean;
++  ended_on?: string | null;
++};
++
++export type FacilityRegisterRow = Facility & {
++  tenant_name?: string;
++  tenant_phone?: string;
++  room_number?: string;
++  building_id?: string;
++  building_name?: string;
++  lease_status?: string;
++};
++
++export type FacilityRegister = {
++  rows: FacilityRegisterRow[];
++  total: number;
++  counts_by_kind: Record<FacilityKind, number>;
++};
++
++/** Mirrors the backend's classify_label() so the form shows the right fields
++ *  as soon as a facility name is typed. The backend remains the authority. */
++export function classifyLabel(label: string): FacilityKind {
++  const l = (label || "").toLowerCase();
++  if (l.includes("park")) return "parking";
++  if (["internet", "wifi", "wi-fi", "broadband"].some((w) => l.includes(w))) return "internet";
++  if (["electric", "power"].some((w) => l.includes(w))) return "electricity";
++  if (l.includes("water")) return "water";
++  if (l.includes("gas")) return "gas";
++  return "other";
++}
++
++export function formatSpecValue(d: { value: string | number; unit?: string | null }) {
++  return d.unit ? `${d.value} ${d.unit}` : String(d.value);
++}

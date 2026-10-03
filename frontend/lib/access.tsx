@@ -20,6 +20,11 @@ export type AccessInfo = {
   can_manage_master_data: boolean;
   can_use_data_transfer: boolean;
   read_only: boolean;
+  // Roommates / facility specs (optional so an older API response still type-checks).
+  can_add_roommates?: boolean;
+  can_edit_roommates?: boolean;
+  can_remove_roommates?: boolean;
+  can_manage_facilities?: boolean;
 };
 
 export const AccessContext = createContext<AccessInfo | null>(null);

@@ -86,6 +86,11 @@ ACCOUNTANT_WRITES = {
     ("POST", "/owner-ledger/pay-owner-allocated"),
     ("POST", "/owner-ledger/{ledger_id}/pay"),
     ("POST", "/owner-ledger/apply-earlier-payouts/{owner_id}"),
+    # Adding a roommate is a record-keeping entry the accountant is trusted
+    # with. Editing a roommate's details and ALL facility-spec changes stay
+    # with Admin/Owner; removing a roommate is Owner/Admin only (the endpoint
+    # re-checks this itself, so it holds even with Access Control switched off).
+    ("POST", "/room-occupants"),
 }
 
 # Admin can do everything an accountant can plus master data, WhatsApp,
@@ -151,6 +156,13 @@ def permissions_for(ctx: dict) -> dict:
         "can_manage_master_data": eff in ("owner", "admin"),
         "can_use_data_transfer": eff in ("owner", "admin"),
         "read_only": eff == "auditor",
+        # Roommates / facility specs. Removal deliberately keys off the REAL
+        # role, not the feature switch, because the endpoint enforces it that
+        # way too -- the UI never offers a button the server would refuse.
+        "can_add_roommates": eff in ("owner", "admin", "accountant"),
+        "can_edit_roommates": eff in ("owner", "admin"),
+        "can_remove_roommates": EFFECTIVE_ROLE.get(ctx.get("role")) in ("owner", "admin") or bool(ctx.get("is_platform_admin")),
+        "can_manage_facilities": eff in ("owner", "admin"),
     }
 
 
