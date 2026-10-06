@@ -63,6 +63,81 @@ def collection_vs_expense(
     return {"billed_to_tenants": billed, "actual_expenses_logged": actual_expenses}
 
 
+def _batch_tenant_balances(
+    supabase: Client, company_id: str, account_id: str, tenant_ids: List[str], as_of: str
+) -> Dict[str, float]:
+    """
+    One round trip for every tenant's balance in one account as of a date
+    (tenant_balances_as_of(), see 013_schema_patch_029). Same debits-minus-
+    credits math as get_tenant_account_balance_as_of, just for all tenants
+    at once instead of one RPC per tenant. If the database function isn't
+    there yet (migration not run), falls back to the old one-call-per-tenant
+    path so the report keeps working either way.
+    """
+    if not tenant_ids:
+        return {}
+    try:
+        data = (
+            supabase.rpc(
+                "tenant_balances_as_of",
+                {
+                    "p_company_id": company_id,
+                    "p_account_id": account_id,
+                    "p_tenant_ids": tenant_ids,
+                    "p_as_of_date": as_of,
+                },
+            )
+            .execute()
+            .data
+            or []
+        )
+        out = {tid: 0.0 for tid in tenant_ids}
+        for r in data:
+            out[r["tenant_id"]] = float(r["balance"] or 0)
+        return out
+    except Exception:
+        logging.getLogger("app.reports").exception("tenant_balances_as_of failed; falling back to per-tenant calls")
+        return {
+            tid: get_tenant_account_balance_as_of(supabase, company_id, account_id, tid, as_of)
+            for tid in tenant_ids
+        }
+
+
+def _batch_manual_entries(
+    supabase: Client, company_id: str, account_id: str, tenant_ids: List[str], date_from: date, date_to: date
+) -> Dict[str, float]:
+    """
+    Net (debit minus credit) of MANUAL journal entries posted to one account
+    for each tenant between two dates -- e.g. an opening receivable keyed in
+    by hand on 31 Aug. These move the ledger balance but are not invoices or
+    payments, so without this they'd be invisible in the report whenever the
+    period contains their date. Never blocks the report: on any failure the
+    report simply behaves as it did before.
+    """
+    if not tenant_ids:
+        return {}
+    try:
+        data = (
+            supabase.rpc(
+                "tenant_manual_entries_in_period",
+                {
+                    "p_company_id": company_id,
+                    "p_account_id": account_id,
+                    "p_tenant_ids": tenant_ids,
+                    "p_date_from": str(date_from),
+                    "p_date_to": str(date_to),
+                },
+            )
+            .execute()
+            .data
+            or []
+        )
+        return {r["tenant_id"]: float(r["net_amount"] or 0) for r in data}
+    except Exception:
+        logging.getLogger("app.reports").exception("tenant_manual_entries_in_period failed")
+        return {}
+
+
 @router.get("/room-wise")
 def room_wise_receivables(
     period_start: date = Query(
@@ -76,7 +151,7 @@ def room_wise_receivables(
 ):
     """
     Per-room receivables report:
-      Room | Tenant | Security (received/not) | Opening balance |
+      Room | Tenant | Security (amount received) | Opening balance |
       Invoiced (period) | Received (period) | Receivable total
 
     Opening balance and Receivable total both come straight from the ledger
@@ -102,11 +177,17 @@ def room_wise_receivables(
     the room, matching how /leases/{id}/receivable-summary already treats
     it (flagged there as a known simplification).
 
-    Performance note: this calls the ledger twice per occupied room (RPC
-    round trips), same cost per-lease as the Receive Payment screen already
-    pays per-lease -- fine at normal portfolio sizes, but worth batching
-    into one SQL function later if this is ever run against hundreds of
-    rooms at once.
+    Opening balance also includes any MANUAL journal entries (e.g. a
+    hand-keyed opening receivable) dated inside the selected period, so an
+    opening entry posted on 31 Aug still shows as opening when the period
+    starts on 01 Aug. Received (period) also includes receipts that were not
+    tied to an invoice -- payments against an opening balance, or advances.
+    Security shows the amount actually held for the tenant in account 2100
+    (so a manually posted opening deposit is included), with the agreed
+    deposit alongside when it was larger.
+
+    Performance: balances for every tenant come from one batched database
+    call per figure (tenant_balances_as_of) instead of one call per room.
     """
     rooms_query = supabase.table("rooms").select("id, room_number, building_id, status")
     if building_id:
@@ -173,11 +254,16 @@ def room_wise_receivables(
     # been paid (amount_received on the deposit row is the AGREED amount,
     # not what's been collected -- see security_deposit_payments).
     security_deposits = (
-        supabase.table("security_deposits").select("id, lease_id").in_("lease_id", lease_ids).execute().data
+        supabase.table("security_deposits")
+        .select("id, lease_id, amount_received, status")
+        .in_("lease_id", lease_ids)
+        .execute()
+        .data
         if lease_ids
         else []
     )
     deposit_by_lease = {d["lease_id"]: d["id"] for d in security_deposits}
+    deposit_row_by_lease = {d["lease_id"]: d for d in security_deposits}
     deposit_ids = list(deposit_by_lease.values())
     deposit_payments = (
         supabase.table("security_deposit_payments")
@@ -201,6 +287,43 @@ def room_wise_receivables(
 
     balance_before = period_start - timedelta(days=1)
 
+    try:
+        sd_account_id = get_account_id(supabase, company_id, "2100")
+    except ValueError:
+        sd_account_id = None
+
+    opening_before_by_tenant: Dict[str, float] = {}
+    closing_by_tenant: Dict[str, float] = {}
+    manual_by_tenant: Dict[str, float] = {}
+    security_ledger_by_tenant: Dict[str, float] = {}
+    if ar_account_id:
+        opening_before_by_tenant = _batch_tenant_balances(
+            supabase, company_id, ar_account_id, tenant_ids, str(balance_before)
+        )
+        closing_by_tenant = _batch_tenant_balances(supabase, company_id, ar_account_id, tenant_ids, str(period_end))
+        manual_by_tenant = _batch_manual_entries(
+            supabase, company_id, ar_account_id, tenant_ids, period_start, period_end
+        )
+    if sd_account_id:
+        security_ledger_by_tenant = _batch_tenant_balances(
+            supabase, company_id, sd_account_id, tenant_ids, str(period_end)
+        )
+
+    other_receipts_by_tenant: Dict[str, List[dict]] = {}
+    if tenant_ids:
+        for pay in (
+            supabase.table("payments")
+            .select("id, tenant_id, amount, discount_amount, payment_date, payment_method, notes")
+            .eq("company_id", company_id)
+            .in_("tenant_id", tenant_ids)
+            .is_("invoice_id", "null")
+            .gte("payment_date", str(period_start))
+            .lte("payment_date", str(period_end))
+            .execute()
+            .data
+        ):
+            other_receipts_by_tenant.setdefault(pay["tenant_id"], []).append(pay)
+
     rows = []
     for room in rooms:
         room_leases = leases_by_room.get(room["id"], [])
@@ -212,23 +335,25 @@ def room_wise_receivables(
         tenant_name = tenants.get(current_lease["tenant_id"]) if current_lease else None
 
         deposit_id = deposit_by_lease.get(current_lease["id"]) if current_lease else None
-        security_received = bool(deposit_id) and paid_by_deposit.get(deposit_id, 0.0) > 0
+        deposit_row = deposit_row_by_lease.get(current_lease["id"]) if current_lease else None
+        if current_lease and sd_account_id:
+            # Account 2100 is credit-normal, so the held amount is the negated balance.
+            held_amount = round(-security_ledger_by_tenant.get(current_lease["tenant_id"], 0.0), 2)
+            security_received_amount = held_amount if held_amount > 0 else 0.0
+        else:
+            security_received_amount = round(paid_by_deposit.get(deposit_id, 0.0), 2) if deposit_id else 0.0
+        security_agreed_amount = round(float(deposit_row["amount_received"]), 2) if deposit_row else None
+        security_status = deposit_row["status"] if deposit_row else None
+        security_received = security_received_amount > 0
 
         opening_balance = 0.0
+        opening_manual = 0.0
         receivable_total = 0.0
         if current_lease and ar_account_id:
-            opening_balance = round(
-                get_tenant_account_balance_as_of(
-                    supabase, company_id, ar_account_id, current_lease["tenant_id"], str(balance_before)
-                ),
-                2,
-            )
-            receivable_total = round(
-                get_tenant_account_balance_as_of(
-                    supabase, company_id, ar_account_id, current_lease["tenant_id"], str(period_end)
-                ),
-                2,
-            )
+            current_tenant_id = current_lease["tenant_id"]
+            opening_manual = round(manual_by_tenant.get(current_tenant_id, 0.0), 2)
+            opening_balance = round(opening_before_by_tenant.get(current_tenant_id, 0.0) + opening_manual, 2)
+            receivable_total = round(closing_by_tenant.get(current_tenant_id, 0.0), 2)
 
         period_invoiced = 0.0
         period_received = 0.0
@@ -241,6 +366,44 @@ def room_wise_receivables(
                     pay_date = date.fromisoformat(str(pay["payment_date"]))
                     if period_start <= pay_date <= period_end:
                         period_received += float(pay["amount"]) + float(pay.get("discount_amount") or 0)
+
+        other_receipts: List[dict] = []
+        if current_lease:
+            for pay in other_receipts_by_tenant.get(current_lease["tenant_id"], []):
+                period_received += float(pay["amount"]) + float(pay.get("discount_amount") or 0)
+                other_receipts.append(
+                    {
+                        "id": pay["id"],
+                        "amount": float(pay["amount"]),
+                        "discount_amount": float(pay.get("discount_amount") or 0),
+                        "payment_date": str(pay["payment_date"]),
+                        "payment_method": pay.get("payment_method"),
+                        "notes": pay.get("notes"),
+                    }
+                )
+
+        # Every invoice falling inside the selected period, oldest first --
+        # lets the drill-down list them (with a total) when the period spans
+        # more than one month, instead of showing only the latest invoice.
+        period_invoices: List[dict] = []
+        if current_lease:
+            for inv in sorted(invoices_by_lease.get(current_lease["id"], []), key=lambda i: str(i["invoice_month"])):
+                inv_month = date.fromisoformat(str(inv["invoice_month"]))
+                if period_start <= inv_month <= period_end:
+                    inv_received = sum(
+                        float(pay["amount"]) + float(pay.get("discount_amount") or 0)
+                        for pay in payments_by_invoice.get(inv["id"], [])
+                    )
+                    period_invoices.append(
+                        {
+                            "id": inv["id"],
+                            "invoice_month": str(inv["invoice_month"]),
+                            "due_date": str(inv["due_date"]),
+                            "status": inv["status"],
+                            "total_amount": round(float(inv["total_amount"]), 2),
+                            "received": round(inv_received, 2),
+                        }
+                    )
 
         # "Current invoice" for the drill-down (report row -> current
         # invoice + its payments -> full invoice detail): the most recently
@@ -278,7 +441,11 @@ def room_wise_receivables(
                 "building_name": buildings.get(room["building_id"], "—"),
                 "tenant_name": tenant_name,
                 "security_received": security_received,
+                "security_received_amount": security_received_amount,
+                "security_agreed_amount": security_agreed_amount,
+                "security_status": security_status,
                 "opening_balance": opening_balance,
+                "opening_manual_in_period": opening_manual,
                 "invoiced_period": round(period_invoiced, 2),
                 "received_period": round(period_received, 2),
                 "receivable_total": receivable_total,
@@ -292,6 +459,8 @@ def room_wise_receivables(
                 else None,
                 "current_invoice_received": round(current_invoice_received, 2) if current_invoice else None,
                 "current_invoice_payments": current_invoice_payments,
+                "period_invoices": period_invoices,
+                "other_receipts": other_receipts,
             }
         )
 

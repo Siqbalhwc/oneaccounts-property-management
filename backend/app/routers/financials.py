@@ -1,4 +1,5 @@
-from datetime import date
+import logging
+from datetime import date, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -242,7 +243,14 @@ def get_general_ledger(
     SQL window function, not accumulated in a Python loop. Each row also
     carries source_type/source_id/journal_entry_id so the frontend can
     resolve a "click a figure" drill-down via /financials/source-document
-    without a second lookup."""
+    without a second lookup.
+
+    When a "from" date is given, everything before it is rolled into an
+    opening-balance row (same account, same owner/tenant/building/room
+    filters) and the running balance starts from that opening figure, so the
+    closing balance is the account's true balance rather than just the
+    period's movement. If the opening-balance function isn't available yet,
+    the ledger is returned exactly as before."""
     result = supabase.rpc(
         "general_ledger",
         {
@@ -255,7 +263,52 @@ def get_general_ledger(
             "p_room_id": room_id,
         },
     ).execute()
-    return result.data
+    rows = result.data or []
+
+    if date_from:
+        try:
+            opening = float(
+                supabase.rpc(
+                    "general_ledger_opening_balance",
+                    {
+                        "p_account_id": account_id,
+                        "p_before": str(date_from),
+                        "p_owner_id": owner_id,
+                        "p_tenant_id": tenant_id,
+                        "p_building_id": building_id,
+                        "p_room_id": room_id,
+                    },
+                )
+                .execute()
+                .data
+                or 0
+            )
+        except Exception:
+            logging.getLogger("app.financials").exception("general_ledger_opening_balance failed for %s", account_id)
+            return rows
+
+        if abs(opening) > 0.004:
+            for r in rows:
+                r["running_balance"] = round(float(r["running_balance"]) + opening, 2)
+            rows.insert(
+                0,
+                {
+                    "entry_date": str(date_from - timedelta(days=1)),
+                    "description": "Opening balance",
+                    "source_type": None,
+                    "source_id": None,
+                    "journal_entry_id": None,
+                    "direction": None,
+                    "amount": 0,
+                    "building_name": None,
+                    "room_number": None,
+                    "owner_name": None,
+                    "tenant_name": None,
+                    "running_balance": round(opening, 2),
+                    "is_opening": True,
+                },
+            )
+    return rows
 
 
 @router.get("/source-document")

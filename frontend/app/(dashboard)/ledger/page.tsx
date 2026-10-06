@@ -20,13 +20,14 @@ type LedgerRow = {
   source_type?: string;
   source_id?: string | null;
   journal_entry_id?: string;
-  direction: "debit" | "credit";
+  direction: "debit" | "credit" | null;
   amount: number;
   building_name?: string;
   room_number?: string;
   owner_name?: string;
   tenant_name?: string;
   running_balance: number;
+  is_opening?: boolean;
 };
 
 function formatPkr(n: number) {
@@ -273,7 +274,10 @@ function LedgerPageInner() {
             emptyMessage="No activity on this account for this period."
             columns={[
               { header: "Date", accessor: (r) => r.entry_date },
-              { header: "Description", accessor: (r) => r.description ?? "—" },
+              {
+                header: "Description",
+                accessor: (r) => (r.is_opening ? <span className="font-medium">Opening balance</span> : r.description ?? "—"),
+              },
               {
                 header: "Dr",
                 accessor: (r) =>

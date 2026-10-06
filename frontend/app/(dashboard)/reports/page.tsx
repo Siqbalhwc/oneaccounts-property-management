@@ -36,6 +36,15 @@ type RoomWisePayment = {
   payment_date: string;
   payment_method: string | null;
 };
+type RoomWiseInvoice = {
+  id: string;
+  invoice_month: string;
+  due_date: string;
+  status: string;
+  total_amount: number;
+  received: number;
+};
+type RoomWiseOtherReceipt = RoomWisePayment & { notes: string | null };
 type RoomWiseRow = {
   room_id: string;
   room_number: string;
@@ -43,7 +52,11 @@ type RoomWiseRow = {
   building_name: string;
   tenant_name: string | null;
   security_received: boolean;
+  security_received_amount: number;
+  security_agreed_amount: number | null;
+  security_status: string | null;
   opening_balance: number;
+  opening_manual_in_period: number;
   invoiced_period: number;
   received_period: number;
   receivable_total: number;
@@ -55,6 +68,8 @@ type RoomWiseRow = {
   current_invoice_total: number | null;
   current_invoice_received: number | null;
   current_invoice_payments: RoomWisePayment[];
+  period_invoices: RoomWiseInvoice[];
+  other_receipts: RoomWiseOtherReceipt[];
 };
 type InvoiceLineItem = { id: string; label: string; amount: number };
 type InvoiceDetail = Invoice & { line_items: InvoiceLineItem[] };
@@ -104,6 +119,11 @@ type IncomeByHeadDrilldown = { receipts: IncomeByHeadReceipt[]; total: number };
 
 function formatPkr(n: number) {
   return `Rs ${Number(n || 0).toLocaleString("en-PK")}`;
+}
+function monthLabel(dateStr: string) {
+  const [y, m] = (dateStr || "").split("-").map(Number);
+  if (!y || !m) return dateStr;
+  return new Date(y, m - 1, 1).toLocaleDateString("en-GB", { month: "short", year: "numeric" });
 }
 function monthOf(dateStr: string) {
   return dateStr?.slice(0, 7); // "YYYY-MM"
@@ -839,7 +859,20 @@ export default function ReportsPage() {
                 { header: "Tenant", accessor: (r) => r.tenant_name ?? "—" },
                 {
                   header: "Security",
-                  accessor: (r) => <StampBadge status={r.security_received ? "paid" : "pending"} />,
+                  accessor: (r) =>
+                    r.security_received_amount > 0 ? (
+                      <span className="figures">
+                        {formatPkr(r.security_received_amount)}
+                        {r.security_agreed_amount != null &&
+                          r.security_agreed_amount > r.security_received_amount + 0.01 && (
+                            <sup className="ml-1 text-[10px] text-ink/45">
+                              (Agreed {formatPkr(r.security_agreed_amount)})
+                            </sup>
+                          )}
+                      </span>
+                    ) : (
+                      <StampBadge status={r.security_status === "refunded" ? "refunded" : "pending"} />
+                    ),
                 },
                 {
                   header: "Opening bal.",
@@ -1092,9 +1125,55 @@ export default function ReportsPage() {
                   {formatPkr(roomDrilldownRow.receivable_total)}
                 </span>
               </div>
+              {roomDrilldownRow.opening_manual_in_period !== 0 && (
+                <div className="flex justify-between">
+                  <span className="text-ink/50">Opening entries posted in this period</span>
+                  <span className="figures">{formatPkr(roomDrilldownRow.opening_manual_in_period)}</span>
+                </div>
+              )}
+              {(roomDrilldownRow.security_received_amount > 0 || roomDrilldownRow.security_agreed_amount != null) && (
+                <div className="flex justify-between">
+                  <span className="text-ink/50">Security deposit received</span>
+                  <span className="figures">
+                    {formatPkr(roomDrilldownRow.security_received_amount)}
+                    {roomDrilldownRow.security_agreed_amount != null &&
+                      roomDrilldownRow.security_agreed_amount > roomDrilldownRow.security_received_amount + 0.01 &&
+                      ` of ${formatPkr(roomDrilldownRow.security_agreed_amount)} agreed`}
+                  </span>
+                </div>
+              )}
             </div>
 
-            {!roomDrilldownRow.current_invoice_id ? (
+            {roomDrilldownRow.period_invoices.length > 1 ? (
+              <div className="space-y-3">
+                <p className="text-xs uppercase tracking-wider text-ink/45 font-medium">Invoices in this period</p>
+                <div className="space-y-2">
+                  {roomDrilldownRow.period_invoices.map((inv) => (
+                    <button
+                      key={inv.id}
+                      onClick={() => openInvoiceDetail(inv.id)}
+                      className="group w-full text-left border border-border rounded-card px-3 py-2.5 hover:border-accent/50 transition-colors"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium text-sm">{monthLabel(inv.invoice_month)}</span>
+                        <StampBadge status={inv.status} />
+                      </div>
+                      <div className="flex justify-between text-sm mt-1">
+                        <span className="text-ink/50">Received {formatPkr(inv.received)}</span>
+                        <span className="figures font-medium">{formatPkr(inv.total_amount)}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+                <div className="flex justify-between text-sm font-semibold pt-2 border-t border-border">
+                  <span>Total invoiced</span>
+                  <span className="figures">
+                    {formatPkr(roomDrilldownRow.period_invoices.reduce((sum, inv) => sum + inv.total_amount, 0))}
+                  </span>
+                </div>
+                <p className="text-xs text-ink/45">Click an invoice to view its complete details.</p>
+              </div>
+            ) : !roomDrilldownRow.current_invoice_id ? (
               <p className="text-sm text-ink/45 py-4 text-center border border-dashed border-border rounded-card">
                 No invoice has been generated for this room&apos;s current tenant yet.
               </p>
@@ -1152,6 +1231,25 @@ export default function ReportsPage() {
                       )}
                     </span>
                   </div>
+                </div>
+              </div>
+            )}
+
+            {roomDrilldownRow.other_receipts.length > 0 && (
+              <div>
+                <p className="text-xs uppercase tracking-wider text-ink/45 font-medium mb-2">
+                  Receipts not tied to an invoice (opening balance / advance)
+                </p>
+                <div className="space-y-1.5">
+                  {roomDrilldownRow.other_receipts.map((p) => (
+                    <div key={p.id} className="flex justify-between text-sm">
+                      <span className="text-ink/70">
+                        {p.payment_date}
+                        {p.payment_method ? ` · ${p.payment_method}` : ""}
+                      </span>
+                      <span className="figures">{formatPkr(p.amount + (p.discount_amount || 0))}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
