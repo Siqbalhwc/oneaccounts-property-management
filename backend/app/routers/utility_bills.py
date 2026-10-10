@@ -33,6 +33,7 @@ from app.core.deps import (
     require_owner_or_admin,
 )
 from app.services.invoice_batch import fetch_all, fetch_in
+from app.services.room_search import split_terms
 from app.services.utility_upload import (
     build_template,
     commit_upload,
@@ -119,11 +120,17 @@ def commit_bills(
 def list_bills(
     month: str = Query(...),
     building_id: Optional[str] = Query(None),
+    search: Optional[str] = Query(None, max_length=200, description="Building, apartment, tenant or utility"),
     supabase: Client = Depends(get_supabase),
     _feature: None = Depends(require_feature("utility_bills")),
 ):
-    """Saved bills for one month, with the building, room and invoice status."""
+    """Saved bills for one month, with the building, room and invoice status.
+
+    `search` is purely additive: every word typed must appear in the row's
+    building, apartment, tenant, utility or bill reference, so "Sunrise 101"
+    finds apartment 101 in Sunrise. Omit it and nothing changes."""
     bill_month = _month(month)
+    search_terms = [t.lower() for t in split_terms(search)]
     bills = fetch_all(
         lambda: supabase.table("utility_bills").select("*").eq("bill_month", str(bill_month)).order("id")
     )
@@ -156,6 +163,19 @@ def list_bills(
         room = rooms.get(lease["room_id"]) or {}
         if building_id and room.get("building_id") != building_id:
             continue
+        if search_terms:
+            haystack = " ".join(
+                str(x or "")
+                for x in (
+                    buildings.get(room.get("building_id"), ""),
+                    room.get("room_number", ""),
+                    tenants.get(lease["tenant_id"], ""),
+                    b["label"],
+                    b.get("bill_reference"),
+                )
+            ).lower()
+            if not all(t in haystack for t in search_terms):
+                continue
         out.append(
             {
                 "id": b["id"],

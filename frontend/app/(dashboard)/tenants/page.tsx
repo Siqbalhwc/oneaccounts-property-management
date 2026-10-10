@@ -8,6 +8,7 @@ import { Modal } from "@/components/ui/Modal";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
 import { HistoryPanel } from "@/components/ui/HistoryPanel";
 import { Field, Input } from "@/components/ui/Field";
+import { usePropertySearch } from "@/lib/usePropertySearch";
 
 function validateCnic(value: string): string | null {
   const digits = value.replace(/\D/g, "");
@@ -72,9 +73,13 @@ export default function TenantsPage() {
     return room ? `${building?.name ?? "—"} — Apartment ${room.room_number}` : "Not assigned";
   }
 
+  // Room / apartment / building matches come from the server (including past
+  // tenants of that room); the name / CNIC / address search is unchanged.
+  const propertyMatch = usePropertySearch("tenants", searchTerm);
   const normalizedSearch = searchTerm.trim().toLowerCase();
   const filteredTenants = (tenants ?? []).filter((t) => {
     if (!normalizedSearch) return true;
+    if (propertyMatch.ids.has(t.id)) return true;
     const haystacks = [t.full_name, t.cnic, t.address ?? ""];
     return haystacks.some((field) => field.toLowerCase().includes(normalizedSearch));
   });
@@ -157,8 +162,8 @@ export default function TenantsPage() {
           <Input
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="Search by name, CNIC, or address…"
-            className="max-w-xs"
+            placeholder="Search by name, CNIC, address, building or apartment…"
+            className="max-w-sm"
           />
           <label className="flex items-center gap-2 text-xs text-ink/50">
             <input
@@ -188,9 +193,11 @@ export default function TenantsPage() {
               header: "Property",
               accessor: (t) => {
                 const label = propertyFor(t.id);
+                const note = propertyMatch.notes[t.id];
                 return (
                   <span className={`text-xs ${label === "Not assigned" ? "text-ink/40" : "text-ink/70"}`}>
                     {label}
+                    {note && <span className="block text-ink/50">{note}</span>}
                   </span>
                 );
               },

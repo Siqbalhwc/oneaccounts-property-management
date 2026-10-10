@@ -103,6 +103,13 @@ export default function UtilityBillsPage() {
 
   const [bills, setBills] = useState<SavedBill[]>([]);
   const [billsLoading, setBillsLoading] = useState(false);
+  const [billSearch, setBillSearch] = useState("");
+  const [debouncedBillSearch, setDebouncedBillSearch] = useState("");
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedBillSearch(billSearch.trim()), 350);
+    return () => clearTimeout(timer);
+  }, [billSearch]);
 
   useEffect(() => {
     api.get<Building[]>("/buildings").then(setBuildings).catch(() => undefined);
@@ -112,6 +119,7 @@ export default function UtilityBillsPage() {
     setBillsLoading(true);
     const params = new URLSearchParams({ month });
     if (buildingFilter) params.set("building_id", buildingFilter);
+    if (debouncedBillSearch) params.set("search", debouncedBillSearch);
     api
       .get<SavedBill[]>(`/utility-bills?${params.toString()}`)
       .then(setBills)
@@ -119,7 +127,7 @@ export default function UtilityBillsPage() {
       .finally(() => setBillsLoading(false));
   }
 
-  useEffect(loadBills, [month, buildingFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(loadBills, [month, buildingFilter, debouncedBillSearch]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function resetResult() {
     setPreview(null);
@@ -376,10 +384,20 @@ export default function UtilityBillsPage() {
       )}
 
       <Card title={`Saved bills — ${month}`}>
+        <div className="mb-4 no-print">
+          <Input
+            value={billSearch}
+            onChange={(e) => setBillSearch(e.target.value)}
+            placeholder="Search by building, apartment, tenant or utility…"
+            className="max-w-sm"
+          />
+        </div>
         <DataTable
           keyField="id"
           rows={bills}
-          emptyMessage={billsLoading ? "Loading…" : "No utility bills saved for this month yet."}
+          emptyMessage={
+            billsLoading ? "Loading…" : debouncedBillSearch ? "No saved bills match your search." : "No utility bills saved for this month yet."
+          }
           columns={[
             { header: "Building", accessor: (b) => b.building },
             { header: "Room", accessor: (b) => b.room },

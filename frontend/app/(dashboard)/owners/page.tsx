@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Field, Input } from "@/components/ui/Field";
 import { api } from "@/lib/api";
+import { usePropertySearch } from "@/lib/usePropertySearch";
 
 type Owner = {
   id: string;
@@ -156,8 +157,12 @@ export default function OwnersPage() {
     load();
   }
 
+  // Building / apartment matches come from the server (the owner of that room
+  // or building); the name / phone / CNIC search is unchanged.
+  const propertyMatch = usePropertySearch("owners", search);
   const filtered = (owners ?? []).filter((o) => {
     if (!search.trim()) return true;
+    if (propertyMatch.ids.has(o.id)) return true;
     const q = search.toLowerCase();
     return (
       o.name.toLowerCase().includes(q) ||
@@ -184,8 +189,8 @@ export default function OwnersPage() {
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by name, phone, or CNIC…"
-            className="max-w-xs"
+            placeholder="Search by name, phone, CNIC, building or apartment…"
+            className="max-w-sm"
           />
           <label className="flex items-center gap-2 text-xs text-ink/50">
             <input

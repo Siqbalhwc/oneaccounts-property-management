@@ -8,6 +8,7 @@ from supabase import Client
 from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
 from app.crud.generic import write_audit_log
 from app.services.ledger import JournalLine, UnbalancedJournalEntry, post_journal_entry
+from app.services.room_search import resolve_property_term
 
 router = APIRouter(prefix="/ledger", tags=["Ledger"])
 
@@ -147,6 +148,7 @@ def create_manual_journal_entry(
 
 @router.get("/manual-entries")
 def list_manual_journal_entries(
+    property_search: Optional[str] = Query(None, max_length=200, description="Building, apartment, or both"),
     supabase: Client = Depends(get_supabase),
     company_id: str = Depends(get_current_company_id),
 ):
@@ -174,11 +176,24 @@ def list_manual_journal_entries(
     entry_ids = [e["id"] for e in entries]
     lines = (
         supabase.table("journal_lines")
-        .select("journal_entry_id, direction, amount, account_id")
+        .select("journal_entry_id, direction, amount, account_id, room_id, building_id")
         .in_("journal_entry_id", entry_ids)
         .execute()
         .data
     )
+    if property_search and property_search.strip():
+        # Room / building search (additive): keep only entries having at least
+        # one line tagged to a matched room, or to a building whose name matched.
+        match = resolve_property_term(supabase, property_search)
+        room_ids, building_ids = match.room_ids, match.building_ids
+        keep = {
+            l["journal_entry_id"]
+            for l in lines
+            if (l.get("room_id") in room_ids) or (l.get("building_id") in building_ids)
+        }
+        entries = [e for e in entries if e["id"] in keep]
+        if not entries:
+            return []
     account_ids = {l["account_id"] for l in lines}
     accounts = (
         supabase.table("chart_of_accounts")

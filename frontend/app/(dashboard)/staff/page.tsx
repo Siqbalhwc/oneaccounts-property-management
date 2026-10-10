@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Field, Input, AmountInput, Select } from "@/components/ui/Field";
 import { api, Building } from "@/lib/api";
+import { usePropertySearch } from "@/lib/usePropertySearch";
 
 type Staff = {
   id: string;
@@ -33,6 +34,7 @@ function formatPkr(n: number) {
 export default function StaffPage() {
   const [staff, setStaff] = useState<Staff[] | null>(null);
   const [buildings, setBuildings] = useState<Building[] | null>(null);
+  const [search, setSearch] = useState("");
   const [salaryPayments, setSalaryPayments] = useState<SalaryPayment[] | null>(null);
 
   const [staffModalOpen, setStaffModalOpen] = useState(false);
@@ -205,6 +207,16 @@ export default function StaffPage() {
     }
   }
 
+  // Building matches come from the server (staff assigned to that building,
+  // directly or through a cost split); name / designation / phone is matched here.
+  const propertyMatch = usePropertySearch("staff", search);
+  const normalizedSearch = search.trim().toLowerCase();
+  const visibleStaff = (staff ?? []).filter((s) => {
+    if (!normalizedSearch) return true;
+    if (propertyMatch.ids.has(s.id)) return true;
+    return [s.full_name, s.designation ?? "", s.phone ?? ""].some((f) => f.toLowerCase().includes(normalizedSearch));
+  });
+
   const buildingName = (id?: string) => buildings?.find((b) => b.id === id)?.name ?? "All buildings";
   const paymentsFor = (staffId: string) =>
     (salaryPayments ?? []).filter((p) => p.staff_id === staffId).sort((a, b) => b.salary_month.localeCompare(a.salary_month));
@@ -226,10 +238,18 @@ export default function StaffPage() {
       </div>
 
       <Card>
+        <div className="mb-4 no-print">
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search by name, designation, phone or building…"
+            className="max-w-sm"
+          />
+        </div>
         <DataTable
           keyField="id"
-          rows={staff ?? []}
-          emptyMessage="No staff added yet."
+          rows={visibleStaff}
+          emptyMessage={search ? "No staff match your search." : "No staff added yet."}
           columns={[
             { header: "Name", accessor: (s) => <span className="font-medium">{s.full_name}</span> },
             { header: "Designation", accessor: (s) => s.designation ?? "—" },

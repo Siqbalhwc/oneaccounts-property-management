@@ -7,6 +7,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Field, Input, AmountInput, Select } from "@/components/ui/Field";
 import { api, Building, Account } from "@/lib/api";
 import { useAccess } from "@/lib/access";
+import { usePropertySearch } from "@/lib/usePropertySearch";
 import { ChevronRight, ChevronDown, Pencil, ScrollText, SplitSquareHorizontal, SlidersHorizontal } from "lucide-react";
 
 type ExpenseCategory = { id: string; name: string; account_id?: string };
@@ -53,6 +54,7 @@ export default function ExpensesPage() {
   const [showGlCol, setShowGlCol] = useState(true);
   const [showPaidFromCol, setShowPaidFromCol] = useState(true);
   const [showRecursCol, setShowRecursCol] = useState(true);
+  const [search, setSearch] = useState("");
   const [showBuildingCol, setShowBuildingCol] = useState(true);
   const colsMenuRef = useRef<HTMLDivElement>(null);
 
@@ -345,6 +347,18 @@ export default function ExpensesPage() {
     }
   }
 
+  // Building / apartment matches come from the server (expenses charged to that
+  // room, or to that building directly or through a cost split); vendor,
+  // description and category are matched here.
+  const propertyMatch = usePropertySearch("expenses", search);
+  const normalizedSearch = search.trim().toLowerCase();
+  const visibleExpenses = (expenses ?? []).filter((e) => {
+    if (!normalizedSearch) return true;
+    if (propertyMatch.ids.has(e.id)) return true;
+    const categoryName = categories?.find((c) => c.id === e.category_id)?.name ?? "";
+    return [e.vendor_name ?? "", e.description ?? "", categoryName].some((f) => f.toLowerCase().includes(normalizedSearch));
+  });
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
@@ -364,7 +378,13 @@ export default function ExpensesPage() {
       </div>
 
       <Card>
-        <div className="flex items-center justify-end mb-4 no-print">
+        <div className="flex items-center justify-between mb-4 no-print gap-3 flex-wrap">
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search by vendor, category, building or apartment…"
+            className="max-w-sm"
+          />
           <div className="relative" ref={colsMenuRef}>
             <button
               type="button"
@@ -469,7 +489,7 @@ export default function ExpensesPage() {
                 </tr>
               </thead>
               <tbody>
-                {(expenses ?? []).map((e) => {
+                {visibleExpenses.map((e) => {
                   const expanded = expandedExpenseId === e.id;
                   const colSpan =
                     6 + (showRecursCol ? 1 : 0) + (showBuildingCol ? 1 : 0) + (showGlCol ? 1 : 0) + (showPaidFromCol ? 1 : 0);
@@ -604,6 +624,9 @@ export default function ExpensesPage() {
                 })}
               </tbody>
             </table>
+            {normalizedSearch && visibleExpenses.length === 0 && (
+              <p className="py-8 text-center text-sm text-ink/45">No expenses match your search.</p>
+            )}
           </div>
         )}
       </Card>

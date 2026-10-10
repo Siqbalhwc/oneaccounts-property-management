@@ -22,6 +22,7 @@ from app.routers import (
     owner_ledger,
     payments,
     platform_admin,
+    property_search,
     reports,
     room_occupants,
     salary_payments,
@@ -117,6 +118,7 @@ app.include_router(implementation.router, prefix=API_PREFIX)
 app.include_router(access.router, prefix=API_PREFIX)
 app.include_router(data_transfer.router, prefix=API_PREFIX, dependencies=_GUARD)
 app.include_router(utility_bills.router, prefix=API_PREFIX, dependencies=_GUARD)
+app.include_router(property_search.router, prefix=API_PREFIX, dependencies=_GUARD)
 
 
 @app.get("/")

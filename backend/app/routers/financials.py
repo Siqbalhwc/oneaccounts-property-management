@@ -6,7 +6,9 @@ from fastapi import APIRouter, Depends, Query
 from supabase import Client
 
 from app.core.deps import get_current_company_id, get_supabase
+from app.services.invoice_batch import IN_CHUNK, chunked
 from app.services.ledger import get_account_id
+from app.services.room_search import resolve_property_term
 
 router = APIRouter(prefix="/financials", tags=["Financial Reports"])
 
@@ -174,6 +176,7 @@ def list_journal_entries(
     lease_id: Optional[str] = Query(None),
     source_type: Optional[str] = Query(None),
     account_id: Optional[str] = Query(None),
+    property_search: Optional[str] = Query(None, max_length=200, description="Building, apartment, or both"),
     limit: int = Query(200, le=1000),
     offset: int = Query(0, ge=0),
     supabase: Client = Depends(get_supabase),
@@ -186,27 +189,64 @@ def list_journal_entries(
     is filterable but none are meant to be displayed as columns in the UI --
     tags stay in the background, used for filtering only.
     """
-    query = supabase.table("v_journal_detail").select("*").eq("company_id", company_id)
-    if date_from:
-        query = query.gte("entry_date", str(date_from))
-    if date_to:
-        query = query.lte("entry_date", str(date_to))
-    if building_id:
-        query = query.eq("building_id", building_id)
-    if room_id:
-        query = query.eq("room_id", room_id)
-    if owner_id:
-        query = query.eq("owner_id", owner_id)
-    if tenant_id:
-        query = query.eq("tenant_id", tenant_id)
-    if lease_id:
-        query = query.eq("lease_id", lease_id)
-    if source_type:
-        query = query.eq("source_type", source_type)
-    if account_id:
-        query = query.eq("account_id", account_id)
+
+    def filtered_query():
+        query = supabase.table("v_journal_detail").select("*").eq("company_id", company_id)
+        if date_from:
+            query = query.gte("entry_date", str(date_from))
+        if date_to:
+            query = query.lte("entry_date", str(date_to))
+        if building_id:
+            query = query.eq("building_id", building_id)
+        if room_id:
+            query = query.eq("room_id", room_id)
+        if owner_id:
+            query = query.eq("owner_id", owner_id)
+        if tenant_id:
+            query = query.eq("tenant_id", tenant_id)
+        if lease_id:
+            query = query.eq("lease_id", lease_id)
+        if source_type:
+            query = query.eq("source_type", source_type)
+        if account_id:
+            query = query.eq("account_id", account_id)
+        return query
+
+    if property_search and property_search.strip():
+        # Room / building text search (additive: every filter above still
+        # applies). A line matches if it is tagged to a matched room, or to a
+        # building whose name matched. The matched ids are read in chunks to
+        # keep each request small; the best (offset + limit) rows of every
+        # chunk are merged, so the page you get is still the true newest-first
+        # page of the whole result.
+        match = resolve_property_term(supabase, property_search)
+        if match.empty:
+            return []
+        needed = offset + limit
+        merged: dict[str, dict] = {}
+        for column, ids in (("room_id", match.room_ids), ("building_id", match.building_ids)):
+            for chunk in chunked(sorted(ids), IN_CHUNK):
+                rows = (
+                    filtered_query()
+                    .in_(column, chunk)
+                    .order("entry_date", desc=True)
+                    .order("created_at", desc=True)
+                    .range(0, needed - 1)
+                    .execute()
+                    .data
+                )
+                for row in rows:
+                    merged[row["line_id"]] = row
+        ordered = sorted(
+            merged.values(),
+            key=lambda r: (r.get("entry_date") or "", r.get("created_at") or ""),
+            reverse=True,
+        )
+        return ordered[offset : offset + limit]
+
     result = (
-        query.order("entry_date", desc=True)
+        filtered_query()
+        .order("entry_date", desc=True)
         .order("created_at", desc=True)
         .range(offset, offset + limit - 1)
         .execute()

@@ -49,6 +49,13 @@ export default function JournalEntriesPage() {
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showFilters, setShowFilters] = useState(false);
+  const [propertySearch, setPropertySearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(propertySearch.trim()), 350);
+    return () => clearTimeout(timer);
+  }, [propertySearch]);
 
   // Manual/adjustment entries only -- these are the only entries that can
   // ever be edited (vs. reversed), so they get their own small list with
@@ -58,8 +65,11 @@ export default function JournalEntriesPage() {
   const [manualError, setManualError] = useState<string | null>(null);
 
   function loadManualEntries() {
+    const manualParams = new URLSearchParams();
+    if (debouncedSearch) manualParams.set("property_search", debouncedSearch);
+    const manualQuery = manualParams.toString();
     api
-      .get<ManualEntry[]>("/ledger/manual-entries")
+      .get<ManualEntry[]>(`/ledger/manual-entries${manualQuery ? `?${manualQuery}` : ""}`)
       .then(setManualEntries)
       .catch((err: any) => setManualError(err.message));
   }
@@ -79,6 +89,7 @@ export default function JournalEntriesPage() {
     if (ownerFilter) params.set("owner_id", ownerFilter);
     if (tenantFilter) params.set("tenant_id", tenantFilter);
     if (sourceTypeFilter) params.set("source_type", sourceTypeFilter);
+    if (debouncedSearch) params.set("property_search", debouncedSearch);
     api
       .get<JournalLine[]>(`/financials/journal?${params.toString()}`)
       .then(setLines)
@@ -88,14 +99,18 @@ export default function JournalEntriesPage() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dateFrom, dateTo, buildingFilter, ownerFilter, tenantFilter, sourceTypeFilter]);
+  }, [dateFrom, dateTo, buildingFilter, ownerFilter, tenantFilter, sourceTypeFilter, debouncedSearch]);
 
   useEffect(() => {
     api.get<Building[]>("/buildings").then(setBuildings);
     api.get<Owner[]>("/owners").then(setOwners);
     api.get<Tenant[]>("/tenants").then(setTenants);
-    loadManualEntries();
   }, []);
+
+  useEffect(() => {
+    loadManualEntries();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch]);
 
   const activeFilterCount = [buildingFilter, ownerFilter, tenantFilter, sourceTypeFilter].filter(Boolean).length;
   const totalDebits = (lines ?? []).filter((l) => l.direction === "debit").reduce((s, l) => s + Number(l.amount), 0);
@@ -126,6 +141,13 @@ export default function JournalEntriesPage() {
           <p className="text-sm text-stamp-red">Couldn&apos;t reach the API — {error}.</p>
         </Card>
       )}
+
+      <Input
+        value={propertySearch}
+        onChange={(e) => setPropertySearch(e.target.value)}
+        placeholder="Search by building or apartment (e.g. Sunrise 101)…"
+        className="max-w-sm no-print"
+      />
 
       {showFilters && (
         <Card>
