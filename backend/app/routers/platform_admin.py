@@ -252,6 +252,7 @@ KNOWN_FEATURE_KEYS = {
     "data_export": "Export data (CSV/PDF downloads)",
     "data_import": "Bulk data import",
     "whatsapp_invoicing": "WhatsApp invoice sending",
+    "utility_bills": "Utility bills Excel upload",
 }
 
 

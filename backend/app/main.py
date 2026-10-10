@@ -30,6 +30,7 @@ from app.routers import (
     simple_resources,
     staff_allocations,
     team,
+    utility_bills,
 )
 
 app = FastAPI(title="Property Management API", version="0.1.0", redirect_slashes=False)
@@ -115,6 +116,7 @@ app.include_router(financials.router, prefix=API_PREFIX, dependencies=_GUARD)
 app.include_router(implementation.router, prefix=API_PREFIX)
 app.include_router(access.router, prefix=API_PREFIX)
 app.include_router(data_transfer.router, prefix=API_PREFIX, dependencies=_GUARD)
+app.include_router(utility_bills.router, prefix=API_PREFIX, dependencies=_GUARD)
 
 
 @app.get("/")

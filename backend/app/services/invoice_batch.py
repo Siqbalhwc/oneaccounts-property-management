@@ -41,6 +41,7 @@ from supabase import Client
 
 from app.services.invoicing import compute_prorated_charges, merge_current_charges
 from app.services.ledger import UnbalancedJournalEntry
+from app.services.utility_bills import apply_utility_overrides, fetch_bills
 
 PAGE_SIZE = 1000        # PostgREST silently caps any read at 1000 rows
 IN_CHUNK = 100          # max ids per .in_() filter (keeps URL length safe)
@@ -218,6 +219,7 @@ def _generate_slice_bulk(
     tenants = {t["id"]: t for t in fetch_in(supabase, "tenants", "id, full_name", "id", tenant_ids)}
 
     seq = count_invoice_numbers(supabase, company_id, date.today())
+    bills_by_lease = fetch_bills(supabase, lease_ids, invoice_month)
 
     invoice_rows: list[dict] = []
     planned: dict = {}  # lease_id -> {"prorated": [...], "total": float}
@@ -240,6 +242,11 @@ def _generate_slice_bulk(
         if not prorated:
             result["skipped"].append(lid)
             continue
+        if bills_by_lease.get(lid):
+            prorated = apply_utility_overrides(prorated, bills_by_lease[lid])
+            if not prorated:
+                result["skipped"].append(lid)
+                continue
         total = sum(c["amount"] for c in prorated)
         if round(total, 2) == 0:
             result["failed"].append({"lease_id": lid, "error": "Invoice total is zero — nothing to bill."})

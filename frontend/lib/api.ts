@@ -81,6 +81,33 @@ export async function uploadFile<T>(path: string, file: File): Promise<T> {
   return res.json();
 }
 
+// Multipart upload with extra form fields (e.g. the bill month) that reads the
+// server's plain-English "detail" message on failure, instead of dumping the
+// raw response text the way uploadFile does.
+export async function uploadFileWithFields<T>(path: string, file: File, fields: Record<string, string>): Promise<T> {
+  const headers = await authHeader();
+  const formData = new FormData();
+  Object.entries(fields).forEach(([key, value]) => formData.append(key, value));
+  formData.append("file", file);
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers, // no Content-Type here on purpose
+    body: formData,
+  });
+  if (!res.ok) {
+    const bodyText = await res.text();
+    let message = bodyText;
+    try {
+      const parsed = JSON.parse(bodyText);
+      if (typeof parsed.detail === "string") message = parsed.detail;
+    } catch {
+      // not JSON, use raw text
+    }
+    throw new Error(message);
+  }
+  return res.json();
+}
+
 // Fetches a PDF as a blob (needs the auth header, so a plain <a href> won't work)
 export async function fetchPdfBlob(path: string): Promise<Blob> {
   const headers = await authHeader();

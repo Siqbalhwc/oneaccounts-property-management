@@ -10,6 +10,7 @@ from app.core.deps import get_current_company_id, get_service_client, get_supaba
 from app.services.invoice_batch import count_invoice_numbers, generate_batch, plan_generation
 from app.services.invoicing import compute_prorated_charges, current_charges_with_earliest_start, post_invoice_journal
 from app.services.phone import normalize_to_whatsapp
+from app.services.utility_bills import apply_utility_overrides, fetch_bills
 
 router = APIRouter(prefix="/invoices", tags=["Invoices"])
 
@@ -131,6 +132,11 @@ def generate_invoice_for_lease(
     prorated_charges = compute_prorated_charges(charges, lease_start, lease_end, invoice_month, is_first_invoice)
     if not prorated_charges:
         return None
+    bills = fetch_bills(supabase, [lease["id"]], invoice_month).get(lease["id"], [])
+    if bills:
+        prorated_charges = apply_utility_overrides(prorated_charges, bills)
+        if not prorated_charges:
+            return None
 
     total = sum(c["amount"] for c in prorated_charges)
     invoice_number = generate_invoice_number(supabase, company_id, date.today())

@@ -15,6 +15,11 @@ from typing import Optional
 from supabase import Client
 
 from app.services.ledger import get_account_for_charge_label, get_account_id, post_journal_entry, reverse_journal_entry
+from app.services.utility_bills import apply_utility_overrides, fetch_bills
+
+# An invoice can be recalculated only while nobody has paid against it:
+# draft = not sent yet, sent = sent to the tenant (e.g. on WhatsApp).
+EDITABLE_INVOICE_STATUSES = ("draft", "sent")
 
 
 def current_charges_with_earliest_start(supabase: Client, lease_id: str) -> list[dict]:
@@ -211,6 +216,96 @@ def resolve_room_owner_safe(supabase: Client, room_id: str) -> Optional[str]:
     return resolve_room_owner(supabase, room_id)
 
 
+def _recalculate_invoice(
+    supabase: Client,
+    company_id: str,
+    lease: dict,
+    invoice: dict,
+    month_start: date,
+    entry_date: date,
+    reason: str,
+) -> dict:
+    """
+    The shared recalculation used by BOTH the lease-charge-edit path
+    (resync_current_month_invoice) and the utility-bill path
+    (resync_invoice_for_month): recompute the invoice from the lease's
+    charges as they now stand, apply any uploaded utility bills for that
+    month on top, reverse every live journal entry for the invoice, replace
+    its line items and post the corrected entry.
+
+    entry_date dates BOTH the reversal and the new entry. The charge-edit
+    path passes today (unchanged behaviour); the utility path passes the
+    invoice's own month so receivable stays in the right period.
+    """
+    charges = current_charges_with_earliest_start(supabase, lease["id"])
+
+    prior_invoices = (
+        supabase.table("invoices")
+        .select("id")
+        .eq("lease_id", lease["id"])
+        .lt("invoice_month", str(month_start))
+        .execute()
+        .data
+    )
+    is_first_invoice = len(prior_invoices) == 0
+
+    lease_start = date.fromisoformat(str(lease["start_date"]))
+    lease_end = date.fromisoformat(str(lease["end_date"]))
+    prorated = compute_prorated_charges(charges, lease_start, lease_end, month_start, is_first_invoice)
+    if prorated:
+        bills = fetch_bills(supabase, [lease["id"]], month_start).get(lease["id"], [])
+        if bills:
+            prorated = apply_utility_overrides(prorated, bills)
+
+    # Reverse every currently-live ORIGINAL journal entry for this invoice
+    # before re-posting. "Original" means an entry that is not itself a
+    # reversal (reversal_of is empty): a reversal entry is the equal-and-
+    # opposite that already cancels its original, so reversing it again
+    # would simply put the cancelled amount back into the ledger (the
+    # ledger sums every entry, reversals included). Reversing only the
+    # originals gives a clean zero starting point no matter how many times
+    # this runs. Entries are never edited in place anywhere in this
+    # system, only reversed (see reference doc).
+    live_entries = (
+        supabase.table("journal_entries")
+        .select("id")
+        .eq("source_type", "invoice")
+        .eq("source_id", invoice["id"])
+        .eq("status", "posted")
+        .is_("reversal_of", "null")
+        .execute()
+        .data
+    )
+    for entry in live_entries:
+        reverse_journal_entry(supabase, company_id, entry["id"], reason=reason, entry_date=str(entry_date))
+
+    supabase.table("invoice_line_items").delete().eq("invoice_id", invoice["id"]).execute()
+    if prorated:
+        supabase.table("invoice_line_items").insert(
+            [
+                {
+                    "company_id": company_id,
+                    "invoice_id": invoice["id"],
+                    "label": c["label"],
+                    "amount": c["amount"],
+                    "show_on_invoice": c["show_on_invoice"],
+                }
+                for c in prorated
+            ]
+        ).execute()
+
+    new_total = post_invoice_journal(supabase, company_id, invoice, lease, prorated, entry_date=entry_date) if prorated else 0.0
+
+    updated = (
+        supabase.table("invoices")
+        .update({"total_amount": new_total})
+        .eq("id", invoice["id"])
+        .execute()
+        .data[0]
+    )
+    return updated
+
+
 def resync_current_month_invoice(supabase: Client, company_id: str, lease: dict) -> Optional[dict]:
     """
     Called right after a lease charge is added / ended / amount-changed.
@@ -227,7 +322,7 @@ def resync_current_month_invoice(supabase: Client, company_id: str, lease: dict)
     change only takes effect starting with the next invoice generated.
 
     Returns the updated invoice dict, or None if there was nothing to
-    resync (no current-month invoice yet, or it's not a draft anymore).
+    resync (no current-month invoice yet, or it's not editable anymore).
     """
     today = date.today()
     month_start = today.replace(day=1)
@@ -247,67 +342,38 @@ def resync_current_month_invoice(supabase: Client, company_id: str, lease: dict)
     # Both still have NO payment against them, so both may be recalculated
     # (tenants often ask for a facility change after seeing the invoice).
     # 'partial' / 'paid' have a payment recorded -- don't touch those.
-    if invoice["status"] not in ("draft", "sent"):
+    if invoice["status"] not in EDITABLE_INVOICE_STATUSES:
         return None
 
-    charges = current_charges_with_earliest_start(supabase, lease["id"])
+    return _recalculate_invoice(
+        supabase, company_id, lease, invoice, month_start, today, "Lease charges changed — invoice recalculated"
+    )
 
-    prior_invoices = (
+
+def resync_invoice_for_month(supabase: Client, company_id: str, lease: dict, month_start: date) -> Optional[dict]:
+    """
+    Same recalculation, for ANY month (used after a utility bill upload,
+    where the bill is usually for last month). Only a draft or sent invoice
+    is touched; returns None when there is no invoice for that month or a
+    payment has already been recorded against it.
+
+    The reversal and the corrected entry are both dated the invoice's own
+    month, so receivable, the ledger and the reports as-of any date stay
+    correct for the period the invoice belongs to.
+    """
+    invoice = (
         supabase.table("invoices")
-        .select("id")
+        .select("*")
         .eq("lease_id", lease["id"])
-        .lt("invoice_month", str(month_start))
+        .eq("invoice_month", str(month_start))
         .execute()
         .data
     )
-    is_first_invoice = len(prior_invoices) == 0
-
-    lease_start = date.fromisoformat(str(lease["start_date"]))
-    lease_end = date.fromisoformat(str(lease["end_date"]))
-    prorated = compute_prorated_charges(charges, lease_start, lease_end, month_start, is_first_invoice)
-
-    # Reverse EVERY currently-live journal entry for this invoice before
-    # re-posting -- not just "the" entry, since a second resync would
-    # otherwise find both the correction from last time AND its own
-    # now-live reversal-of-the-original sitting there, and only cancel
-    # one of them. Reversing all live entries first guarantees a clean
-    # zero starting point every time, no matter how many times this runs.
-    # Entries are never edited in place anywhere in this system, only
-    # reversed with an equal-and-opposite entry (see reference doc).
-    live_entries = (
-        supabase.table("journal_entries")
-        .select("id")
-        .eq("source_type", "invoice")
-        .eq("source_id", invoice["id"])
-        .eq("status", "posted")
-        .execute()
-        .data
+    if not invoice:
+        return None
+    invoice = invoice[0]
+    if invoice["status"] not in EDITABLE_INVOICE_STATUSES:
+        return None
+    return _recalculate_invoice(
+        supabase, company_id, lease, invoice, month_start, month_start, "Utility bill updated — invoice recalculated"
     )
-    for entry in live_entries:
-        reverse_journal_entry(supabase, company_id, entry["id"], reason="Lease charges changed — invoice recalculated")
-
-    supabase.table("invoice_line_items").delete().eq("invoice_id", invoice["id"]).execute()
-    if prorated:
-        supabase.table("invoice_line_items").insert(
-            [
-                {
-                    "company_id": company_id,
-                    "invoice_id": invoice["id"],
-                    "label": c["label"],
-                    "amount": c["amount"],
-                    "show_on_invoice": c["show_on_invoice"],
-                }
-                for c in prorated
-            ]
-        ).execute()
-
-    new_total = post_invoice_journal(supabase, company_id, invoice, lease, prorated, entry_date=today) if prorated else 0.0
-
-    updated = (
-        supabase.table("invoices")
-        .update({"total_amount": new_total})
-        .eq("id", invoice["id"])
-        .execute()
-        .data[0]
-    )
-    return updated

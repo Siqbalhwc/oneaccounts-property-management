@@ -268,7 +268,13 @@ def post_journal_entry(
     return entry
 
 
-def reverse_journal_entry(supabase: Client, company_id: str, entry_id: str, reason: Optional[str] = None) -> dict:
+def reverse_journal_entry(
+    supabase: Client,
+    company_id: str,
+    entry_id: str,
+    reason: Optional[str] = None,
+    entry_date: Optional[str] = None,
+) -> dict:
     """
     Posts an equal-and-opposite entry to cancel a mistaken one, rather than
     editing or deleting the original -- posted entries are never touched
@@ -313,7 +319,7 @@ def reverse_journal_entry(supabase: Client, company_id: str, entry_id: str, reas
     reversal = post_journal_entry(
         supabase,
         company_id=company_id,
-        entry_date=str(_date.today()),
+        entry_date=str(entry_date or _date.today()),
         source_type=original.data["source_type"],
         source_id=original.data["source_id"],
         description=f"Reversal - {original_description}",
