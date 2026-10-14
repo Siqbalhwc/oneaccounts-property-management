@@ -132,6 +132,11 @@ export default function TenantsPage() {
     }
   }
 
+  async function handleUnarchive(t: Tenant) {
+    await api.post(`/tenants/${t.id}/unarchive`, {});
+    load();
+  }
+
   async function handleArchive() {
     if (!archiveTarget) return;
     setArchiving(true);
@@ -211,6 +216,11 @@ export default function TenantsPage() {
                   <Button variant="ghost" onClick={() => openEditModal(t)}>
                     Edit
                   </Button>
+                  {canManage && t.is_archived && (
+                    <Button variant="ghost" onClick={() => handleUnarchive(t)}>
+                      Unarchive
+                    </Button>
+                  )}
                   {canManage && !t.is_archived && (
                     <Button variant="ghost" onClick={() => setArchiveTarget(t)}>
                       Archive

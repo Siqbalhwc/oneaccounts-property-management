@@ -29,6 +29,7 @@ export default function BuildingsPage() {
   const [myRole, setMyRole] = useState<string | null>(null);
   const [roomSearch, setRoomSearch] = useState("");
   const [roomStatusFilter, setRoomStatusFilter] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
 
   // --- Add / Edit building ---
   const [buildingModalOpen, setBuildingModalOpen] = useState(false);
@@ -66,14 +67,14 @@ export default function BuildingsPage() {
   const [archivingRoom, setArchivingRoom] = useState(false);
 
   function loadBuildings() {
-    api.get<Building[]>("/buildings").then((data) => {
+    api.get<Building[]>(`/buildings${showArchived ? "?include_archived=true" : ""}`).then((data) => {
       setBuildings(data);
       if (data.length > 0 && !selected) setSelected(data[0].id);
     });
   }
 
   function loadRoomsAndFloors() {
-    api.get<RoomWithOwner[]>("/rooms").then(setRooms);
+    api.get<RoomWithOwner[]>(`/rooms${showArchived ? "?include_archived=true" : ""}`).then(setRooms);
     api.get<Floor[]>("/floors").then(setFloors);
   }
 
@@ -85,6 +86,12 @@ export default function BuildingsPage() {
   }, []);
 
   const canManage = myRole === "owner" || myRole === "admin";
+
+  useEffect(() => {
+    loadBuildings();
+    loadRoomsAndFloors();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showArchived]);
 
   // ---------------- Building add/edit ----------------
   function openAddBuildingModal() {
@@ -124,6 +131,17 @@ export default function BuildingsPage() {
     } finally {
       setBuildingSaving(false);
     }
+  }
+
+  async function handleUnarchiveBuilding(id: string) {
+    await api.post(`/buildings/${id}/unarchive`, {});
+    loadBuildings();
+  }
+
+  async function handleUnarchiveRoom(id: string) {
+    await api.post(`/rooms/${id}/unarchive`, {});
+    setRoomModalOpen(false);
+    loadRoomsAndFloors();
   }
 
   async function handleArchiveBuilding() {
@@ -408,12 +426,21 @@ export default function BuildingsPage() {
               </div>
             </div>
             <div className="flex gap-2 flex-wrap no-print">
+          <label className="flex items-center gap-2 text-xs text-ink/50 self-center">
+            <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+            Show archived
+          </label>
               {selectedBuilding && (
                 <>
                   <Button variant="ghost" onClick={() => openEditBuildingModal(selectedBuilding)}>
                     Edit building
                   </Button>
-                  {canManage && (
+                  {canManage && (selectedBuilding as any).is_archived && (
+                <Button variant="ghost" onClick={() => handleUnarchiveBuilding(selectedBuilding.id)}>
+                  Unarchive building
+                </Button>
+              )}
+              {canManage && (
                     <Button variant="ghost" onClick={() => setArchiveBuildingTarget(selectedBuilding)}>
                       Archive building
                     </Button>
@@ -771,6 +798,11 @@ export default function BuildingsPage() {
           {roomError && <p className="text-sm text-stamp-red">{roomError}</p>}
           <div className="flex justify-between items-center pt-2 border-t border-border">
             <div>
+              {editingRoomId && canManage && (rooms?.find((r) => r.id === editingRoomId) as any)?.is_archived && (
+                <Button type="button" variant="ghost" onClick={() => handleUnarchiveRoom(editingRoomId)}>
+                  Unarchive room
+                </Button>
+              )}
               {editingRoomId && canManage && (
                 <Button
                   type="button"

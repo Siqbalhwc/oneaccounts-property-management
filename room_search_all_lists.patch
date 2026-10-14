@@ -1,0 +1,941 @@
+diff --git a/backend/app/main.py b/backend/app/main.py
+index c06924f..3868eea 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -22,6 +22,7 @@ from app.routers import (
+     owner_ledger,
+     payments,
+     platform_admin,
++    property_search,
+     reports,
+     room_occupants,
+     salary_payments,
+@@ -117,6 +118,7 @@ app.include_router(implementation.router, prefix=API_PREFIX)
+ app.include_router(access.router, prefix=API_PREFIX)
+ app.include_router(data_transfer.router, prefix=API_PREFIX, dependencies=_GUARD)
+ app.include_router(utility_bills.router, prefix=API_PREFIX, dependencies=_GUARD)
++app.include_router(property_search.router, prefix=API_PREFIX, dependencies=_GUARD)
+ 
+ 
+ @app.get("/")
+diff --git a/backend/app/routers/financials.py b/backend/app/routers/financials.py
+index 1f50e28..1aef0be 100644
+--- a/backend/app/routers/financials.py
++++ b/backend/app/routers/financials.py
+@@ -6,7 +6,9 @@ from fastapi import APIRouter, Depends, Query
+ from supabase import Client
+ 
+ from app.core.deps import get_current_company_id, get_supabase
++from app.services.invoice_batch import IN_CHUNK, chunked
+ from app.services.ledger import get_account_id
++from app.services.room_search import resolve_property_term
+ 
+ router = APIRouter(prefix="/financials", tags=["Financial Reports"])
+ 
+@@ -174,6 +176,7 @@ def list_journal_entries(
+     lease_id: Optional[str] = Query(None),
+     source_type: Optional[str] = Query(None),
+     account_id: Optional[str] = Query(None),
++    property_search: Optional[str] = Query(None, max_length=200, description="Building, apartment, or both"),
+     limit: int = Query(200, le=1000),
+     offset: int = Query(0, ge=0),
+     supabase: Client = Depends(get_supabase),
+@@ -186,27 +189,64 @@ def list_journal_entries(
+     is filterable but none are meant to be displayed as columns in the UI --
+     tags stay in the background, used for filtering only.
+     """
+-    query = supabase.table("v_journal_detail").select("*").eq("company_id", company_id)
+-    if date_from:
+-        query = query.gte("entry_date", str(date_from))
+-    if date_to:
+-        query = query.lte("entry_date", str(date_to))
+-    if building_id:
+-        query = query.eq("building_id", building_id)
+-    if room_id:
+-        query = query.eq("room_id", room_id)
+-    if owner_id:
+-        query = query.eq("owner_id", owner_id)
+-    if tenant_id:
+-        query = query.eq("tenant_id", tenant_id)
+-    if lease_id:
+-        query = query.eq("lease_id", lease_id)
+-    if source_type:
+-        query = query.eq("source_type", source_type)
+-    if account_id:
+-        query = query.eq("account_id", account_id)
++
++    def filtered_query():
++        query = supabase.table("v_journal_detail").select("*").eq("company_id", company_id)
++        if date_from:
++            query = query.gte("entry_date", str(date_from))
++        if date_to:
++            query = query.lte("entry_date", str(date_to))
++        if building_id:
++            query = query.eq("building_id", building_id)
++        if room_id:
++            query = query.eq("room_id", room_id)
++        if owner_id:
++            query = query.eq("owner_id", owner_id)
++        if tenant_id:
++            query = query.eq("tenant_id", tenant_id)
++        if lease_id:
++            query = query.eq("lease_id", lease_id)
++        if source_type:
++            query = query.eq("source_type", source_type)
++        if account_id:
++            query = query.eq("account_id", account_id)
++        return query
++
++    if property_search and property_search.strip():
++        # Room / building text search (additive: every filter above still
++        # applies). A line matches if it is tagged to a matched room, or to a
++        # building whose name matched. The matched ids are read in chunks to
++        # keep each request small; the best (offset + limit) rows of every
++        # chunk are merged, so the page you get is still the true newest-first
++        # page of the whole result.
++        match = resolve_property_term(supabase, property_search)
++        if match.empty:
++            return []
++        needed = offset + limit
++        merged: dict[str, dict] = {}
++        for column, ids in (("room_id", match.room_ids), ("building_id", match.building_ids)):
++            for chunk in chunked(sorted(ids), IN_CHUNK):
++                rows = (
++                    filtered_query()
++                    .in_(column, chunk)
++                    .order("entry_date", desc=True)
++                    .order("created_at", desc=True)
++                    .range(0, needed - 1)
++                    .execute()
++                    .data
++                )
++                for row in rows:
++                    merged[row["line_id"]] = row
++        ordered = sorted(
++            merged.values(),
++            key=lambda r: (r.get("entry_date") or "", r.get("created_at") or ""),
++            reverse=True,
++        )
++        return ordered[offset : offset + limit]
++
+     result = (
+-        query.order("entry_date", desc=True)
++        filtered_query()
++        .order("entry_date", desc=True)
+         .order("created_at", desc=True)
+         .range(offset, offset + limit - 1)
+         .execute()
+diff --git a/backend/app/routers/ledger.py b/backend/app/routers/ledger.py
+index a74259b..59ee916 100644
+--- a/backend/app/routers/ledger.py
++++ b/backend/app/routers/ledger.py
+@@ -8,6 +8,7 @@ from supabase import Client
+ from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
+ from app.crud.generic import write_audit_log
+ from app.services.ledger import JournalLine, UnbalancedJournalEntry, post_journal_entry
++from app.services.room_search import resolve_property_term
+ 
+ router = APIRouter(prefix="/ledger", tags=["Ledger"])
+ 
+@@ -147,6 +148,7 @@ def create_manual_journal_entry(
+ 
+ @router.get("/manual-entries")
+ def list_manual_journal_entries(
++    property_search: Optional[str] = Query(None, max_length=200, description="Building, apartment, or both"),
+     supabase: Client = Depends(get_supabase),
+     company_id: str = Depends(get_current_company_id),
+ ):
+@@ -174,11 +176,24 @@ def list_manual_journal_entries(
+     entry_ids = [e["id"] for e in entries]
+     lines = (
+         supabase.table("journal_lines")
+-        .select("journal_entry_id, direction, amount, account_id")
++        .select("journal_entry_id, direction, amount, account_id, room_id, building_id")
+         .in_("journal_entry_id", entry_ids)
+         .execute()
+         .data
+     )
++    if property_search and property_search.strip():
++        # Room / building search (additive): keep only entries having at least
++        # one line tagged to a matched room, or to a building whose name matched.
++        match = resolve_property_term(supabase, property_search)
++        room_ids, building_ids = match.room_ids, match.building_ids
++        keep = {
++            l["journal_entry_id"]
++            for l in lines
++            if (l.get("room_id") in room_ids) or (l.get("building_id") in building_ids)
++        }
++        entries = [e for e in entries if e["id"] in keep]
++        if not entries:
++            return []
+     account_ids = {l["account_id"] for l in lines}
+     accounts = (
+         supabase.table("chart_of_accounts")
+diff --git a/backend/app/routers/property_search.py b/backend/app/routers/property_search.py
+new file mode 100644
+index 0000000..a9e2e53
+--- /dev/null
++++ b/backend/app/routers/property_search.py
+@@ -0,0 +1,109 @@
++"""
++GET /property-search/{entity}?q=...
++
++"Which of my <entity> belong to the rooms / buildings this text means?"
++
++Every list page (Tenants, Owners, Staff, Expenses, ...) keeps its own text
++search (name, CNIC, vendor ...) and, in addition, asks this endpoint which
++records belong to the typed room / apartment / building. The page then shows a
++record if EITHER matches. All the room/building logic stays here, on the
++server (see services/room_search.py).
++
++Each entity is one small function registered in ENTITY_HANDLERS. A new module
++-- e.g. the construction company's sites -- plugs in by registering another
++handler; nothing else here changes.
++
++Isolation: the caller's own RLS-scoped client does every read, and every query
++also pins company_id to the caller's own company (belt and braces). Read-only:
++no endpoint here writes anything.
++"""
++
++from typing import Callable
++
++from fastapi import APIRouter, Depends, HTTPException, Query
++from supabase import Client
++
++from app.core.deps import get_current_company_id, get_supabase
++from app.services.room_search import PropertyMatch, resolve_property_term, rows_in
++
++router = APIRouter(prefix="/property-search", tags=["Property search"])
++
++# handler(supabase, company_id, match) -> (ids, notes)
++#   ids   = ids of this entity's records that belong to the matched rooms/buildings
++#   notes = optional {id: short text} the page may show beside a record
++Handler = Callable[[Client, str, PropertyMatch], tuple[set[str], dict[str, str]]]
++
++
++def _tenants(supabase: Client, company_id: str, m: PropertyMatch) -> tuple[set[str], dict[str, str]]:
++    """Tenants with a lease -- current OR ended -- on a matched room. A tenant
++    who is only there through an ended lease gets a 'Past tenant' note."""
++    leases = rows_in(supabase, "leases", "id, tenant_id, room_id, status", "room_id", m.room_ids, company_id)
++    by_tenant: dict[str, list[dict]] = {}
++    for lease in leases:
++        if lease.get("tenant_id"):
++            by_tenant.setdefault(lease["tenant_id"], []).append(lease)
++    ids: set[str] = set()
++    notes: dict[str, str] = {}
++    for tenant_id, tenant_leases in by_tenant.items():
++        ids.add(tenant_id)
++        if not any(l.get("status") == "active" for l in tenant_leases):
++            notes[tenant_id] = f"Past tenant \u00b7 {m.room_label(tenant_leases[0]['room_id'])}"
++    return ids, notes
++
++
++def _owners(supabase: Client, company_id: str, m: PropertyMatch) -> tuple[set[str], dict[str, str]]:
++    """Owners of the matched rooms/buildings. A room's own owner wins, else its
++    building's -- the same rule the ledger uses to decide who is owed."""
++    return m.effective_owner_ids(), {}
++
++
++def _staff(supabase: Client, company_id: str, m: PropertyMatch) -> tuple[set[str], dict[str, str]]:
++    """Staff assigned to a matched building, directly or through a cost split.
++    Staff belong to buildings, not rooms."""
++    scope = m.building_scope()
++    ids = {s["id"] for s in rows_in(supabase, "staff", "id", "building_id", scope, company_id)}
++    for row in rows_in(
++        supabase, "cost_allocations", "id, source_id", "building_id", scope, company_id,
++        extra=lambda q: q.eq("source_type", "staff"),
++    ):
++        ids.add(row["source_id"])
++    return ids, {}
++
++
++def _expenses(supabase: Client, company_id: str, m: PropertyMatch) -> tuple[set[str], dict[str, str]]:
++    """Expenses charged to a matched room, or to a building whose NAME matched
++    (directly or through a cost split). 'Sunrise 101' therefore finds only room
++    101's expenses, while 'Sunrise' finds the whole building's."""
++    ids = {e["id"] for e in rows_in(supabase, "expenses", "id", "room_id", m.room_ids, company_id)}
++    ids |= {e["id"] for e in rows_in(supabase, "expenses", "id", "building_id", m.building_ids, company_id)}
++    for row in rows_in(
++        supabase, "cost_allocations", "id, source_id", "building_id", m.building_ids, company_id,
++        extra=lambda q: q.eq("source_type", "expense"),
++    ):
++        ids.add(row["source_id"])
++    return ids, {}
++
++
++ENTITY_HANDLERS: dict[str, Handler] = {
++    "tenants": _tenants,
++    "owners": _owners,
++    "staff": _staff,
++    "expenses": _expenses,
++}
++
++
++@router.get("/{entity}")
++def property_search(
++    entity: str,
++    q: str = Query("", max_length=200, description="What the user typed: building, apartment, or both"),
++    supabase: Client = Depends(get_supabase),
++    company_id: str = Depends(get_current_company_id),
++):
++    handler = ENTITY_HANDLERS.get(entity)
++    if handler is None:
++        raise HTTPException(status_code=404, detail=f"Room search isn't available for '{entity}'.")
++    match = resolve_property_term(supabase, q)
++    if match.empty:
++        return {"ids": [], "notes": {}}
++    ids, notes = handler(supabase, company_id, match)
++    return {"ids": sorted(ids), "notes": notes}
+diff --git a/backend/app/routers/utility_bills.py b/backend/app/routers/utility_bills.py
+index 581b429..e50a7eb 100644
+--- a/backend/app/routers/utility_bills.py
++++ b/backend/app/routers/utility_bills.py
+@@ -33,6 +33,7 @@ from app.core.deps import (
+     require_owner_or_admin,
+ )
+ from app.services.invoice_batch import fetch_all, fetch_in
++from app.services.room_search import split_terms
+ from app.services.utility_upload import (
+     build_template,
+     commit_upload,
+@@ -119,11 +120,17 @@ def commit_bills(
+ def list_bills(
+     month: str = Query(...),
+     building_id: Optional[str] = Query(None),
++    search: Optional[str] = Query(None, max_length=200, description="Building, apartment, tenant or utility"),
+     supabase: Client = Depends(get_supabase),
+     _feature: None = Depends(require_feature("utility_bills")),
+ ):
+-    """Saved bills for one month, with the building, room and invoice status."""
++    """Saved bills for one month, with the building, room and invoice status.
++
++    `search` is purely additive: every word typed must appear in the row's
++    building, apartment, tenant, utility or bill reference, so "Sunrise 101"
++    finds apartment 101 in Sunrise. Omit it and nothing changes."""
+     bill_month = _month(month)
++    search_terms = [t.lower() for t in split_terms(search)]
+     bills = fetch_all(
+         lambda: supabase.table("utility_bills").select("*").eq("bill_month", str(bill_month)).order("id")
+     )
+@@ -156,6 +163,19 @@ def list_bills(
+         room = rooms.get(lease["room_id"]) or {}
+         if building_id and room.get("building_id") != building_id:
+             continue
++        if search_terms:
++            haystack = " ".join(
++                str(x or "")
++                for x in (
++                    buildings.get(room.get("building_id"), ""),
++                    room.get("room_number", ""),
++                    tenants.get(lease["tenant_id"], ""),
++                    b["label"],
++                    b.get("bill_reference"),
++                )
++            ).lower()
++            if not all(t in haystack for t in search_terms):
++                continue
+         out.append(
+             {
+                 "id": b["id"],
+diff --git a/backend/app/services/room_search.py b/backend/app/services/room_search.py
+new file mode 100644
+index 0000000..5c9b18d
+--- /dev/null
++++ b/backend/app/services/room_search.py
+@@ -0,0 +1,184 @@
++"""
++Room / apartment / building search -- ONE shared resolver for every list page.
++
++Room-wise and building-wise lookup is the backbone of property management, so
++the logic lives here, once, on the server. A list page sends what the user
++typed; this module turns it into "which rooms and buildings does that mean",
++and each page's handler (see routers/property_search.py) turns that into "which
++of MY records belong to those rooms/buildings".
++
++What the user can type
++  * a building name            "Sunrise"            -> every room in Sunrise
++  * a room / apartment number  "A-101", "202"       -> that room, in any building
++  * both together              "Sunrise 101"        -> room 101 in Sunrise only
++  * label words are ignored    "Sunrise Apartment 101" == "Sunrise 101"
++Every word typed must match either the building's name or the room's number
++(case-insensitive, partial matches allowed), so adding a word only narrows.
++
++Isolation
++  Every query here runs through the CALLER'S OWN RLS-scoped Supabase client
++  (never the service-role client). Postgres therefore only ever returns rooms
++  and buildings of the caller's own company -- and, for building-scoped users,
++  only their buildings. A search can never reach another company's data, no
++  matter what is typed.
++"""
++
++import re
++from dataclasses import dataclass, field
++from typing import Optional
++
++from supabase import Client
++
++from app.services.invoice_batch import fetch_all, fetch_in
++
++# Words people type around a room number that are labels, not part of any
++# building name or room number.
++FILLER_WORDS = {"apartment", "apt", "apt.", "room", "flat", "unit", "no", "no.", "-", "\u2013", "\u2014"}
++MAX_TERMS = 6
++MAX_TERM_LENGTH = 60
++
++ROOM_COLUMNS = "id, room_number, building_id, owner_id"
++BUILDING_COLUMNS = "id, name, owner_id"
++
++# Above this many ids, reading the whole table once and filtering in Python is
++# cheaper than dozens of small .in_() queries.
++FULL_SCAN_ABOVE = 300
++
++
++def split_terms(raw: Optional[str]) -> list[str]:
++    """'Sunrise Apartment #101' -> ['Sunrise', '101']."""
++    words = [w.lstrip("#") for w in re.split(r"[\s,]+", (raw or "").strip())]
++    terms = [w[:MAX_TERM_LENGTH] for w in words if w and w.lower() not in FILLER_WORDS]
++    return terms[:MAX_TERMS]
++
++
++def _like(term: str) -> str:
++    """Contains-pattern for ILIKE, with the user's own % and _ made literal."""
++    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
++    return f"%{escaped}%"
++
++
++@dataclass
++class PropertyMatch:
++    terms: list[str] = field(default_factory=list)
++    rooms: dict[str, dict] = field(default_factory=dict)  # room_id -> room row
++    building_ids: set[str] = field(default_factory=set)  # buildings whose NAME matches every word
++    buildings: dict[str, dict] = field(default_factory=dict)  # building_id -> building row
++    named_building_hit: bool = False  # did any typed word match a building name?
++
++    @property
++    def room_ids(self) -> set[str]:
++        return set(self.rooms)
++
++    @property
++    def empty(self) -> bool:
++        return not self.rooms and not self.building_ids
++
++    def room_label(self, room_id: str) -> str:
++        room = self.rooms.get(room_id) or {}
++        building = self.buildings.get(room.get("building_id")) or {}
++        building_name = building.get("name") or "\u2014"
++        return f"{building_name} \u2014 Apartment {room.get('room_number', '?')}"
++
++    def building_scope(self) -> set[str]:
++        """Buildings for records that belong to a building, never to a room
++        (e.g. staff). Includes the building of a matched room only when the
++        user actually typed a building name -- a bare '101' must not pull in
++        every building that happens to have a room 101."""
++        scope = set(self.building_ids)
++        if self.named_building_hit:
++            scope |= {r["building_id"] for r in self.rooms.values() if r.get("building_id")}
++        return scope
++
++    def effective_owner_ids(self) -> set[str]:
++        """Owners of the matched rooms (a room's own owner, else its building's)
++        plus owners of the matched buildings -- same rule as resolve_room_owner()."""
++        owners: set[str] = set()
++        for room in self.rooms.values():
++            owner = room.get("owner_id") or (self.buildings.get(room.get("building_id")) or {}).get("owner_id")
++            if owner:
++                owners.add(owner)
++        for building_id in self.building_ids:
++            owner = (self.buildings.get(building_id) or {}).get("owner_id")
++            if owner:
++                owners.add(owner)
++        return owners
++
++
++def resolve_property_term(supabase: Client, raw: Optional[str]) -> PropertyMatch:
++    """Typed text -> the rooms and buildings it means. See the module docstring."""
++    terms = split_terms(raw)
++    if not terms:
++        return PropertyMatch()
++
++    per_term_rooms: list[dict[str, dict]] = []
++    per_term_buildings: list[dict[str, dict]] = []
++    for term in terms:
++        pattern = _like(term)
++        building_rows = fetch_all(
++            lambda: supabase.table("buildings").select(BUILDING_COLUMNS).ilike("name", pattern).order("id")
++        )
++        buildings = {b["id"]: b for b in building_rows}
++        room_rows = fetch_all(
++            lambda: supabase.table("rooms").select(ROOM_COLUMNS).ilike("room_number", pattern).order("id")
++        )
++        rooms = {r["id"]: r for r in room_rows}
++        if buildings:
++            for r in fetch_in(supabase, "rooms", ROOM_COLUMNS, "building_id", list(buildings)):
++                rooms[r["id"]] = r
++        if not rooms and not buildings:
++            return PropertyMatch(terms=terms)  # this word matches nothing, so the whole phrase can't
++        per_term_rooms.append(rooms)
++        per_term_buildings.append(buildings)
++
++    room_ids = set.intersection(*(set(m) for m in per_term_rooms))
++    building_ids = set.intersection(*(set(m) for m in per_term_buildings))
++
++    known_buildings: dict[str, dict] = {}
++    for m in per_term_buildings:
++        known_buildings.update(m)
++    rooms = {rid: per_term_rooms[0][rid] for rid in room_ids}
++    missing = {r["building_id"] for r in rooms.values() if r.get("building_id")} - set(known_buildings)
++    if missing:
++        for b in fetch_in(supabase, "buildings", BUILDING_COLUMNS, "id", list(missing)):
++            known_buildings[b["id"]] = b
++
++    return PropertyMatch(
++        terms=terms,
++        rooms=rooms,
++        building_ids=building_ids,
++        buildings=known_buildings,
++        named_building_hit=any(per_term_buildings),
++    )
++
++
++def rows_in(
++    supabase: Client,
++    table: str,
++    columns: str,
++    column: str,
++    ids,
++    company_id: str,
++    extra=None,
++) -> list[dict]:
++    """
++    select <columns> from <table> where company_id = <caller's> and <column> in (ids).
++    Small id sets use chunked .in_() reads; very large ones (a short search like
++    '1' can match thousands of rooms) read the table once and filter here.
++    """
++    ids = list(ids)
++    if not ids:
++        return []
++
++    def scoped(query):
++        query = query.eq("company_id", company_id)
++        return extra(query) if extra else query
++
++    if len(ids) <= FULL_SCAN_ABOVE:
++        return fetch_in(supabase, table, columns, column, ids, extra=scoped)
++
++    wanted = set(ids)
++    wanted_columns = [c.strip() for c in columns.split(",")]
++    select_columns = columns if column in wanted_columns else f"{columns}, {column}"
++    rows = fetch_all(lambda: scoped(supabase.table(table).select(select_columns)).order("id"))
++    return [r for r in rows if r.get(column) in wanted]
+diff --git a/frontend/app/(dashboard)/expenses/page.tsx b/frontend/app/(dashboard)/expenses/page.tsx
+index 1657237..07480c1 100644
+--- a/frontend/app/(dashboard)/expenses/page.tsx
++++ b/frontend/app/(dashboard)/expenses/page.tsx
+@@ -7,6 +7,7 @@ import { Modal } from "@/components/ui/Modal";
+ import { Field, Input, AmountInput, Select } from "@/components/ui/Field";
+ import { api, Building, Account } from "@/lib/api";
+ import { useAccess } from "@/lib/access";
++import { usePropertySearch } from "@/lib/usePropertySearch";
+ import { ChevronRight, ChevronDown, Pencil, ScrollText, SplitSquareHorizontal, SlidersHorizontal } from "lucide-react";
+ 
+ type ExpenseCategory = { id: string; name: string; account_id?: string };
+@@ -53,6 +54,7 @@ export default function ExpensesPage() {
+   const [showGlCol, setShowGlCol] = useState(true);
+   const [showPaidFromCol, setShowPaidFromCol] = useState(true);
+   const [showRecursCol, setShowRecursCol] = useState(true);
++  const [search, setSearch] = useState("");
+   const [showBuildingCol, setShowBuildingCol] = useState(true);
+   const colsMenuRef = useRef<HTMLDivElement>(null);
+ 
+@@ -345,6 +347,18 @@ export default function ExpensesPage() {
+     }
+   }
+ 
++  // Building / apartment matches come from the server (expenses charged to that
++  // room, or to that building directly or through a cost split); vendor,
++  // description and category are matched here.
++  const propertyMatch = usePropertySearch("expenses", search);
++  const normalizedSearch = search.trim().toLowerCase();
++  const visibleExpenses = (expenses ?? []).filter((e) => {
++    if (!normalizedSearch) return true;
++    if (propertyMatch.ids.has(e.id)) return true;
++    const categoryName = categories?.find((c) => c.id === e.category_id)?.name ?? "";
++    return [e.vendor_name ?? "", e.description ?? "", categoryName].some((f) => f.toLowerCase().includes(normalizedSearch));
++  });
++
+   return (
+     <div className="space-y-6">
+       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+@@ -364,7 +378,13 @@ export default function ExpensesPage() {
+       </div>
+ 
+       <Card>
+-        <div className="flex items-center justify-end mb-4 no-print">
++        <div className="flex items-center justify-between mb-4 no-print gap-3 flex-wrap">
++          <Input
++            value={search}
++            onChange={(e) => setSearch(e.target.value)}
++            placeholder="Search by vendor, category, building or apartment…"
++            className="max-w-sm"
++          />
+           <div className="relative" ref={colsMenuRef}>
+             <button
+               type="button"
+@@ -469,7 +489,7 @@ export default function ExpensesPage() {
+                 </tr>
+               </thead>
+               <tbody>
+-                {(expenses ?? []).map((e) => {
++                {visibleExpenses.map((e) => {
+                   const expanded = expandedExpenseId === e.id;
+                   const colSpan =
+                     6 + (showRecursCol ? 1 : 0) + (showBuildingCol ? 1 : 0) + (showGlCol ? 1 : 0) + (showPaidFromCol ? 1 : 0);
+@@ -604,6 +624,9 @@ export default function ExpensesPage() {
+                 })}
+               </tbody>
+             </table>
++            {normalizedSearch && visibleExpenses.length === 0 && (
++              <p className="py-8 text-center text-sm text-ink/45">No expenses match your search.</p>
++            )}
+           </div>
+         )}
+       </Card>
+diff --git a/frontend/app/(dashboard)/journal/page.tsx b/frontend/app/(dashboard)/journal/page.tsx
+index 1fb265f..bd1b5f5 100644
+--- a/frontend/app/(dashboard)/journal/page.tsx
++++ b/frontend/app/(dashboard)/journal/page.tsx
+@@ -49,6 +49,13 @@ export default function JournalEntriesPage() {
+   const [tenants, setTenants] = useState<Tenant[] | null>(null);
+   const [error, setError] = useState<string | null>(null);
+   const [showFilters, setShowFilters] = useState(false);
++  const [propertySearch, setPropertySearch] = useState("");
++  const [debouncedSearch, setDebouncedSearch] = useState("");
++
++  useEffect(() => {
++    const timer = setTimeout(() => setDebouncedSearch(propertySearch.trim()), 350);
++    return () => clearTimeout(timer);
++  }, [propertySearch]);
+ 
+   // Manual/adjustment entries only -- these are the only entries that can
+   // ever be edited (vs. reversed), so they get their own small list with
+@@ -58,8 +65,11 @@ export default function JournalEntriesPage() {
+   const [manualError, setManualError] = useState<string | null>(null);
+ 
+   function loadManualEntries() {
++    const manualParams = new URLSearchParams();
++    if (debouncedSearch) manualParams.set("property_search", debouncedSearch);
++    const manualQuery = manualParams.toString();
+     api
+-      .get<ManualEntry[]>("/ledger/manual-entries")
++      .get<ManualEntry[]>(`/ledger/manual-entries${manualQuery ? `?${manualQuery}` : ""}`)
+       .then(setManualEntries)
+       .catch((err: any) => setManualError(err.message));
+   }
+@@ -79,6 +89,7 @@ export default function JournalEntriesPage() {
+     if (ownerFilter) params.set("owner_id", ownerFilter);
+     if (tenantFilter) params.set("tenant_id", tenantFilter);
+     if (sourceTypeFilter) params.set("source_type", sourceTypeFilter);
++    if (debouncedSearch) params.set("property_search", debouncedSearch);
+     api
+       .get<JournalLine[]>(`/financials/journal?${params.toString()}`)
+       .then(setLines)
+@@ -88,15 +99,19 @@ export default function JournalEntriesPage() {
+   useEffect(() => {
+     load();
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+-  }, [dateFrom, dateTo, buildingFilter, ownerFilter, tenantFilter, sourceTypeFilter]);
++  }, [dateFrom, dateTo, buildingFilter, ownerFilter, tenantFilter, sourceTypeFilter, debouncedSearch]);
+ 
+   useEffect(() => {
+     api.get<Building[]>("/buildings").then(setBuildings);
+     api.get<Owner[]>("/owners").then(setOwners);
+     api.get<Tenant[]>("/tenants").then(setTenants);
+-    loadManualEntries();
+   }, []);
+ 
++  useEffect(() => {
++    loadManualEntries();
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [debouncedSearch]);
++
+   const activeFilterCount = [buildingFilter, ownerFilter, tenantFilter, sourceTypeFilter].filter(Boolean).length;
+   const totalDebits = (lines ?? []).filter((l) => l.direction === "debit").reduce((s, l) => s + Number(l.amount), 0);
+   const totalCredits = (lines ?? []).filter((l) => l.direction === "credit").reduce((s, l) => s + Number(l.amount), 0);
+@@ -127,6 +142,13 @@ export default function JournalEntriesPage() {
+         </Card>
+       )}
+ 
++      <Input
++        value={propertySearch}
++        onChange={(e) => setPropertySearch(e.target.value)}
++        placeholder="Search by building or apartment (e.g. Sunrise 101)…"
++        className="max-w-sm no-print"
++      />
++
+       {showFilters && (
+         <Card>
+           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+diff --git a/frontend/app/(dashboard)/owners/page.tsx b/frontend/app/(dashboard)/owners/page.tsx
+index 2298fc3..0c09633 100644
+--- a/frontend/app/(dashboard)/owners/page.tsx
++++ b/frontend/app/(dashboard)/owners/page.tsx
+@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/Button";
+ import { Modal } from "@/components/ui/Modal";
+ import { Field, Input } from "@/components/ui/Field";
+ import { api } from "@/lib/api";
++import { usePropertySearch } from "@/lib/usePropertySearch";
+ 
+ type Owner = {
+   id: string;
+@@ -156,8 +157,12 @@ export default function OwnersPage() {
+     load();
+   }
+ 
++  // Building / apartment matches come from the server (the owner of that room
++  // or building); the name / phone / CNIC search is unchanged.
++  const propertyMatch = usePropertySearch("owners", search);
+   const filtered = (owners ?? []).filter((o) => {
+     if (!search.trim()) return true;
++    if (propertyMatch.ids.has(o.id)) return true;
+     const q = search.toLowerCase();
+     return (
+       o.name.toLowerCase().includes(q) ||
+@@ -184,8 +189,8 @@ export default function OwnersPage() {
+           <Input
+             value={search}
+             onChange={(e) => setSearch(e.target.value)}
+-            placeholder="Search by name, phone, or CNIC…"
+-            className="max-w-xs"
++            placeholder="Search by name, phone, CNIC, building or apartment…"
++            className="max-w-sm"
+           />
+           <label className="flex items-center gap-2 text-xs text-ink/50">
+             <input
+diff --git a/frontend/app/(dashboard)/staff/page.tsx b/frontend/app/(dashboard)/staff/page.tsx
+index e000591..bda1cfe 100644
+--- a/frontend/app/(dashboard)/staff/page.tsx
++++ b/frontend/app/(dashboard)/staff/page.tsx
+@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
+ import { Modal } from "@/components/ui/Modal";
+ import { Field, Input, AmountInput, Select } from "@/components/ui/Field";
+ import { api, Building } from "@/lib/api";
++import { usePropertySearch } from "@/lib/usePropertySearch";
+ 
+ type Staff = {
+   id: string;
+@@ -33,6 +34,7 @@ function formatPkr(n: number) {
+ export default function StaffPage() {
+   const [staff, setStaff] = useState<Staff[] | null>(null);
+   const [buildings, setBuildings] = useState<Building[] | null>(null);
++  const [search, setSearch] = useState("");
+   const [salaryPayments, setSalaryPayments] = useState<SalaryPayment[] | null>(null);
+ 
+   const [staffModalOpen, setStaffModalOpen] = useState(false);
+@@ -205,6 +207,16 @@ export default function StaffPage() {
+     }
+   }
+ 
++  // Building matches come from the server (staff assigned to that building,
++  // directly or through a cost split); name / designation / phone is matched here.
++  const propertyMatch = usePropertySearch("staff", search);
++  const normalizedSearch = search.trim().toLowerCase();
++  const visibleStaff = (staff ?? []).filter((s) => {
++    if (!normalizedSearch) return true;
++    if (propertyMatch.ids.has(s.id)) return true;
++    return [s.full_name, s.designation ?? "", s.phone ?? ""].some((f) => f.toLowerCase().includes(normalizedSearch));
++  });
++
+   const buildingName = (id?: string) => buildings?.find((b) => b.id === id)?.name ?? "All buildings";
+   const paymentsFor = (staffId: string) =>
+     (salaryPayments ?? []).filter((p) => p.staff_id === staffId).sort((a, b) => b.salary_month.localeCompare(a.salary_month));
+@@ -226,10 +238,18 @@ export default function StaffPage() {
+       </div>
+ 
+       <Card>
++        <div className="mb-4 no-print">
++          <Input
++            value={search}
++            onChange={(e) => setSearch(e.target.value)}
++            placeholder="Search by name, designation, phone or building…"
++            className="max-w-sm"
++          />
++        </div>
+         <DataTable
+           keyField="id"
+-          rows={staff ?? []}
+-          emptyMessage="No staff added yet."
++          rows={visibleStaff}
++          emptyMessage={search ? "No staff match your search." : "No staff added yet."}
+           columns={[
+             { header: "Name", accessor: (s) => <span className="font-medium">{s.full_name}</span> },
+             { header: "Designation", accessor: (s) => s.designation ?? "—" },
+diff --git a/frontend/app/(dashboard)/tenants/page.tsx b/frontend/app/(dashboard)/tenants/page.tsx
+index 065e752..c011ffe 100644
+--- a/frontend/app/(dashboard)/tenants/page.tsx
++++ b/frontend/app/(dashboard)/tenants/page.tsx
+@@ -8,6 +8,7 @@ import { Modal } from "@/components/ui/Modal";
+ import { ConfirmModal } from "@/components/ui/ConfirmModal";
+ import { HistoryPanel } from "@/components/ui/HistoryPanel";
+ import { Field, Input } from "@/components/ui/Field";
++import { usePropertySearch } from "@/lib/usePropertySearch";
+ 
+ function validateCnic(value: string): string | null {
+   const digits = value.replace(/\D/g, "");
+@@ -72,9 +73,13 @@ export default function TenantsPage() {
+     return room ? `${building?.name ?? "—"} — Apartment ${room.room_number}` : "Not assigned";
+   }
+ 
++  // Room / apartment / building matches come from the server (including past
++  // tenants of that room); the name / CNIC / address search is unchanged.
++  const propertyMatch = usePropertySearch("tenants", searchTerm);
+   const normalizedSearch = searchTerm.trim().toLowerCase();
+   const filteredTenants = (tenants ?? []).filter((t) => {
+     if (!normalizedSearch) return true;
++    if (propertyMatch.ids.has(t.id)) return true;
+     const haystacks = [t.full_name, t.cnic, t.address ?? ""];
+     return haystacks.some((field) => field.toLowerCase().includes(normalizedSearch));
+   });
+@@ -157,8 +162,8 @@ export default function TenantsPage() {
+           <Input
+             value={searchTerm}
+             onChange={(e) => setSearchTerm(e.target.value)}
+-            placeholder="Search by name, CNIC, or address…"
+-            className="max-w-xs"
++            placeholder="Search by name, CNIC, address, building or apartment…"
++            className="max-w-sm"
+           />
+           <label className="flex items-center gap-2 text-xs text-ink/50">
+             <input
+@@ -188,9 +193,11 @@ export default function TenantsPage() {
+               header: "Property",
+               accessor: (t) => {
+                 const label = propertyFor(t.id);
++                const note = propertyMatch.notes[t.id];
+                 return (
+                   <span className={`text-xs ${label === "Not assigned" ? "text-ink/40" : "text-ink/70"}`}>
+                     {label}
++                    {note && <span className="block text-ink/50">{note}</span>}
+                   </span>
+                 );
+               },
+diff --git a/frontend/app/(dashboard)/utility-bills/page.tsx b/frontend/app/(dashboard)/utility-bills/page.tsx
+index 1a2f871..f12acb0 100644
+--- a/frontend/app/(dashboard)/utility-bills/page.tsx
++++ b/frontend/app/(dashboard)/utility-bills/page.tsx
+@@ -103,6 +103,13 @@ export default function UtilityBillsPage() {
+ 
+   const [bills, setBills] = useState<SavedBill[]>([]);
+   const [billsLoading, setBillsLoading] = useState(false);
++  const [billSearch, setBillSearch] = useState("");
++  const [debouncedBillSearch, setDebouncedBillSearch] = useState("");
++
++  useEffect(() => {
++    const timer = setTimeout(() => setDebouncedBillSearch(billSearch.trim()), 350);
++    return () => clearTimeout(timer);
++  }, [billSearch]);
+ 
+   useEffect(() => {
+     api.get<Building[]>("/buildings").then(setBuildings).catch(() => undefined);
+@@ -112,6 +119,7 @@ export default function UtilityBillsPage() {
+     setBillsLoading(true);
+     const params = new URLSearchParams({ month });
+     if (buildingFilter) params.set("building_id", buildingFilter);
++    if (debouncedBillSearch) params.set("search", debouncedBillSearch);
+     api
+       .get<SavedBill[]>(`/utility-bills?${params.toString()}`)
+       .then(setBills)
+@@ -119,7 +127,7 @@ export default function UtilityBillsPage() {
+       .finally(() => setBillsLoading(false));
+   }
+ 
+-  useEffect(loadBills, [month, buildingFilter]); // eslint-disable-line react-hooks/exhaustive-deps
++  useEffect(loadBills, [month, buildingFilter, debouncedBillSearch]); // eslint-disable-line react-hooks/exhaustive-deps
+ 
+   function resetResult() {
+     setPreview(null);
+@@ -376,10 +384,20 @@ export default function UtilityBillsPage() {
+       )}
+ 
+       <Card title={`Saved bills — ${month}`}>
++        <div className="mb-4 no-print">
++          <Input
++            value={billSearch}
++            onChange={(e) => setBillSearch(e.target.value)}
++            placeholder="Search by building, apartment, tenant or utility…"
++            className="max-w-sm"
++          />
++        </div>
+         <DataTable
+           keyField="id"
+           rows={bills}
+-          emptyMessage={billsLoading ? "Loading…" : "No utility bills saved for this month yet."}
++          emptyMessage={
++            billsLoading ? "Loading…" : debouncedBillSearch ? "No saved bills match your search." : "No utility bills saved for this month yet."
++          }
+           columns={[
+             { header: "Building", accessor: (b) => b.building },
+             { header: "Room", accessor: (b) => b.room },
+diff --git a/frontend/lib/usePropertySearch.ts b/frontend/lib/usePropertySearch.ts
+new file mode 100644
+index 0000000..fbfcebe
+--- /dev/null
++++ b/frontend/lib/usePropertySearch.ts
+@@ -0,0 +1,58 @@
++"use client";
++
++import { useEffect, useState } from "react";
++import { api } from "./api";
++
++// Room / apartment / building search for any list page.
++//
++// All the matching happens on the server (GET /property-search/{entity}); this
++// hook only asks "which of my <entity> records belong to what the user typed?"
++// and hands back their ids (plus optional short notes, e.g. "Past tenant ·
++// Sunrise — Apartment 101"). A page keeps its own text search and shows a
++// record when EITHER its own search or this one matches.
++//
++// If the request fails, the page silently falls back to its own search.
++
++type Result = { ids: Set<string>; notes: Record<string, string>; loading: boolean };
++
++const NO_IDS: Set<string> = new Set();
++const NO_NOTES: Record<string, string> = {};
++
++export function usePropertySearch(entity: string, term: string, delayMs = 350): Result {
++  const trimmed = term.trim();
++  const [loaded, setLoaded] = useState<{ key: string; ids: Set<string>; notes: Record<string, string> } | null>(null);
++  const [loading, setLoading] = useState(false);
++
++  useEffect(() => {
++    if (!trimmed) {
++      setLoaded(null);
++      setLoading(false);
++      return;
++    }
++    let cancelled = false;
++    setLoading(true);
++    const timer = setTimeout(() => {
++      api
++        .get<{ ids: string[]; notes?: Record<string, string> }>(
++          `/property-search/${entity}?q=${encodeURIComponent(trimmed)}`
++        )
++        .then((res) => {
++          if (!cancelled) setLoaded({ key: trimmed, ids: new Set(res.ids), notes: res.notes ?? {} });
++        })
++        .catch(() => {
++          if (!cancelled) setLoaded({ key: trimmed, ids: new Set(), notes: {} });
++        })
++        .finally(() => {
++          if (!cancelled) setLoading(false);
++        });
++    }, delayMs);
++    return () => {
++      cancelled = true;
++      clearTimeout(timer);
++    };
++  }, [entity, trimmed, delayMs]);
++
++  // Ignore results that belong to an older search term.
++  const fresh = loaded !== null && loaded.key === trimmed;
++  return { ids: fresh ? loaded!.ids : NO_IDS, notes: fresh ? loaded!.notes : NO_NOTES, loading };
++}

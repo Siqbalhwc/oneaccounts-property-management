@@ -1,0 +1,28 @@
+diff --git a/backend/app/services/invoicing.py b/backend/app/services/invoicing.py
+index 8bdfc60..3c21024 100644
+--- a/backend/app/services/invoicing.py
++++ b/backend/app/services/invoicing.py
+@@ -215,7 +215,7 @@ def resync_current_month_invoice(supabase: Client, company_id: str, lease: dict)
+     """
+     Called right after a lease charge is added / ended / amount-changed.
+     If this lease already has an invoice for the CURRENT calendar month
+-    and it's still a draft (i.e. nobody has paid anything against it yet),
++    and it's still a draft or sent (i.e. nobody has paid anything against it yet),
+     fully recomputes that invoice from the lease's charges as they now
+     stand -- deletes and reinserts its line items, reverses its old
+     journal entry, and posts a fresh one for the corrected total.
+@@ -243,8 +243,12 @@ def resync_current_month_invoice(supabase: Client, company_id: str, lease: dict)
+     if not invoice:
+         return None
+     invoice = invoice[0]
+-    if invoice["status"] != "draft":
+-        return None  # already has a payment recorded -- don't touch it
++    # 'draft' = not yet sent; 'sent' = already sent to the tenant on WhatsApp.
++    # Both still have NO payment against them, so both may be recalculated
++    # (tenants often ask for a facility change after seeing the invoice).
++    # 'partial' / 'paid' have a payment recorded -- don't touch those.
++    if invoice["status"] not in ("draft", "sent"):
++        return None
+ 
+     charges = current_charges_with_earliest_start(supabase, lease["id"])
+ 

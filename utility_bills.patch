@@ -1,0 +1,1716 @@
+diff --git a/013_schema_patch_029_utility_bills.sql b/013_schema_patch_029_utility_bills.sql
+new file mode 100644
+index 0000000..715ebd9
+--- /dev/null
++++ b/013_schema_patch_029_utility_bills.sql
+@@ -0,0 +1,61 @@
++create table if not exists utility_bills (
++  id uuid primary key default uuid_generate_v4(),
++  company_id uuid not null references companies(id) on delete cascade,
++  lease_id uuid not null references leases(id) on delete cascade,
++  bill_month date not null,
++  label text not null,
++  label_key text not null,
++  amount numeric(14,2) not null check (amount >= 0),
++  bill_reference text,
++  previous_reading numeric(14,2),
++  current_reading numeric(14,2),
++  source text not null default 'excel_upload',
++  uploaded_by uuid references profiles(id) on delete set null,
++  created_at timestamptz not null default now(),
++  updated_at timestamptz not null default now(),
++  constraint utility_bills_month_is_first_day check (bill_month = date_trunc('month', bill_month)::date),
++  constraint utility_bills_one_per_lease_month_label unique (lease_id, bill_month, label_key)
++);
++
++create index if not exists idx_utility_bills_company_month on utility_bills(company_id, bill_month);
++create index if not exists idx_utility_bills_lease_month on utility_bills(lease_id, bill_month);
++
++alter table utility_bills enable row level security;
++
++drop policy if exists utility_bills_isolation on utility_bills;
++create policy utility_bills_isolation on utility_bills
++  for all
++  using (company_id = auth_company_id())
++  with check (company_id = auth_company_id());
++
++drop policy if exists utility_bills_lease_visible on utility_bills;
++create policy utility_bills_lease_visible on utility_bills
++  as restrictive
++  for all
++  using (exists (select 1 from leases l where l.id = utility_bills.lease_id));
++
++create or replace function utility_bills_check_company()
++returns trigger
++language plpgsql
++security definer
++set search_path = public
++as $$
++begin
++  if not exists (select 1 from leases where id = new.lease_id and company_id = new.company_id) then
++    raise exception 'utility bill company does not match the lease company';
++  end if;
++  return new;
++end;
++$$;
++
++drop trigger if exists trg_utility_bills_company on utility_bills;
++create trigger trg_utility_bills_company
++before insert or update of lease_id, company_id on utility_bills
++for each row execute function utility_bills_check_company();
++
++drop trigger if exists trg_utility_bills_updated_at on utility_bills;
++create trigger trg_utility_bills_updated_at
++before update on utility_bills
++for each row execute function set_updated_at();
++
++select 'utility_bills ready' as status, count(*) as rows_now from utility_bills;
+diff --git a/backend/app/main.py b/backend/app/main.py
+index 2bf10b3..c06924f 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -30,6 +30,7 @@ from app.routers import (
+     simple_resources,
+     staff_allocations,
+     team,
++    utility_bills,
+ )
+ 
+ app = FastAPI(title="Property Management API", version="0.1.0", redirect_slashes=False)
+@@ -115,6 +116,7 @@ app.include_router(financials.router, prefix=API_PREFIX, dependencies=_GUARD)
+ app.include_router(implementation.router, prefix=API_PREFIX)
+ app.include_router(access.router, prefix=API_PREFIX)
+ app.include_router(data_transfer.router, prefix=API_PREFIX, dependencies=_GUARD)
++app.include_router(utility_bills.router, prefix=API_PREFIX, dependencies=_GUARD)
+ 
+ 
+ @app.get("/")
+diff --git a/backend/app/routers/invoices.py b/backend/app/routers/invoices.py
+index b5f712c..eabf084 100644
+--- a/backend/app/routers/invoices.py
++++ b/backend/app/routers/invoices.py
+@@ -10,6 +10,7 @@ from app.core.deps import get_current_company_id, get_service_client, get_supaba
+ from app.services.invoice_batch import count_invoice_numbers, generate_batch, plan_generation
+ from app.services.invoicing import compute_prorated_charges, current_charges_with_earliest_start, post_invoice_journal
+ from app.services.phone import normalize_to_whatsapp
++from app.services.utility_bills import apply_utility_overrides, fetch_bills
+ 
+ router = APIRouter(prefix="/invoices", tags=["Invoices"])
+ 
+@@ -131,6 +132,11 @@ def generate_invoice_for_lease(
+     prorated_charges = compute_prorated_charges(charges, lease_start, lease_end, invoice_month, is_first_invoice)
+     if not prorated_charges:
+         return None
++    bills = fetch_bills(supabase, [lease["id"]], invoice_month).get(lease["id"], [])
++    if bills:
++        prorated_charges = apply_utility_overrides(prorated_charges, bills)
++        if not prorated_charges:
++            return None
+ 
+     total = sum(c["amount"] for c in prorated_charges)
+     invoice_number = generate_invoice_number(supabase, company_id, date.today())
+diff --git a/backend/app/routers/platform_admin.py b/backend/app/routers/platform_admin.py
+index 8289591..4658ab0 100644
+--- a/backend/app/routers/platform_admin.py
++++ b/backend/app/routers/platform_admin.py
+@@ -252,6 +252,7 @@ KNOWN_FEATURE_KEYS = {
+     "data_export": "Export data (CSV/PDF downloads)",
+     "data_import": "Bulk data import",
+     "whatsapp_invoicing": "WhatsApp invoice sending",
++    "utility_bills": "Utility bills Excel upload",
+ }
+ 
+ 
+diff --git a/backend/app/routers/utility_bills.py b/backend/app/routers/utility_bills.py
+new file mode 100644
+index 0000000..581b429
+--- /dev/null
++++ b/backend/app/routers/utility_bills.py
+@@ -0,0 +1,173 @@
++"""
++app/routers/utility_bills.py
++
++Monthly bill-basis charges (electricity, water, gas, ...) from Excel.
++All logic lives in services/utility_upload.py and services/utility_bills.py;
++this file only wires the endpoints, the permission checks and the response
++shapes.
++
++Permissions
++  * Every endpoint requires the "utility_bills" feature (on by default; a
++    platform admin can switch it off per company in Tower).
++  * Preview and Save require owner/admin, even when the optional Access
++    Control feature is off. With Access Control on, accountants and
++    auditors are also refused every POST by the central policy table.
++  * Every query runs through the caller's own RLS-scoped client, so only the
++    caller's own company (and, for building-scoped users, their buildings)
++    can ever be read or written.
++"""
++
++from datetime import date
++from io import BytesIO
++from typing import Optional
++
++from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
++from fastapi.responses import StreamingResponse
++from supabase import Client
++
++from app.core.deps import (
++    get_current_company_id,
++    get_current_user,
++    get_supabase,
++    require_feature,
++    require_owner_or_admin,
++)
++from app.services.invoice_batch import fetch_all, fetch_in
++from app.services.utility_upload import (
++    build_template,
++    commit_upload,
++    evaluate_upload,
++    month_start,
++    parse_month_value,
++    public_rows,
++    read_upload,
++)
++
++router = APIRouter(prefix="/utility-bills", tags=["Utility bills"])
++
++
++def _month(value: str) -> date:
++    try:
++        parsed = parse_month_value(value)
++    except ValueError as e:
++        raise HTTPException(status_code=400, detail=str(e))
++    if parsed is None:
++        raise HTTPException(status_code=400, detail="Please choose the bill month.")
++    return month_start(parsed)
++
++
++@router.get("/template")
++def download_template(
++    month: str = Query(..., description="Bill month, e.g. 2026-10"),
++    building_id: Optional[str] = Query(None),
++    supabase: Client = Depends(get_supabase),
++    _feature: None = Depends(require_feature("utility_bills")),
++):
++    bill_month = _month(month)
++    content = build_template(supabase, bill_month, building_id)
++    return StreamingResponse(
++        BytesIO(content),
++        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
++        headers={"Content-Disposition": f'attachment; filename="utility_bills_{bill_month.strftime("%Y_%m")}.xlsx"'},
++    )
++
++
++@router.post("/preview")
++def preview_upload(
++    month: str = Form(...),
++    file: UploadFile = File(...),
++    supabase: Client = Depends(get_supabase),
++    _admin: None = Depends(require_owner_or_admin),
++    _feature: None = Depends(require_feature("utility_bills")),
++):
++    """Reads the file and reports what WOULD happen. Writes nothing."""
++    bill_month = _month(month)
++    rows = read_upload(file.file.read())
++    ev = evaluate_upload(supabase, rows, bill_month)
++    return {
++        "month": str(bill_month),
++        "summary": ev["summary"],
++        "rows": public_rows(ev["rows"]),
++        "savable": ev["summary"]["update"] + ev["summary"]["stored"],
++    }
++
++
++@router.post("/commit")
++def commit_bills(
++    month: str = Form(...),
++    start: int = Form(0),
++    file: UploadFile = File(...),
++    supabase: Client = Depends(get_supabase),
++    company_id: str = Depends(get_current_company_id),
++    user: dict = Depends(get_current_user),
++    _admin: None = Depends(require_owner_or_admin),
++    _feature: None = Depends(require_feature("utility_bills")),
++):
++    """
++    Saves the valid rows and recalculates the affected draft/sent invoices.
++    If the file is too big to finish inside one request, `next_start` is set:
++    send the same file again with start=next_start to continue.
++    """
++    bill_month = _month(month)
++    if start < 0:
++        raise HTTPException(status_code=400, detail="start cannot be negative.")
++    rows = read_upload(file.file.read())
++    return commit_upload(supabase, company_id, user["user_id"], rows, bill_month, start=start)
++
++
++@router.get("")
++def list_bills(
++    month: str = Query(...),
++    building_id: Optional[str] = Query(None),
++    supabase: Client = Depends(get_supabase),
++    _feature: None = Depends(require_feature("utility_bills")),
++):
++    """Saved bills for one month, with the building, room and invoice status."""
++    bill_month = _month(month)
++    bills = fetch_all(
++        lambda: supabase.table("utility_bills").select("*").eq("bill_month", str(bill_month)).order("id")
++    )
++    if not bills:
++        return []
++    lease_ids = list({b["lease_id"] for b in bills})
++    leases = {l["id"]: l for l in fetch_in(supabase, "leases", "id, room_id, tenant_id", "id", lease_ids)}
++    rooms = {
++        r["id"]: r
++        for r in fetch_in(supabase, "rooms", "id, room_number, building_id", "id", list({l["room_id"] for l in leases.values()}))
++    }
++    buildings = {
++        b["id"]: b["name"]
++        for b in fetch_in(supabase, "buildings", "id, name", "id", list({r["building_id"] for r in rooms.values() if r.get("building_id")}))
++    }
++    tenants = {t["id"]: t["full_name"] for t in fetch_in(supabase, "tenants", "id, full_name", "id", list({l["tenant_id"] for l in leases.values()}))}
++    invoices = {
++        i["lease_id"]: i["status"]
++        for i in fetch_in(
++            supabase, "invoices", "id, lease_id, status", "lease_id", lease_ids,
++            extra=lambda q: q.eq("invoice_month", str(bill_month)),
++        )
++    }
++
++    out = []
++    for b in bills:
++        lease = leases.get(b["lease_id"])
++        if lease is None:
++            continue  # a lease this user may not see (building scope): its bill is hidden too
++        room = rooms.get(lease["room_id"]) or {}
++        if building_id and room.get("building_id") != building_id:
++            continue
++        out.append(
++            {
++                "id": b["id"],
++                "building": buildings.get(room.get("building_id"), ""),
++                "room": room.get("room_number", ""),
++                "tenant": tenants.get(lease["tenant_id"], ""),
++                "utility": b["label"],
++                "amount": float(b["amount"]),
++                "bill_reference": b.get("bill_reference"),
++                "invoice_status": invoices.get(b["lease_id"]),
++                "saved_at": b.get("updated_at") or b.get("created_at"),
++            }
++        )
++    out.sort(key=lambda r: (r["building"], str(r["room"]), r["utility"]))
++    return out
+diff --git a/backend/app/services/invoice_batch.py b/backend/app/services/invoice_batch.py
+index 9346990..db19a70 100644
+--- a/backend/app/services/invoice_batch.py
++++ b/backend/app/services/invoice_batch.py
+@@ -41,6 +41,7 @@ from supabase import Client
+ 
+ from app.services.invoicing import compute_prorated_charges, merge_current_charges
+ from app.services.ledger import UnbalancedJournalEntry
++from app.services.utility_bills import apply_utility_overrides, fetch_bills
+ 
+ PAGE_SIZE = 1000        # PostgREST silently caps any read at 1000 rows
+ IN_CHUNK = 100          # max ids per .in_() filter (keeps URL length safe)
+@@ -218,6 +219,7 @@ def _generate_slice_bulk(
+     tenants = {t["id"]: t for t in fetch_in(supabase, "tenants", "id, full_name", "id", tenant_ids)}
+ 
+     seq = count_invoice_numbers(supabase, company_id, date.today())
++    bills_by_lease = fetch_bills(supabase, lease_ids, invoice_month)
+ 
+     invoice_rows: list[dict] = []
+     planned: dict = {}  # lease_id -> {"prorated": [...], "total": float}
+@@ -240,6 +242,11 @@ def _generate_slice_bulk(
+         if not prorated:
+             result["skipped"].append(lid)
+             continue
++        if bills_by_lease.get(lid):
++            prorated = apply_utility_overrides(prorated, bills_by_lease[lid])
++            if not prorated:
++                result["skipped"].append(lid)
++                continue
+         total = sum(c["amount"] for c in prorated)
+         if round(total, 2) == 0:
+             result["failed"].append({"lease_id": lid, "error": "Invoice total is zero — nothing to bill."})
+diff --git a/backend/app/services/invoicing.py b/backend/app/services/invoicing.py
+index 3c21024..20df39d 100644
+--- a/backend/app/services/invoicing.py
++++ b/backend/app/services/invoicing.py
+@@ -15,6 +15,11 @@ from typing import Optional
+ from supabase import Client
+ 
+ from app.services.ledger import get_account_for_charge_label, get_account_id, post_journal_entry, reverse_journal_entry
++from app.services.utility_bills import apply_utility_overrides, fetch_bills
++
++# An invoice can be recalculated only while nobody has paid against it:
++# draft = not sent yet, sent = sent to the tenant (e.g. on WhatsApp).
++EDITABLE_INVOICE_STATUSES = ("draft", "sent")
+ 
+ 
+ def current_charges_with_earliest_start(supabase: Client, lease_id: str) -> list[dict]:
+@@ -211,45 +216,27 @@ def resolve_room_owner_safe(supabase: Client, room_id: str) -> Optional[str]:
+     return resolve_room_owner(supabase, room_id)
+ 
+ 
+-def resync_current_month_invoice(supabase: Client, company_id: str, lease: dict) -> Optional[dict]:
++def _recalculate_invoice(
++    supabase: Client,
++    company_id: str,
++    lease: dict,
++    invoice: dict,
++    month_start: date,
++    entry_date: date,
++    reason: str,
++) -> dict:
+     """
+-    Called right after a lease charge is added / ended / amount-changed.
+-    If this lease already has an invoice for the CURRENT calendar month
+-    and it's still a draft or sent (i.e. nobody has paid anything against it yet),
+-    fully recomputes that invoice from the lease's charges as they now
+-    stand -- deletes and reinserts its line items, reverses its old
+-    journal entry, and posts a fresh one for the corrected total.
+-
+-    Deliberately does NOT touch an invoice that already has a payment
+-    recorded (status 'partial' or 'paid') -- reworking a bill someone has
+-    already started paying against is a judgement call for a human, not
+-    something to silently rewrite. In that case this returns None and the
+-    change only takes effect starting with the next invoice generated.
+-
+-    Returns the updated invoice dict, or None if there was nothing to
+-    resync (no current-month invoice yet, or it's not a draft anymore).
++    The shared recalculation used by BOTH the lease-charge-edit path
++    (resync_current_month_invoice) and the utility-bill path
++    (resync_invoice_for_month): recompute the invoice from the lease's
++    charges as they now stand, apply any uploaded utility bills for that
++    month on top, reverse every live journal entry for the invoice, replace
++    its line items and post the corrected entry.
++
++    entry_date dates BOTH the reversal and the new entry. The charge-edit
++    path passes today (unchanged behaviour); the utility path passes the
++    invoice's own month so receivable stays in the right period.
+     """
+-    today = date.today()
+-    month_start = today.replace(day=1)
+-
+-    invoice = (
+-        supabase.table("invoices")
+-        .select("*")
+-        .eq("lease_id", lease["id"])
+-        .eq("invoice_month", str(month_start))
+-        .execute()
+-        .data
+-    )
+-    if not invoice:
+-        return None
+-    invoice = invoice[0]
+-    # 'draft' = not yet sent; 'sent' = already sent to the tenant on WhatsApp.
+-    # Both still have NO payment against them, so both may be recalculated
+-    # (tenants often ask for a facility change after seeing the invoice).
+-    # 'partial' / 'paid' have a payment recorded -- don't touch those.
+-    if invoice["status"] not in ("draft", "sent"):
+-        return None
+-
+     charges = current_charges_with_earliest_start(supabase, lease["id"])
+ 
+     prior_invoices = (
+@@ -265,26 +252,32 @@ def resync_current_month_invoice(supabase: Client, company_id: str, lease: dict)
+     lease_start = date.fromisoformat(str(lease["start_date"]))
+     lease_end = date.fromisoformat(str(lease["end_date"]))
+     prorated = compute_prorated_charges(charges, lease_start, lease_end, month_start, is_first_invoice)
+-
+-    # Reverse EVERY currently-live journal entry for this invoice before
+-    # re-posting -- not just "the" entry, since a second resync would
+-    # otherwise find both the correction from last time AND its own
+-    # now-live reversal-of-the-original sitting there, and only cancel
+-    # one of them. Reversing all live entries first guarantees a clean
+-    # zero starting point every time, no matter how many times this runs.
+-    # Entries are never edited in place anywhere in this system, only
+-    # reversed with an equal-and-opposite entry (see reference doc).
++    if prorated:
++        bills = fetch_bills(supabase, [lease["id"]], month_start).get(lease["id"], [])
++        if bills:
++            prorated = apply_utility_overrides(prorated, bills)
++
++    # Reverse every currently-live ORIGINAL journal entry for this invoice
++    # before re-posting. "Original" means an entry that is not itself a
++    # reversal (reversal_of is empty): a reversal entry is the equal-and-
++    # opposite that already cancels its original, so reversing it again
++    # would simply put the cancelled amount back into the ledger (the
++    # ledger sums every entry, reversals included). Reversing only the
++    # originals gives a clean zero starting point no matter how many times
++    # this runs. Entries are never edited in place anywhere in this
++    # system, only reversed (see reference doc).
+     live_entries = (
+         supabase.table("journal_entries")
+         .select("id")
+         .eq("source_type", "invoice")
+         .eq("source_id", invoice["id"])
+         .eq("status", "posted")
++        .is_("reversal_of", "null")
+         .execute()
+         .data
+     )
+     for entry in live_entries:
+-        reverse_journal_entry(supabase, company_id, entry["id"], reason="Lease charges changed — invoice recalculated")
++        reverse_journal_entry(supabase, company_id, entry["id"], reason=reason, entry_date=str(entry_date))
+ 
+     supabase.table("invoice_line_items").delete().eq("invoice_id", invoice["id"]).execute()
+     if prorated:
+@@ -301,7 +294,7 @@ def resync_current_month_invoice(supabase: Client, company_id: str, lease: dict)
+             ]
+         ).execute()
+ 
+-    new_total = post_invoice_journal(supabase, company_id, invoice, lease, prorated, entry_date=today) if prorated else 0.0
++    new_total = post_invoice_journal(supabase, company_id, invoice, lease, prorated, entry_date=entry_date) if prorated else 0.0
+ 
+     updated = (
+         supabase.table("invoices")
+@@ -311,3 +304,76 @@ def resync_current_month_invoice(supabase: Client, company_id: str, lease: dict)
+         .data[0]
+     )
+     return updated
++
++
++def resync_current_month_invoice(supabase: Client, company_id: str, lease: dict) -> Optional[dict]:
++    """
++    Called right after a lease charge is added / ended / amount-changed.
++    If this lease already has an invoice for the CURRENT calendar month
++    and it's still a draft or sent (i.e. nobody has paid anything against it yet),
++    fully recomputes that invoice from the lease's charges as they now
++    stand -- deletes and reinserts its line items, reverses its old
++    journal entry, and posts a fresh one for the corrected total.
++
++    Deliberately does NOT touch an invoice that already has a payment
++    recorded (status 'partial' or 'paid') -- reworking a bill someone has
++    already started paying against is a judgement call for a human, not
++    something to silently rewrite. In that case this returns None and the
++    change only takes effect starting with the next invoice generated.
++
++    Returns the updated invoice dict, or None if there was nothing to
++    resync (no current-month invoice yet, or it's not editable anymore).
++    """
++    today = date.today()
++    month_start = today.replace(day=1)
++
++    invoice = (
++        supabase.table("invoices")
++        .select("*")
++        .eq("lease_id", lease["id"])
++        .eq("invoice_month", str(month_start))
++        .execute()
++        .data
++    )
++    if not invoice:
++        return None
++    invoice = invoice[0]
++    # 'draft' = not yet sent; 'sent' = already sent to the tenant on WhatsApp.
++    # Both still have NO payment against them, so both may be recalculated
++    # (tenants often ask for a facility change after seeing the invoice).
++    # 'partial' / 'paid' have a payment recorded -- don't touch those.
++    if invoice["status"] not in EDITABLE_INVOICE_STATUSES:
++        return None
++
++    return _recalculate_invoice(
++        supabase, company_id, lease, invoice, month_start, today, "Lease charges changed — invoice recalculated"
++    )
++
++
++def resync_invoice_for_month(supabase: Client, company_id: str, lease: dict, month_start: date) -> Optional[dict]:
++    """
++    Same recalculation, for ANY month (used after a utility bill upload,
++    where the bill is usually for last month). Only a draft or sent invoice
++    is touched; returns None when there is no invoice for that month or a
++    payment has already been recorded against it.
++
++    The reversal and the corrected entry are both dated the invoice's own
++    month, so receivable, the ledger and the reports as-of any date stay
++    correct for the period the invoice belongs to.
++    """
++    invoice = (
++        supabase.table("invoices")
++        .select("*")
++        .eq("lease_id", lease["id"])
++        .eq("invoice_month", str(month_start))
++        .execute()
++        .data
++    )
++    if not invoice:
++        return None
++    invoice = invoice[0]
++    if invoice["status"] not in EDITABLE_INVOICE_STATUSES:
++        return None
++    return _recalculate_invoice(
++        supabase, company_id, lease, invoice, month_start, month_start, "Utility bill updated — invoice recalculated"
++    )
+diff --git a/backend/app/services/ledger.py b/backend/app/services/ledger.py
+index b514a8a..265a934 100644
+--- a/backend/app/services/ledger.py
++++ b/backend/app/services/ledger.py
+@@ -268,7 +268,13 @@ def post_journal_entry(
+     return entry
+ 
+ 
+-def reverse_journal_entry(supabase: Client, company_id: str, entry_id: str, reason: Optional[str] = None) -> dict:
++def reverse_journal_entry(
++    supabase: Client,
++    company_id: str,
++    entry_id: str,
++    reason: Optional[str] = None,
++    entry_date: Optional[str] = None,
++) -> dict:
+     """
+     Posts an equal-and-opposite entry to cancel a mistaken one, rather than
+     editing or deleting the original -- posted entries are never touched
+@@ -313,7 +319,7 @@ def reverse_journal_entry(supabase: Client, company_id: str, entry_id: str, reas
+     reversal = post_journal_entry(
+         supabase,
+         company_id=company_id,
+-        entry_date=str(_date.today()),
++        entry_date=str(entry_date or _date.today()),
+         source_type=original.data["source_type"],
+         source_id=original.data["source_id"],
+         description=f"Reversal - {original_description}",
+diff --git a/backend/app/services/utility_bills.py b/backend/app/services/utility_bills.py
+new file mode 100644
+index 0000000..bc8377a
+--- /dev/null
++++ b/backend/app/services/utility_bills.py
+@@ -0,0 +1,114 @@
++"""
++Bill-basis charges (electricity, water, gas -- anything whose amount changes
++every month) that arrive from an Excel upload.
++
++WHY THIS IS A SEPARATE TABLE (utility_bills) AND NOT lease_charges
++lease_charges is versioned and prorated by day: editing a charge closes one
++row and opens another. A monthly meter bill is a one-month fact, not a change
++to the lease, so storing it there would rewrite lease history every month and
++fight the proration rules. utility_bills holds one row per
++lease + month + utility, and nothing about the lease itself changes.
++
++THE ONE RULE EVERY INVOICE PATH FOLLOWS
++When an invoice for (lease, month) is built -- bulk generation, single
++generation, lease-creation first invoice, a charge-edit recalculation, or a
++utility upload -- the lease's prorated charge lines are computed exactly as
++before, then apply_utility_overrides() is applied on top:
++  * a bill for a utility the lease already charges REPLACES that line's
++    amount (never prorated; the bill is the bill);
++  * a bill for a utility the lease does not charge is ADDED as a new line;
++  * a bill of 0 removes that line for the month;
++  * no bill for the month -> the lease amount stays, exactly as today.
++
++This module has no dependency on invoicing.py or invoice_batch.py (they both
++import it), so there is no circular import.
++"""
++
++from collections import defaultdict
++from datetime import date
++from typing import Optional
++
++from supabase import Client
++
++# Words that make no difference to WHICH utility a label is, so
++# "Electricity", "Electricity bill" and "Electricity Bill" are one utility.
++NOISE_WORDS = {"bill", "bills"}
++
++# The utilities the Excel template pre-fills for each lease. Anything else can
++# still be uploaded by typing a row by hand.
++UTILITY_KEYS = {"electricity", "electric", "water", "gas"}
++
++FETCH_CHUNK = 50  # leases per query; 50 leases x a few bills stays far below PostgREST's 1000-row cap
++
++
++def label_key(label) -> str:
++    """Case/spacing-insensitive identity of a charge label, ignoring 'bill'."""
++    words = [w for w in " ".join(str(label or "").split()).lower().split(" ") if w]
++    core = [w for w in words if w not in NOISE_WORDS]
++    return " ".join(core or words)
++
++
++def is_utility_label(label) -> bool:
++    return label_key(label) in UTILITY_KEYS
++
++
++def apply_utility_overrides(lines: list[dict], bills: list[dict]) -> list[dict]:
++    """
++    lines: prorated invoice lines  [{label, amount, show_on_invoice}, ...]
++    bills: [{label, label_key?, amount}, ...] for the same lease and month.
++    Returns a NEW list; the inputs are not modified. Pure function.
++    """
++    result = [dict(l) for l in lines]
++    drop: set[int] = set()
++    for bill in bills:
++        key = bill.get("label_key") or label_key(bill["label"])
++        amount = round(float(bill["amount"]), 2)
++        matches = [i for i, l in enumerate(result) if i not in drop and label_key(l["label"]) == key]
++        if matches:
++            first = matches[0]
++            result[first]["amount"] = amount
++            for extra in matches[1:]:
++                drop.add(extra)  # two lines for one utility (e.g. "Gas" + "Gas Bill"): the bill is the total
++            if amount <= 0:
++                drop.add(first)
++        elif amount > 0:
++            result.append({"label": bill["label"], "amount": amount, "show_on_invoice": True})
++    return [l for i, l in enumerate(result) if i not in drop]
++
++
++def _table_missing(error: Exception) -> bool:
++    text = str(error)
++    return "utility_bills" in text and (
++        "does not exist" in text or "PGRST205" in text or "schema cache" in text or "42P01" in text
++    )
++
++
++def fetch_bills(supabase: Client, lease_ids: list[str], bill_month: date) -> dict[str, list[dict]]:
++    """
++    {lease_id: [{label, label_key, amount}, ...]} for one month.
++    Runs through the caller's own RLS-scoped client, so it can only ever see
++    the caller's own company's bills. If the utility_bills table has not been
++    created yet (SQL migration not run), returns {} so invoicing keeps working
++    exactly as before; any other error is raised rather than hidden, because
++    silently ignoring a real failure would produce wrong invoices.
++    """
++    out: dict[str, list[dict]] = defaultdict(list)
++    ids = list(dict.fromkeys(lease_ids))
++    for i in range(0, len(ids), FETCH_CHUNK):
++        chunk = ids[i : i + FETCH_CHUNK]
++        try:
++            rows = (
++                supabase.table("utility_bills")
++                .select("lease_id, label, label_key, amount")
++                .eq("bill_month", str(bill_month))
++                .in_("lease_id", chunk)
++                .execute()
++                .data
++            )
++        except Exception as e:
++            if _table_missing(e):
++                return {}
++            raise
++        for r in rows:
++            out[r["lease_id"]].append(r)
++    return out
+diff --git a/backend/app/services/utility_upload.py b/backend/app/services/utility_upload.py
+new file mode 100644
+index 0000000..b2d48ff
+--- /dev/null
++++ b/backend/app/services/utility_upload.py
+@@ -0,0 +1,566 @@
++"""
++Excel upload of monthly bill-basis charges (electricity, water, gas, ...).
++
++FLOW (all of it runs here in the backend; the browser only shows results)
++  1. build_template()  -- an .xlsx pre-filled with every active lease's
++                          building, room, tenant and its own utility names;
++                          the user only types amounts.
++  2. evaluate_upload() -- reads the uploaded file and decides, row by row,
++                          exactly what WOULD happen. Writes nothing.
++  3. commit_upload()   -- repeats step 2 against fresh data, then saves the
++                          valid rows and recalculates the affected invoices.
++
++SAFETY
++  * Every query goes through the caller's own RLS-scoped Supabase client, so
++    a row can only ever match a lease in the caller's company (and, for a
++    building-scoped user, only their buildings). Rooms outside that simply
++    "aren't found". The company is never read from the file.
++  * Only a draft or sent invoice is ever recalculated. An invoice with a
++    payment recorded is reported as "locked" and left completely alone.
++  * Nothing here edits a posted journal entry: the invoice recalculation
++    reuses invoicing.resync_invoice_for_month, which reverses and reposts.
++  * A row that cannot be matched leaves its lease exactly as it was.
++  * Saving is idempotent: the same file can be uploaded again safely; a bill
++    for the same lease + month + utility is replaced, not duplicated.
++"""
++
++import math
++import re
++import time
++from collections import defaultdict
++from datetime import date, datetime
++from io import BytesIO
++from typing import Any, Optional
++
++from fastapi import HTTPException
++from openpyxl import Workbook, load_workbook
++from openpyxl.styles import Alignment, Font, PatternFill
++from supabase import Client
++
++from app.crud.generic import write_audit_log
++from app.services.invoice_batch import fetch_all, fetch_in
++from app.services.invoicing import EDITABLE_INVOICE_STATUSES, merge_current_charges, resync_invoice_for_month
++from app.services.utility_bills import fetch_bills, is_utility_label, label_key
++
++SHEET_NAME = "Utility bills"
++MAX_ROWS = 5000
++MAX_BYTES = 5 * 1024 * 1024
++COMMIT_TIME_BUDGET = 18.0  # seconds; Vercel kills the function at 30
++
++READ_COLUMNS = [
++    "building_name",
++    "room_number",
++    "utility",
++    "bill_month",
++    "amount",
++    "bill_reference",
++    "previous_reading",
++    "current_reading",
++]
++INFO_COLUMNS = ["tenant", "current_lease_amount"]
++TEMPLATE_COLUMNS = ["building_name", "room_number", "tenant", "utility", "bill_month", "amount", "bill_reference", "previous_reading", "current_reading", "current_lease_amount"]
++REQUIRED_COLUMNS = ["building_name", "room_number", "utility", "amount"]
++HEADER_ALIASES = {
++    "building": "building_name",
++    "room": "room_number",
++    "room_no": "room_number",
++    "label": "utility",
++    "charge": "utility",
++    "bill": "amount",
++    "bill_amount": "amount",
++    "month": "bill_month",
++    "reference": "bill_reference",
++    "ref": "bill_reference",
++}
++
++MONTH_NAMES = {
++    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
++    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
++}
++
++
++# --------------------------------------------------------------------------
++# Small parsing helpers
++# --------------------------------------------------------------------------
++def norm_text(value: Any) -> str:
++    if value is None:
++        return ""
++    if isinstance(value, float) and value.is_integer():
++        value = int(value)
++    return " ".join(str(value).split())
++
++
++def norm_key(value: Any) -> str:
++    return norm_text(value).lower()
++
++
++def month_start(d: date) -> date:
++    return date(d.year, d.month, 1)
++
++
++def parse_month_value(value: Any) -> Optional[date]:
++    """Blank -> None. Accepts a real Excel date, 2026-10, 2026-10-15, 10/2026,
++    'October 2026' or 'Oct 2026'. Anything else raises ValueError."""
++    if value is None or str(value).strip() == "":
++        return None
++    if isinstance(value, (datetime, date)):
++        return date(value.year, value.month, 1)
++    s = str(value).strip()
++    m = re.match(r"^(\d{4})-(\d{1,2})(?:-\d{1,2})?$", s)
++    if m and 1 <= int(m.group(2)) <= 12:
++        return date(int(m.group(1)), int(m.group(2)), 1)
++    m = re.match(r"^(\d{1,2})/(\d{4})$", s)
++    if m and 1 <= int(m.group(1)) <= 12:
++        return date(int(m.group(2)), int(m.group(1)), 1)
++    m = re.match(r"^([A-Za-z]+)[ ,.-]*(\d{4})$", s)
++    if m:
++        name = m.group(1).lower()
++        for full, num in MONTH_NAMES.items():
++            if name == full or (len(name) >= 3 and full.startswith(name)):
++                return date(int(m.group(2)), num, 1)
++    raise ValueError(f'Could not read the month "{s}". Use a format like 2026-10.')
++
++
++def parse_number(value: Any, what: str) -> Optional[float]:
++    """Blank -> None. Otherwise a non-negative number rounded to 2 places."""
++    if value is None or (isinstance(value, str) and value.strip() == ""):
++        return None
++    if isinstance(value, bool):
++        raise ValueError(f"{what} must be a number.")
++    if isinstance(value, (int, float)):
++        n = float(value)
++    else:
++        text = re.sub(r"(?i)\brs\.?\b|pkr", "", str(value)).replace(",", "").strip()
++        try:
++            n = float(text)
++        except ValueError:
++            raise ValueError(f"{what} must be a number.")
++    if not math.isfinite(n):
++        raise ValueError(f"{what} must be a number.")
++    if n < 0:
++        raise ValueError(f"{what} cannot be negative.")
++    if n > 1_000_000_000:
++        raise ValueError(f"{what} is unrealistically large.")
++    return round(n, 2)
++
++
++def _natural(value: str):
++    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", value or "")]
++
++
++# --------------------------------------------------------------------------
++# Template
++# --------------------------------------------------------------------------
++def build_template(supabase: Client, bill_month: date, building_id: Optional[str]) -> bytes:
++    buildings = fetch_all(lambda: supabase.table("buildings").select("id, name").order("id"))
++    building_name = {b["id"]: b["name"] for b in buildings}
++    rooms_q = lambda: supabase.table("rooms").select("id, room_number, building_id").order("id")
++    if building_id:
++        rooms = fetch_all(lambda: rooms_q().eq("building_id", building_id))
++    else:
++        rooms = fetch_all(rooms_q)
++    room_by_id = {r["id"]: r for r in rooms}
++
++    leases = fetch_in(
++        supabase, "leases", "id, room_id, tenant_id, status", "room_id", list(room_by_id),
++        extra=lambda q: q.eq("status", "active"),
++    )
++    lease_ids = [l["id"] for l in leases]
++    tenants = {t["id"]: t["full_name"] for t in fetch_in(supabase, "tenants", "id, full_name", "id", list({l["tenant_id"] for l in leases}))}
++    charges_by_lease: dict = defaultdict(list)
++    for c in fetch_in(supabase, "lease_charges", "*", "lease_id", lease_ids):
++        charges_by_lease[c["lease_id"]].append(c)
++    existing = fetch_bills(supabase, lease_ids, bill_month)
++
++    rows = []
++    for lease in leases:
++        room = room_by_id.get(lease["room_id"])
++        if not room:
++            continue
++        bills = {b["label_key"]: float(b["amount"]) for b in existing.get(lease["id"], [])}
++        for charge in merge_current_charges(charges_by_lease.get(lease["id"], [])):
++            if not is_utility_label(charge["label"]):
++                continue
++            rows.append(
++                (
++                    building_name.get(room["building_id"], ""),
++                    str(room["room_number"]),
++                    tenants.get(lease["tenant_id"], ""),
++                    charge["label"],
++                    float(charge["amount"]),
++                    bills.get(label_key(charge["label"])),
++                )
++            )
++    rows.sort(key=lambda r: (_natural(r[0]), _natural(r[1]), r[3].lower()))
++
++    wb = Workbook()
++    ws = wb.active
++    ws.title = SHEET_NAME
++    ws.append(TEMPLATE_COLUMNS)
++    head_fill = PatternFill("solid", fgColor="0F5C63")
++    info_fill = PatternFill("solid", fgColor="7A8790")
++    for idx, cell in enumerate(ws[1], start=1):
++        cell.font = Font(bold=True, color="FFFFFF")
++        cell.fill = info_fill if TEMPLATE_COLUMNS[idx - 1] in INFO_COLUMNS else head_fill
++        cell.alignment = Alignment(vertical="center")
++    month_text = bill_month.strftime("%Y-%m")
++    for b, r, tenant, utility, lease_amt, bill in rows:
++        ws.append([b, r, tenant, utility, month_text, bill, None, None, None, lease_amt])
++    for col, width in zip("ABCDEFGHIJ", (22, 14, 26, 22, 12, 14, 18, 16, 16, 20)):
++        ws.column_dimensions[col].width = width
++    ws.freeze_panes = "A2"
++    for row in ws.iter_rows(min_row=2, min_col=2, max_col=2):
++        for cell in row:
++            cell.number_format = "@"
++
++    guide = wb.create_sheet("Instructions")
++    for line in [
++        "How to use this sheet",
++        "1. Type the bill in the 'amount' column for each row. Leave 'amount' blank to leave that row unchanged.",
++        "2. Do not change building_name, room_number, utility or bill_month. The grey columns are for your information only.",
++        "3. To bill a utility the lease does not charge yet, add a row with the building, room, utility name and amount.",
++        "4. An amount of 0 removes that charge from the month's invoice.",
++        "5. bill_reference, previous_reading and current_reading are optional.",
++        "6. Uploading the same month again replaces the earlier amounts.",
++        "7. Invoices that already have a payment recorded are never changed.",
++    ]:
++        guide.append([line])
++    guide.column_dimensions["A"].width = 110
++    guide["A1"].font = Font(bold=True)
++
++    buf = BytesIO()
++    wb.save(buf)
++    return buf.getvalue()
++
++
++# --------------------------------------------------------------------------
++# Reading the uploaded file
++# --------------------------------------------------------------------------
++def read_upload(content: bytes) -> list[dict]:
++    if not content:
++        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
++    if len(content) > MAX_BYTES:
++        raise HTTPException(status_code=400, detail="That file is too large (limit 5 MB). Split it by building.")
++    try:
++        wb = load_workbook(BytesIO(content), data_only=True, read_only=True)
++    except Exception:
++        raise HTTPException(status_code=400, detail="Could not read that file. Please upload the .xlsx template.")
++    ws = wb[SHEET_NAME] if SHEET_NAME in wb.sheetnames else wb[wb.sheetnames[0]]
++    raw = list(ws.iter_rows(values_only=True))
++    if not raw:
++        raise HTTPException(status_code=400, detail="The file has no rows.")
++
++    headers = []
++    for h in raw[0]:
++        key = norm_key(h).replace(" ", "_").replace("-", "_")
++        headers.append(HEADER_ALIASES.get(key, key))
++    missing = [c for c in REQUIRED_COLUMNS if c not in headers]
++    if missing:
++        raise HTTPException(
++            status_code=400,
++            detail="The file is missing these columns: " + ", ".join(missing) + ". Please use the downloaded template.",
++        )
++    out = []
++    for offset, values in enumerate(raw[1:], start=2):
++        if all(v is None or str(v).strip() == "" for v in values):
++            continue
++        out.append({"_row": offset, **{h: v for h, v in zip(headers, values) if h}})
++        if len(out) > MAX_ROWS:
++            raise HTTPException(status_code=400, detail=f"Too many rows (limit {MAX_ROWS}). Split the file by building.")
++    return out
++
++
++# --------------------------------------------------------------------------
++# Evaluation (no writes)
++# --------------------------------------------------------------------------
++def evaluate_upload(supabase: Client, rows: list[dict], bill_month: date) -> dict:
++    """
++    Decides what would happen to each row. Returns
++      {"rows": [...], "groups": {lease_id: {...}}, "summary": {...}}
++    Row outcomes: update | stored | locked | error | blank.
++    """
++    wanted_buildings = {norm_key(r.get("building_name")) for r in rows if norm_text(r.get("building_name"))}
++    buildings = fetch_all(lambda: supabase.table("buildings").select("id, name").order("id"))
++    buildings_by_key: dict = defaultdict(list)
++    for b in buildings:
++        if norm_key(b["name"]) in wanted_buildings:
++            buildings_by_key[norm_key(b["name"])].append(b)
++    building_ids = [b["id"] for lst in buildings_by_key.values() for b in lst]
++
++    rooms = fetch_in(supabase, "rooms", "id, room_number, building_id", "building_id", building_ids)
++    rooms_by_key: dict = defaultdict(list)
++    for r in rooms:
++        rooms_by_key[(r["building_id"], norm_key(r["room_number"]))].append(r)
++
++    leases = fetch_in(
++        supabase, "leases", "*", "room_id", [r["id"] for r in rooms], extra=lambda q: q.eq("status", "active")
++    )
++    leases_by_room: dict = defaultdict(list)
++    for l in leases:
++        leases_by_room[l["room_id"]].append(l)
++    lease_ids = [l["id"] for l in leases]
++
++    tenants = {t["id"]: t["full_name"] for t in fetch_in(supabase, "tenants", "id, full_name", "id", list({l["tenant_id"] for l in leases}))}
++    charges_by_lease: dict = defaultdict(list)
++    for c in fetch_in(supabase, "lease_charges", "*", "lease_id", lease_ids):
++        charges_by_lease[c["lease_id"]].append(c)
++    invoices = {
++        i["lease_id"]: i
++        for i in fetch_in(
++            supabase, "invoices", "id, lease_id, status, total_amount, invoice_month", "lease_id", lease_ids,
++            extra=lambda q: q.eq("invoice_month", str(bill_month)),
++        )
++    }
++    existing_bills = fetch_bills(supabase, lease_ids, bill_month)
++    mapped_labels = {
++        m["label"] for m in fetch_all(lambda: supabase.table("charge_type_accounts").select("id, label").order("id"))
++    }
++    building_name_by_id = {b["id"]: b["name"] for b in buildings}
++    room_by_id = {r["id"]: r for r in rooms}
++
++    out_rows: list[dict] = []
++    groups: dict = {}
++    seen: dict = {}
++    for src in rows:
++        n = src["_row"]
++        entry: dict = {
++            "row": n,
++            "building": norm_text(src.get("building_name")),
++            "room": norm_text(src.get("room_number")),
++            "tenant": "",
++            "utility": norm_text(src.get("utility")),
++            "lease_amount": None,
++            "amount": None,
++            "invoice_status": None,
++            "outcome": "error",
++            "message": "",
++            "warnings": [],
++        }
++        out_rows.append(entry)
++
++        def fail(msg: str) -> None:
++            entry["outcome"] = "error"
++            entry["message"] = msg
++
++        try:
++            amount = parse_number(src.get("amount"), "Amount")
++            prev_reading = parse_number(src.get("previous_reading"), "Previous reading")
++            curr_reading = parse_number(src.get("current_reading"), "Current reading")
++            row_month = parse_month_value(src.get("bill_month"))
++        except ValueError as e:
++            fail(str(e))
++            continue
++        if amount is None:
++            entry["outcome"] = "blank"
++            entry["message"] = "No amount entered, left unchanged."
++            continue
++        entry["amount"] = amount
++        if not entry["building"] or not entry["room"] or not entry["utility"]:
++            fail("Building, room and utility are all required.")
++            continue
++        if row_month is not None and row_month != bill_month:
++            fail(f"This row is for {row_month.strftime('%B %Y')}, but you selected {bill_month.strftime('%B %Y')}.")
++            continue
++
++        blds = buildings_by_key.get(norm_key(entry["building"]), [])
++        if not blds:
++            fail("Building not found. The lease stays as it is.")
++            continue
++        candidate_rooms = [r for b in blds for r in rooms_by_key.get((b["id"], norm_key(entry["room"])), [])]
++        if not candidate_rooms:
++            fail("Room not found in that building. The lease stays as it is.")
++            continue
++        room_leases = [l for r in candidate_rooms for l in leases_by_room.get(r["id"], [])]
++        if not room_leases:
++            fail("No active lease on this room. Nothing changes.")
++            continue
++        if len(room_leases) > 1:
++            fail("More than one active lease on this room. Fix the room's leases first.")
++            continue
++        lease = room_leases[0]
++        entry["tenant"] = tenants.get(lease["tenant_id"], "")
++
++        key = label_key(entry["utility"])
++        current = merge_current_charges(charges_by_lease.get(lease["id"], []))
++        matches = [c for c in current if label_key(c["label"]) == key]
++        match_labels = sorted({c["label"] for c in matches})
++        if len(match_labels) > 1:
++            fail("This lease has more than one charge for this utility (" + ", ".join(match_labels) + "). Please tidy the lease first.")
++            continue
++        if matches:
++            resolved_label = matches[0]["label"]
++            entry["lease_amount"] = float(matches[0]["amount"])
++        else:
++            resolved_label = entry["utility"]
++            if resolved_label not in mapped_labels:
++                entry["warnings"].append(
++                    f'No income account is set up for "{resolved_label}", so it will post to Other Income (4100).'
++                )
++        entry["utility"] = resolved_label
++
++        dup_key = (lease["id"], key)
++        if dup_key in seen:
++            fail(f"Duplicate of row {seen[dup_key]} (same room and utility).")
++            continue
++        seen[dup_key] = n
++
++        previous = next((b for b in existing_bills.get(lease["id"], []) if b["label_key"] == key), None)
++        if previous is not None:
++            entry["warnings"].append(f"Replaces the bill saved earlier ({float(previous['amount']):,.2f}).")
++        if amount == 0:
++            entry["warnings"].append("0 removes this charge from the month's invoice.")
++
++        invoice = invoices.get(lease["id"])
++        entry["invoice_status"] = invoice["status"] if invoice else None
++        if invoice is None:
++            entry["outcome"] = "stored"
++            entry["message"] = "Saved. It will be used when this month's invoice is generated."
++        elif invoice["status"] in EDITABLE_INVOICE_STATUSES:
++            entry["outcome"] = "update"
++            entry["message"] = "The invoice will be recalculated."
++        else:
++            entry["outcome"] = "locked"
++            entry["message"] = "Not applied. A payment is already recorded on this invoice."
++            continue
++
++        room = room_by_id.get(lease["room_id"], {})
++        group = groups.setdefault(
++            lease["id"],
++            {
++                "lease": lease,
++                "invoice": invoice,
++                "label": f"{building_name_by_id.get(room.get('building_id'), '')} / {room.get('room_number', '')}",
++                "first_row": n,
++                "items": [],
++            },
++        )
++        group["items"].append(
++            {
++                "row": n,
++                "label": resolved_label,
++                "label_key": key,
++                "amount": amount,
++                "bill_reference": norm_text(src.get("bill_reference")) or None,
++                "previous_reading": prev_reading,
++                "current_reading": curr_reading,
++            }
++        )
++
++    summary = {"rows_checked": len(out_rows), "update": 0, "stored": 0, "locked": 0, "error": 0, "blank": 0}
++    for r in out_rows:
++        summary[r["outcome"]] += 1
++    return {"rows": out_rows, "groups": groups, "summary": summary}
++
++
++def public_rows(rows: list[dict]) -> list[dict]:
++    return [dict(r) for r in rows]
++
++
++# --------------------------------------------------------------------------
++# Commit
++# --------------------------------------------------------------------------
++def commit_upload(
++    supabase: Client,
++    company_id: str,
++    user_id: str,
++    rows: list[dict],
++    bill_month: date,
++    start: int = 0,
++    time_budget: float = COMMIT_TIME_BUDGET,
++) -> dict:
++    """
++    Saves the valid rows and recalculates the affected draft/sent invoices.
++    Time-budgeted: leases are handled in a stable order; anything not reached
++    comes back as next_start so the caller simply asks again (idempotent).
++    """
++    started = time.monotonic()
++    ev = evaluate_upload(supabase, rows, bill_month)
++    order = sorted(ev["groups"].items(), key=lambda kv: kv[1]["first_row"])
++    outcomes: dict[int, dict] = {}
++    next_start: Optional[int] = None
++
++    for pos in range(start, len(order)):
++        if time.monotonic() - started > time_budget:
++            next_start = pos
++            break
++        lease_id, group = order[pos]
++        _commit_group(supabase, company_id, user_id, lease_id, group, bill_month, outcomes)
++
++    return {
++        "rows": ev["rows"],
++        "outcomes": [{"row": r, **o} for r, o in sorted(outcomes.items())],
++        "summary": ev["summary"],
++        "total_groups": len(order),
++        "next_start": next_start,
++    }
++
++
++def _commit_group(
++    supabase: Client,
++    company_id: str,
++    user_id: str,
++    lease_id: str,
++    group: dict,
++    bill_month: date,
++    outcomes: dict,
++) -> None:
++    items = group["items"]
++
++    def mark(outcome: str, message: str, total: Optional[float] = None) -> None:
++        for it in items:
++            outcomes[it["row"]] = {"outcome": outcome, "message": message, "invoice_total": total}
++
++    try:
++        # Re-check the invoice right before writing: it may have been paid
++        # (or generated) since the file was checked.
++        current = (
++            supabase.table("invoices")
++            .select("id, status, total_amount")
++            .eq("lease_id", lease_id)
++            .eq("invoice_month", str(bill_month))
++            .execute()
++            .data
++        )
++        invoice = current[0] if current else None
++        if invoice is not None and invoice["status"] not in EDITABLE_INVOICE_STATUSES:
++            mark("locked", "Not applied. A payment is already recorded on this invoice.")
++            return
++
++        payload = [
++            {
++                "company_id": company_id,
++                "lease_id": lease_id,
++                "bill_month": str(bill_month),
++                "label": it["label"],
++                "label_key": it["label_key"],
++                "amount": it["amount"],
++                "bill_reference": it["bill_reference"],
++                "previous_reading": it["previous_reading"],
++                "current_reading": it["current_reading"],
++                "source": "excel_upload",
++                "uploaded_by": user_id,
++            }
++            for it in items
++        ]
++        saved = supabase.table("utility_bills").upsert(payload, on_conflict="lease_id,bill_month,label_key").execute().data
++        for s in saved or []:
++            write_audit_log(supabase, company_id, user_id, "update", "utility_bills", s["id"], after={"label": s["label"], "bill_month": s["bill_month"], "amount": s["amount"]})
++
++        if invoice is None:
++            mark("stored", "Saved. It will be used when this month's invoice is generated.")
++            return
++
++        old_total = float(invoice["total_amount"])
++        updated = resync_invoice_for_month(supabase, company_id, group["lease"], bill_month)
++        if updated is None:
++            mark("failed", "The bill was saved but the invoice could not be recalculated. Upload again to retry.")
++            return
++        new_total = float(updated["total_amount"])
++        write_audit_log(
++            supabase, company_id, user_id, "update", "invoices", invoice["id"],
++            before={"total_amount": old_total}, after={"total_amount": new_total},
++        )
++        mark("updated", f"Invoice recalculated: {old_total:,.2f} to {new_total:,.2f}.", new_total)
++    except Exception as e:
++        message = getattr(e, "detail", None) or getattr(e, "message", None) or str(e)
++        mark("failed", f"Could not finish this lease ({str(message)[:200]}). Upload the file again to retry.")
+diff --git a/frontend/app/(dashboard)/utility-bills/page.tsx b/frontend/app/(dashboard)/utility-bills/page.tsx
+new file mode 100644
+index 0000000..1a2f871
+--- /dev/null
++++ b/frontend/app/(dashboard)/utility-bills/page.tsx
+@@ -0,0 +1,396 @@
++"use client";
++
++import { useEffect, useState } from "react";
++import { Card, DataTable } from "@/components/ui/Card";
++import { Field, Input, Select } from "@/components/ui/Field";
++import { Button } from "@/components/ui/Button";
++import { api, Building, downloadFile, uploadFileWithFields } from "@/lib/api";
++
++type PreviewRow = {
++  row: number;
++  building: string;
++  room: string;
++  tenant: string;
++  utility: string;
++  lease_amount: number | null;
++  amount: number | null;
++  invoice_status: string | null;
++  outcome: "update" | "stored" | "locked" | "error" | "blank";
++  message: string;
++  warnings: string[];
++};
++
++type Summary = { rows_checked: number; update: number; stored: number; locked: number; error: number; blank: number };
++
++type PreviewResponse = { month: string; summary: Summary; rows: PreviewRow[]; savable: number };
++
++type Outcome = { row: number; outcome: "updated" | "stored" | "locked" | "failed"; message: string; invoice_total: number | null };
++
++type CommitResponse = {
++  rows: PreviewRow[];
++  outcomes: Outcome[];
++  summary: Summary;
++  total_groups: number;
++  next_start: number | null;
++};
++
++type SavedBill = {
++  id: string;
++  building: string;
++  room: string;
++  tenant: string;
++  utility: string;
++  amount: number;
++  bill_reference: string | null;
++  invoice_status: string | null;
++  saved_at: string | null;
++};
++
++const XLSX = "xlsx";
++
++function currentMonth() {
++  const d = new Date();
++  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
++}
++
++function fmt(n: number | null | undefined) {
++  if (n === null || n === undefined) return "—";
++  return Number(n).toLocaleString("en-PK", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
++}
++
++function invoiceLabel(status: string | null) {
++  switch (status) {
++    case null:
++      return "Not generated yet";
++    case "draft":
++      return "Draft";
++    case "sent":
++      return "Sent to tenant";
++    case "partial":
++      return "Partly paid";
++    case "paid":
++      return "Paid";
++    default:
++      return status;
++  }
++}
++
++const TAG = {
++  ok: "bg-ledger/10 text-ledger-dark",
++  info: "bg-accent/10 text-accent",
++  warn: "bg-brass/15 text-brass-dark",
++  bad: "bg-stamp-red/10 text-stamp-red",
++};
++
++function Tag({ kind, children }: { kind: keyof typeof TAG; children: React.ReactNode }) {
++  return <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${TAG[kind]}`}>{children}</span>;
++}
++
++export default function UtilityBillsPage() {
++  const [month, setMonth] = useState(currentMonth());
++  const [buildingFilter, setBuildingFilter] = useState("");
++  const [buildings, setBuildings] = useState<Building[]>([]);
++  const [file, setFile] = useState<File | null>(null);
++
++  const [checking, setChecking] = useState(false);
++  const [saving, setSaving] = useState(false);
++  const [progress, setProgress] = useState<string | null>(null);
++  const [error, setError] = useState<string | null>(null);
++
++  const [preview, setPreview] = useState<PreviewResponse | null>(null);
++  const [outcomes, setOutcomes] = useState<Record<number, Outcome>>({});
++  const [saved, setSaved] = useState(false);
++
++  const [bills, setBills] = useState<SavedBill[]>([]);
++  const [billsLoading, setBillsLoading] = useState(false);
++
++  useEffect(() => {
++    api.get<Building[]>("/buildings").then(setBuildings).catch(() => undefined);
++  }, []);
++
++  function loadBills() {
++    setBillsLoading(true);
++    const params = new URLSearchParams({ month });
++    if (buildingFilter) params.set("building_id", buildingFilter);
++    api
++      .get<SavedBill[]>(`/utility-bills?${params.toString()}`)
++      .then(setBills)
++      .catch(() => setBills([]))
++      .finally(() => setBillsLoading(false));
++  }
++
++  useEffect(loadBills, [month, buildingFilter]); // eslint-disable-line react-hooks/exhaustive-deps
++
++  function resetResult() {
++    setPreview(null);
++    setOutcomes({});
++    setSaved(false);
++    setError(null);
++    setProgress(null);
++  }
++
++  async function downloadTemplate() {
++    setError(null);
++    const params = new URLSearchParams({ month });
++    if (buildingFilter) params.set("building_id", buildingFilter);
++    try {
++      await downloadFile(`/utility-bills/template?${params.toString()}`, `utility_bills_${month.replace("-", "_")}.${XLSX}`);
++    } catch (err: any) {
++      setError(err.message);
++    }
++  }
++
++  async function checkFile() {
++    if (!file) return;
++    resetResult();
++    setChecking(true);
++    try {
++      const result = await uploadFileWithFields<PreviewResponse>("/utility-bills/preview", file, { month });
++      setPreview(result);
++    } catch (err: any) {
++      setError(err.message);
++    } finally {
++      setChecking(false);
++    }
++  }
++
++  async function saveRows() {
++    if (!file || !preview) return;
++    setSaving(true);
++    setError(null);
++    const collected: Record<number, Outcome> = {};
++    let start = 0;
++    try {
++      // The server works through the file within its time limit and, if it
++      // is a big file, says where to continue. Sending the same file again is safe.
++      for (let guard = 0; guard < 200; guard++) {
++        const res = await uploadFileWithFields<CommitResponse>("/utility-bills/commit", file, {
++          month,
++          start: String(start),
++        });
++        res.outcomes.forEach((o) => {
++          collected[o.row] = o;
++        });
++        setOutcomes({ ...collected });
++        if (res.next_start === null || res.next_start === undefined) break;
++        start = res.next_start;
++        setProgress(`Saving… ${start} of ${res.total_groups} leases done`);
++      }
++      setSaved(true);
++      loadBills();
++    } catch (err: any) {
++      setOutcomes({ ...collected });
++      setError(`${err.message} — anything already saved is kept. Check the file again and save to continue.`);
++    } finally {
++      setSaving(false);
++      setProgress(null);
++    }
++  }
++
++  const outcomeList = Object.values(outcomes);
++  const updatedCount = outcomeList.filter((o) => o.outcome === "updated").length;
++  const storedCount = outcomeList.filter((o) => o.outcome === "stored").length;
++  const lockedCount = outcomeList.filter((o) => o.outcome === "locked").length;
++  const failedCount = outcomeList.filter((o) => o.outcome === "failed").length;
++
++  function whatHappens(r: PreviewRow) {
++    const done = outcomes[r.row];
++    if (done) {
++      const kind = done.outcome === "failed" ? "bad" : done.outcome === "locked" ? "warn" : done.outcome === "stored" ? "info" : "ok";
++      return (
++        <div>
++          <Tag kind={kind}>
++            {done.outcome === "updated" ? "Invoice updated" : done.outcome === "stored" ? "Saved" : done.outcome === "locked" ? "Not applied" : "Failed"}
++          </Tag>
++          <div className="text-xs text-ink/55 mt-1">{done.message}</div>
++        </div>
++      );
++    }
++    const kind = r.outcome === "update" ? "ok" : r.outcome === "stored" ? "info" : r.outcome === "locked" ? "warn" : "bad";
++    const title =
++      r.outcome === "update"
++        ? "Invoice will be updated"
++        : r.outcome === "stored"
++        ? "Will be saved"
++        : r.outcome === "locked"
++        ? "Not applied"
++        : "Needs correction";
++    return (
++      <div>
++        <Tag kind={kind}>{title}</Tag>
++        <div className="text-xs text-ink/55 mt-1">{r.message}</div>
++        {r.warnings.map((w) => (
++          <div key={w} className="text-xs text-brass-dark mt-1">
++            {w}
++          </div>
++        ))}
++        {r.outcome === "update" && r.invoice_status === "sent" && (
++          <div className="text-xs text-ink/55 mt-1">Already sent to the tenant. Resend the updated invoice afterwards.</div>
++        )}
++      </div>
++    );
++  }
++
++  const visibleRows = (preview?.rows ?? []).filter((r) => r.outcome !== "blank");
++
++  return (
++    <div className="space-y-6">
++      <div>
++        <h1 className="text-2xl font-display font-semibold">Utility bills</h1>
++        <p className="text-sm text-ink/55 mt-1 max-w-3xl">
++          Upload the month&apos;s electricity, water, gas (or any other bill-based charge) from Excel. A bill replaces
++          the lease amount on that month&apos;s invoice. Anything not in the file stays exactly as it is.
++        </p>
++      </div>
++
++      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
++        <Card title="Step 1 — Choose month and download the template">
++          <div className="space-y-3">
++            <Field label="Bill month">
++              <Input
++                type="month"
++                value={month}
++                onChange={(e) => {
++                  setMonth(e.target.value);
++                  resetResult();
++                }}
++              />
++            </Field>
++            <Field label="Building (optional)">
++              <Select value={buildingFilter} onChange={(e) => setBuildingFilter(e.target.value)}>
++                <option value="">All buildings</option>
++                {buildings.map((b) => (
++                  <option key={b.id} value={b.id}>
++                    {b.name}
++                  </option>
++                ))}
++              </Select>
++            </Field>
++            <Button onClick={downloadTemplate} className="w-full" disabled={!month}>
++              Download Excel template
++            </Button>
++            <p className="text-xs text-ink/50">
++              The template is pre-filled with every active lease: building, room, tenant and each lease&apos;s own utility
++              names. You only type the bill amounts.
++            </p>
++          </div>
++        </Card>
++
++        <Card title="Step 2 — Upload the filled file">
++          <div className="space-y-3">
++            <Field label="Excel file (.xlsx)">
++              <input
++                type="file"
++                accept=".xlsx"
++                onChange={(e) => {
++                  setFile(e.target.files?.[0] ?? null);
++                  resetResult();
++                }}
++                className="block w-full text-sm file:mr-3 file:px-3 file:py-2 file:rounded-card file:border file:border-border file:bg-transparent file:text-sm"
++              />
++            </Field>
++            <Button variant="secondary" onClick={checkFile} disabled={!file || !month || checking || saving} loading={checking} className="w-full">
++              Check file (nothing is saved yet)
++            </Button>
++            <p className="text-xs text-ink/50">You will see exactly what will change before anything is saved.</p>
++          </div>
++        </Card>
++
++        <Card title="How it works">
++          <ul className="text-sm text-ink/70 space-y-2 list-disc pl-5">
++            <li>Invoice is draft or sent: the invoice is recalculated with your figure.</li>
++            <li>Invoice not generated yet: the bill is stored and used when you generate it.</li>
++            <li>Payment already recorded: the invoice is not touched and the row is reported.</li>
++            <li>Room not found or no active lease: the row is skipped and the lease stays as it is.</li>
++            <li>Uploading the same month again replaces the earlier figure. A bill of 0 removes that charge for the month.</li>
++          </ul>
++        </Card>
++      </div>
++
++      {error && (
++        <Card className="border-stamp-red/40">
++          <p className="text-sm text-stamp-red">{error}</p>
++        </Card>
++      )}
++
++      {preview && (
++        <Card title={saved ? "Result" : "Step 3 — Review before saving"}>
++          <div className="flex flex-wrap gap-2 mb-4">
++            {saved ? (
++              <>
++                <Tag kind="ok">{updatedCount} invoices updated</Tag>
++                <Tag kind="info">{storedCount} saved for upcoming invoice</Tag>
++                {lockedCount > 0 && <Tag kind="warn">{lockedCount} not applied (payment recorded)</Tag>}
++                {failedCount > 0 && <Tag kind="bad">{failedCount} failed</Tag>}
++                <Tag kind="bad">{preview.summary.error} skipped</Tag>
++              </>
++            ) : (
++              <>
++                <Tag kind="ok">{preview.summary.update} invoices will be updated</Tag>
++                <Tag kind="info">{preview.summary.stored} saved for upcoming invoice</Tag>
++                <Tag kind="warn">{preview.summary.locked} locked (payment recorded)</Tag>
++                <Tag kind="bad">{preview.summary.error} need correction</Tag>
++              </>
++            )}
++            {preview.summary.blank > 0 && <span className="text-xs text-ink/50 self-center">{preview.summary.blank} blank rows left unchanged</span>}
++          </div>
++
++          <DataTable
++            keyField="row"
++            rows={visibleRows}
++            emptyMessage="No rows with an amount were found in this file."
++            columns={[
++              { header: "Row", accessor: (r) => r.row },
++              { header: "Building", accessor: (r) => r.building },
++              { header: "Room", accessor: (r) => r.room },
++              { header: "Tenant", accessor: (r) => r.tenant || "—" },
++              { header: "Utility", accessor: (r) => r.utility },
++              { header: "Lease amount", align: "right", accessor: (r) => <span className="figures">{fmt(r.lease_amount)}</span> },
++              { header: "Uploaded bill", align: "right", accessor: (r) => <span className="figures font-medium">{fmt(r.amount)}</span> },
++              { header: "Invoice", accessor: (r) => invoiceLabel(r.invoice_status) },
++              { header: "What will happen", accessor: whatHappens },
++            ]}
++          />
++
++          {!saved && (
++            <div className="mt-4 space-y-2">
++              {preview.summary.error > 0 && (
++                <p className="text-sm text-ink/70 bg-brass/10 border border-brass/30 rounded-card px-3 py-2">
++                  Rows marked &quot;Needs correction&quot; will not be saved. You can correct the file and check it again,
++                  or save the valid rows now and upload the rest later.
++                </p>
++              )}
++              <div className="flex flex-wrap items-center gap-3">
++                <Button onClick={saveRows} disabled={preview.savable === 0 || saving} loading={saving}>
++                  Save {preview.savable} valid {preview.savable === 1 ? "row" : "rows"}
++                </Button>
++                <Button variant="ghost" onClick={resetResult} disabled={saving}>
++                  Cancel
++                </Button>
++                {progress && <span className="text-xs text-ink/55">{progress}</span>}
++                <span className="text-xs text-ink/50">Only owners and admins can save. Every invoice change is recorded in the audit log.</span>
++              </div>
++            </div>
++          )}
++        </Card>
++      )}
++
++      <Card title={`Saved bills — ${month}`}>
++        <DataTable
++          keyField="id"
++          rows={bills}
++          emptyMessage={billsLoading ? "Loading…" : "No utility bills saved for this month yet."}
++          columns={[
++            { header: "Building", accessor: (b) => b.building },
++            { header: "Room", accessor: (b) => b.room },
++            { header: "Tenant", accessor: (b) => b.tenant || "—" },
++            { header: "Utility", accessor: (b) => b.utility },
++            { header: "Bill", align: "right", accessor: (b) => <span className="figures">{fmt(b.amount)}</span> },
++            { header: "Reference", accessor: (b) => b.bill_reference || "—" },
++            { header: "Invoice", accessor: (b) => invoiceLabel(b.invoice_status) },
++          ]}
++        />
++      </Card>
++    </div>
++  );
++}
+diff --git a/frontend/components/ui/Sidebar.tsx b/frontend/components/ui/Sidebar.tsx
+index fa77ba4..164aaa3 100644
+--- a/frontend/components/ui/Sidebar.tsx
++++ b/frontend/components/ui/Sidebar.tsx
+@@ -75,6 +75,7 @@ const BASE_SECTIONS: NavSection[] = [
+       { href: "/profit-and-loss", label: "Profit & loss", icon: IconTrend },
+       { href: "/balance-sheet", label: "Balance sheet", icon: IconBalanceSheet },
+       { href: "/reports", label: "Reports", icon: IconReports },
++      { href: "/utility-bills", label: "Utility bills", icon: IconInvoices },
+     ],
+   },
+   {
+diff --git a/frontend/lib/api.ts b/frontend/lib/api.ts
+index 868f4d2..cd4bc8c 100644
+--- a/frontend/lib/api.ts
++++ b/frontend/lib/api.ts
+@@ -81,6 +81,33 @@ export async function uploadFile<T>(path: string, file: File): Promise<T> {
+   return res.json();
+ }
+ 
++// Multipart upload with extra form fields (e.g. the bill month) that reads the
++// server's plain-English "detail" message on failure, instead of dumping the
++// raw response text the way uploadFile does.
++export async function uploadFileWithFields<T>(path: string, file: File, fields: Record<string, string>): Promise<T> {
++  const headers = await authHeader();
++  const formData = new FormData();
++  Object.entries(fields).forEach(([key, value]) => formData.append(key, value));
++  formData.append("file", file);
++  const res = await fetch(`${API_BASE}${path}`, {
++    method: "POST",
++    headers, // no Content-Type here on purpose
++    body: formData,
++  });
++  if (!res.ok) {
++    const bodyText = await res.text();
++    let message = bodyText;
++    try {
++      const parsed = JSON.parse(bodyText);
++      if (typeof parsed.detail === "string") message = parsed.detail;
++    } catch {
++      // not JSON, use raw text
++    }
++    throw new Error(message);
++  }
++  return res.json();
++}
++
+ // Fetches a PDF as a blob (needs the auth header, so a plain <a href> won't work)
+ export async function fetchPdfBlob(path: string): Promise<Blob> {
+   const headers = await authHeader();

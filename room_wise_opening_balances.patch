@@ -1,0 +1,556 @@
+diff --git a/backend/app/routers/financials.py b/backend/app/routers/financials.py
+index a4e8a95..1f50e28 100644
+--- a/backend/app/routers/financials.py
++++ b/backend/app/routers/financials.py
+@@ -1,4 +1,5 @@
+-from datetime import date
++import logging
++from datetime import date, timedelta
+ from typing import Optional
+ 
+ from fastapi import APIRouter, Depends, Query
+@@ -242,7 +243,14 @@ def get_general_ledger(
+     SQL window function, not accumulated in a Python loop. Each row also
+     carries source_type/source_id/journal_entry_id so the frontend can
+     resolve a "click a figure" drill-down via /financials/source-document
+-    without a second lookup."""
++    without a second lookup.
++
++    When a "from" date is given, everything before it is rolled into an
++    opening-balance row (same account, same owner/tenant/building/room
++    filters) and the running balance starts from that opening figure, so the
++    closing balance is the account's true balance rather than just the
++    period's movement. If the opening-balance function isn't available yet,
++    the ledger is returned exactly as before."""
+     result = supabase.rpc(
+         "general_ledger",
+         {
+@@ -255,7 +263,52 @@ def get_general_ledger(
+             "p_room_id": room_id,
+         },
+     ).execute()
+-    return result.data
++    rows = result.data or []
++
++    if date_from:
++        try:
++            opening = float(
++                supabase.rpc(
++                    "general_ledger_opening_balance",
++                    {
++                        "p_account_id": account_id,
++                        "p_before": str(date_from),
++                        "p_owner_id": owner_id,
++                        "p_tenant_id": tenant_id,
++                        "p_building_id": building_id,
++                        "p_room_id": room_id,
++                    },
++                )
++                .execute()
++                .data
++                or 0
++            )
++        except Exception:
++            logging.getLogger("app.financials").exception("general_ledger_opening_balance failed for %s", account_id)
++            return rows
++
++        if abs(opening) > 0.004:
++            for r in rows:
++                r["running_balance"] = round(float(r["running_balance"]) + opening, 2)
++            rows.insert(
++                0,
++                {
++                    "entry_date": str(date_from - timedelta(days=1)),
++                    "description": "Opening balance",
++                    "source_type": None,
++                    "source_id": None,
++                    "journal_entry_id": None,
++                    "direction": None,
++                    "amount": 0,
++                    "building_name": None,
++                    "room_number": None,
++                    "owner_name": None,
++                    "tenant_name": None,
++                    "running_balance": round(opening, 2),
++                    "is_opening": True,
++                },
++            )
++    return rows
+ 
+ 
+ @router.get("/source-document")
+diff --git a/backend/app/routers/reports.py b/backend/app/routers/reports.py
+index 7df8b49..5b61d97 100644
+--- a/backend/app/routers/reports.py
++++ b/backend/app/routers/reports.py
+@@ -63,6 +63,81 @@ def collection_vs_expense(
+     return {"billed_to_tenants": billed, "actual_expenses_logged": actual_expenses}
+ 
+ 
++def _batch_tenant_balances(
++    supabase: Client, company_id: str, account_id: str, tenant_ids: List[str], as_of: str
++) -> Dict[str, float]:
++    """
++    One round trip for every tenant's balance in one account as of a date
++    (tenant_balances_as_of(), see 013_schema_patch_029). Same debits-minus-
++    credits math as get_tenant_account_balance_as_of, just for all tenants
++    at once instead of one RPC per tenant. If the database function isn't
++    there yet (migration not run), falls back to the old one-call-per-tenant
++    path so the report keeps working either way.
++    """
++    if not tenant_ids:
++        return {}
++    try:
++        data = (
++            supabase.rpc(
++                "tenant_balances_as_of",
++                {
++                    "p_company_id": company_id,
++                    "p_account_id": account_id,
++                    "p_tenant_ids": tenant_ids,
++                    "p_as_of_date": as_of,
++                },
++            )
++            .execute()
++            .data
++            or []
++        )
++        out = {tid: 0.0 for tid in tenant_ids}
++        for r in data:
++            out[r["tenant_id"]] = float(r["balance"] or 0)
++        return out
++    except Exception:
++        logging.getLogger("app.reports").exception("tenant_balances_as_of failed; falling back to per-tenant calls")
++        return {
++            tid: get_tenant_account_balance_as_of(supabase, company_id, account_id, tid, as_of)
++            for tid in tenant_ids
++        }
++
++
++def _batch_manual_entries(
++    supabase: Client, company_id: str, account_id: str, tenant_ids: List[str], date_from: date, date_to: date
++) -> Dict[str, float]:
++    """
++    Net (debit minus credit) of MANUAL journal entries posted to one account
++    for each tenant between two dates -- e.g. an opening receivable keyed in
++    by hand on 31 Aug. These move the ledger balance but are not invoices or
++    payments, so without this they'd be invisible in the report whenever the
++    period contains their date. Never blocks the report: on any failure the
++    report simply behaves as it did before.
++    """
++    if not tenant_ids:
++        return {}
++    try:
++        data = (
++            supabase.rpc(
++                "tenant_manual_entries_in_period",
++                {
++                    "p_company_id": company_id,
++                    "p_account_id": account_id,
++                    "p_tenant_ids": tenant_ids,
++                    "p_date_from": str(date_from),
++                    "p_date_to": str(date_to),
++                },
++            )
++            .execute()
++            .data
++            or []
++        )
++        return {r["tenant_id"]: float(r["net_amount"] or 0) for r in data}
++    except Exception:
++        logging.getLogger("app.reports").exception("tenant_manual_entries_in_period failed")
++        return {}
++
++
+ @router.get("/room-wise")
+ def room_wise_receivables(
+     period_start: date = Query(
+@@ -76,7 +151,7 @@ def room_wise_receivables(
+ ):
+     """
+     Per-room receivables report:
+-      Room | Tenant | Security (received/not) | Opening balance |
++      Room | Tenant | Security (amount received) | Opening balance |
+       Invoiced (period) | Received (period) | Receivable total
+ 
+     Opening balance and Receivable total both come straight from the ledger
+@@ -102,11 +177,17 @@ def room_wise_receivables(
+     the room, matching how /leases/{id}/receivable-summary already treats
+     it (flagged there as a known simplification).
+ 
+-    Performance note: this calls the ledger twice per occupied room (RPC
+-    round trips), same cost per-lease as the Receive Payment screen already
+-    pays per-lease -- fine at normal portfolio sizes, but worth batching
+-    into one SQL function later if this is ever run against hundreds of
+-    rooms at once.
++    Opening balance also includes any MANUAL journal entries (e.g. a
++    hand-keyed opening receivable) dated inside the selected period, so an
++    opening entry posted on 31 Aug still shows as opening when the period
++    starts on 01 Aug. Received (period) also includes receipts that were not
++    tied to an invoice -- payments against an opening balance, or advances.
++    Security shows the amount actually held for the tenant in account 2100
++    (so a manually posted opening deposit is included), with the agreed
++    deposit alongside when it was larger.
++
++    Performance: balances for every tenant come from one batched database
++    call per figure (tenant_balances_as_of) instead of one call per room.
+     """
+     rooms_query = supabase.table("rooms").select("id, room_number, building_id, status")
+     if building_id:
+@@ -173,11 +254,16 @@ def room_wise_receivables(
+     # been paid (amount_received on the deposit row is the AGREED amount,
+     # not what's been collected -- see security_deposit_payments).
+     security_deposits = (
+-        supabase.table("security_deposits").select("id, lease_id").in_("lease_id", lease_ids).execute().data
++        supabase.table("security_deposits")
++        .select("id, lease_id, amount_received, status")
++        .in_("lease_id", lease_ids)
++        .execute()
++        .data
+         if lease_ids
+         else []
+     )
+     deposit_by_lease = {d["lease_id"]: d["id"] for d in security_deposits}
++    deposit_row_by_lease = {d["lease_id"]: d for d in security_deposits}
+     deposit_ids = list(deposit_by_lease.values())
+     deposit_payments = (
+         supabase.table("security_deposit_payments")
+@@ -201,6 +287,43 @@ def room_wise_receivables(
+ 
+     balance_before = period_start - timedelta(days=1)
+ 
++    try:
++        sd_account_id = get_account_id(supabase, company_id, "2100")
++    except ValueError:
++        sd_account_id = None
++
++    opening_before_by_tenant: Dict[str, float] = {}
++    closing_by_tenant: Dict[str, float] = {}
++    manual_by_tenant: Dict[str, float] = {}
++    security_ledger_by_tenant: Dict[str, float] = {}
++    if ar_account_id:
++        opening_before_by_tenant = _batch_tenant_balances(
++            supabase, company_id, ar_account_id, tenant_ids, str(balance_before)
++        )
++        closing_by_tenant = _batch_tenant_balances(supabase, company_id, ar_account_id, tenant_ids, str(period_end))
++        manual_by_tenant = _batch_manual_entries(
++            supabase, company_id, ar_account_id, tenant_ids, period_start, period_end
++        )
++    if sd_account_id:
++        security_ledger_by_tenant = _batch_tenant_balances(
++            supabase, company_id, sd_account_id, tenant_ids, str(period_end)
++        )
++
++    other_receipts_by_tenant: Dict[str, List[dict]] = {}
++    if tenant_ids:
++        for pay in (
++            supabase.table("payments")
++            .select("id, tenant_id, amount, discount_amount, payment_date, payment_method, notes")
++            .eq("company_id", company_id)
++            .in_("tenant_id", tenant_ids)
++            .is_("invoice_id", "null")
++            .gte("payment_date", str(period_start))
++            .lte("payment_date", str(period_end))
++            .execute()
++            .data
++        ):
++            other_receipts_by_tenant.setdefault(pay["tenant_id"], []).append(pay)
++
+     rows = []
+     for room in rooms:
+         room_leases = leases_by_room.get(room["id"], [])
+@@ -212,23 +335,25 @@ def room_wise_receivables(
+         tenant_name = tenants.get(current_lease["tenant_id"]) if current_lease else None
+ 
+         deposit_id = deposit_by_lease.get(current_lease["id"]) if current_lease else None
+-        security_received = bool(deposit_id) and paid_by_deposit.get(deposit_id, 0.0) > 0
++        deposit_row = deposit_row_by_lease.get(current_lease["id"]) if current_lease else None
++        if current_lease and sd_account_id:
++            # Account 2100 is credit-normal, so the held amount is the negated balance.
++            held_amount = round(-security_ledger_by_tenant.get(current_lease["tenant_id"], 0.0), 2)
++            security_received_amount = held_amount if held_amount > 0 else 0.0
++        else:
++            security_received_amount = round(paid_by_deposit.get(deposit_id, 0.0), 2) if deposit_id else 0.0
++        security_agreed_amount = round(float(deposit_row["amount_received"]), 2) if deposit_row else None
++        security_status = deposit_row["status"] if deposit_row else None
++        security_received = security_received_amount > 0
+ 
+         opening_balance = 0.0
++        opening_manual = 0.0
+         receivable_total = 0.0
+         if current_lease and ar_account_id:
+-            opening_balance = round(
+-                get_tenant_account_balance_as_of(
+-                    supabase, company_id, ar_account_id, current_lease["tenant_id"], str(balance_before)
+-                ),
+-                2,
+-            )
+-            receivable_total = round(
+-                get_tenant_account_balance_as_of(
+-                    supabase, company_id, ar_account_id, current_lease["tenant_id"], str(period_end)
+-                ),
+-                2,
+-            )
++            current_tenant_id = current_lease["tenant_id"]
++            opening_manual = round(manual_by_tenant.get(current_tenant_id, 0.0), 2)
++            opening_balance = round(opening_before_by_tenant.get(current_tenant_id, 0.0) + opening_manual, 2)
++            receivable_total = round(closing_by_tenant.get(current_tenant_id, 0.0), 2)
+ 
+         period_invoiced = 0.0
+         period_received = 0.0
+@@ -242,6 +367,44 @@ def room_wise_receivables(
+                     if period_start <= pay_date <= period_end:
+                         period_received += float(pay["amount"]) + float(pay.get("discount_amount") or 0)
+ 
++        other_receipts: List[dict] = []
++        if current_lease:
++            for pay in other_receipts_by_tenant.get(current_lease["tenant_id"], []):
++                period_received += float(pay["amount"]) + float(pay.get("discount_amount") or 0)
++                other_receipts.append(
++                    {
++                        "id": pay["id"],
++                        "amount": float(pay["amount"]),
++                        "discount_amount": float(pay.get("discount_amount") or 0),
++                        "payment_date": str(pay["payment_date"]),
++                        "payment_method": pay.get("payment_method"),
++                        "notes": pay.get("notes"),
++                    }
++                )
++
++        # Every invoice falling inside the selected period, oldest first --
++        # lets the drill-down list them (with a total) when the period spans
++        # more than one month, instead of showing only the latest invoice.
++        period_invoices: List[dict] = []
++        if current_lease:
++            for inv in sorted(invoices_by_lease.get(current_lease["id"], []), key=lambda i: str(i["invoice_month"])):
++                inv_month = date.fromisoformat(str(inv["invoice_month"]))
++                if period_start <= inv_month <= period_end:
++                    inv_received = sum(
++                        float(pay["amount"]) + float(pay.get("discount_amount") or 0)
++                        for pay in payments_by_invoice.get(inv["id"], [])
++                    )
++                    period_invoices.append(
++                        {
++                            "id": inv["id"],
++                            "invoice_month": str(inv["invoice_month"]),
++                            "due_date": str(inv["due_date"]),
++                            "status": inv["status"],
++                            "total_amount": round(float(inv["total_amount"]), 2),
++                            "received": round(inv_received, 2),
++                        }
++                    )
++
+         # "Current invoice" for the drill-down (report row -> current
+         # invoice + its payments -> full invoice detail): the most recently
+         # dated invoice for this lease, independent of the report's own
+@@ -278,7 +441,11 @@ def room_wise_receivables(
+                 "building_name": buildings.get(room["building_id"], "—"),
+                 "tenant_name": tenant_name,
+                 "security_received": security_received,
++                "security_received_amount": security_received_amount,
++                "security_agreed_amount": security_agreed_amount,
++                "security_status": security_status,
+                 "opening_balance": opening_balance,
++                "opening_manual_in_period": opening_manual,
+                 "invoiced_period": round(period_invoiced, 2),
+                 "received_period": round(period_received, 2),
+                 "receivable_total": receivable_total,
+@@ -292,6 +459,8 @@ def room_wise_receivables(
+                 else None,
+                 "current_invoice_received": round(current_invoice_received, 2) if current_invoice else None,
+                 "current_invoice_payments": current_invoice_payments,
++                "period_invoices": period_invoices,
++                "other_receipts": other_receipts,
+             }
+         )
+ 
+diff --git a/frontend/app/(dashboard)/ledger/page.tsx b/frontend/app/(dashboard)/ledger/page.tsx
+index 91dabaa..82d4300 100644
+--- a/frontend/app/(dashboard)/ledger/page.tsx
++++ b/frontend/app/(dashboard)/ledger/page.tsx
+@@ -20,13 +20,14 @@ type LedgerRow = {
+   source_type?: string;
+   source_id?: string | null;
+   journal_entry_id?: string;
+-  direction: "debit" | "credit";
++  direction: "debit" | "credit" | null;
+   amount: number;
+   building_name?: string;
+   room_number?: string;
+   owner_name?: string;
+   tenant_name?: string;
+   running_balance: number;
++  is_opening?: boolean;
+ };
+ 
+ function formatPkr(n: number) {
+@@ -273,7 +274,10 @@ function LedgerPageInner() {
+             emptyMessage="No activity on this account for this period."
+             columns={[
+               { header: "Date", accessor: (r) => r.entry_date },
+-              { header: "Description", accessor: (r) => r.description ?? "—" },
++              {
++                header: "Description",
++                accessor: (r) => (r.is_opening ? <span className="font-medium">Opening balance</span> : r.description ?? "—"),
++              },
+               {
+                 header: "Dr",
+                 accessor: (r) =>
+diff --git a/frontend/app/(dashboard)/reports/page.tsx b/frontend/app/(dashboard)/reports/page.tsx
+index 4323364..d132f72 100644
+--- a/frontend/app/(dashboard)/reports/page.tsx
++++ b/frontend/app/(dashboard)/reports/page.tsx
+@@ -36,6 +36,15 @@ type RoomWisePayment = {
+   payment_date: string;
+   payment_method: string | null;
+ };
++type RoomWiseInvoice = {
++  id: string;
++  invoice_month: string;
++  due_date: string;
++  status: string;
++  total_amount: number;
++  received: number;
++};
++type RoomWiseOtherReceipt = RoomWisePayment & { notes: string | null };
+ type RoomWiseRow = {
+   room_id: string;
+   room_number: string;
+@@ -43,7 +52,11 @@ type RoomWiseRow = {
+   building_name: string;
+   tenant_name: string | null;
+   security_received: boolean;
++  security_received_amount: number;
++  security_agreed_amount: number | null;
++  security_status: string | null;
+   opening_balance: number;
++  opening_manual_in_period: number;
+   invoiced_period: number;
+   received_period: number;
+   receivable_total: number;
+@@ -55,6 +68,8 @@ type RoomWiseRow = {
+   current_invoice_total: number | null;
+   current_invoice_received: number | null;
+   current_invoice_payments: RoomWisePayment[];
++  period_invoices: RoomWiseInvoice[];
++  other_receipts: RoomWiseOtherReceipt[];
+ };
+ type InvoiceLineItem = { id: string; label: string; amount: number };
+ type InvoiceDetail = Invoice & { line_items: InvoiceLineItem[] };
+@@ -105,6 +120,11 @@ type IncomeByHeadDrilldown = { receipts: IncomeByHeadReceipt[]; total: number };
+ function formatPkr(n: number) {
+   return `Rs ${Number(n || 0).toLocaleString("en-PK")}`;
+ }
++function monthLabel(dateStr: string) {
++  const [y, m] = (dateStr || "").split("-").map(Number);
++  if (!y || !m) return dateStr;
++  return new Date(y, m - 1, 1).toLocaleDateString("en-GB", { month: "short", year: "numeric" });
++}
+ function monthOf(dateStr: string) {
+   return dateStr?.slice(0, 7); // "YYYY-MM"
+ }
+@@ -839,7 +859,20 @@ export default function ReportsPage() {
+                 { header: "Tenant", accessor: (r) => r.tenant_name ?? "—" },
+                 {
+                   header: "Security",
+-                  accessor: (r) => <StampBadge status={r.security_received ? "paid" : "pending"} />,
++                  accessor: (r) =>
++                    r.security_received_amount > 0 ? (
++                      <span className="figures">
++                        {formatPkr(r.security_received_amount)}
++                        {r.security_agreed_amount != null &&
++                          r.security_agreed_amount > r.security_received_amount + 0.01 && (
++                            <sup className="ml-1 text-[10px] text-ink/45">
++                              (Agreed {formatPkr(r.security_agreed_amount)})
++                            </sup>
++                          )}
++                      </span>
++                    ) : (
++                      <StampBadge status={r.security_status === "refunded" ? "refunded" : "pending"} />
++                    ),
+                 },
+                 {
+                   header: "Opening bal.",
+@@ -1092,9 +1125,55 @@ export default function ReportsPage() {
+                   {formatPkr(roomDrilldownRow.receivable_total)}
+                 </span>
+               </div>
++              {roomDrilldownRow.opening_manual_in_period !== 0 && (
++                <div className="flex justify-between">
++                  <span className="text-ink/50">Opening entries posted in this period</span>
++                  <span className="figures">{formatPkr(roomDrilldownRow.opening_manual_in_period)}</span>
++                </div>
++              )}
++              {(roomDrilldownRow.security_received_amount > 0 || roomDrilldownRow.security_agreed_amount != null) && (
++                <div className="flex justify-between">
++                  <span className="text-ink/50">Security deposit received</span>
++                  <span className="figures">
++                    {formatPkr(roomDrilldownRow.security_received_amount)}
++                    {roomDrilldownRow.security_agreed_amount != null &&
++                      roomDrilldownRow.security_agreed_amount > roomDrilldownRow.security_received_amount + 0.01 &&
++                      ` of ${formatPkr(roomDrilldownRow.security_agreed_amount)} agreed`}
++                  </span>
++                </div>
++              )}
+             </div>
+ 
+-            {!roomDrilldownRow.current_invoice_id ? (
++            {roomDrilldownRow.period_invoices.length > 1 ? (
++              <div className="space-y-3">
++                <p className="text-xs uppercase tracking-wider text-ink/45 font-medium">Invoices in this period</p>
++                <div className="space-y-2">
++                  {roomDrilldownRow.period_invoices.map((inv) => (
++                    <button
++                      key={inv.id}
++                      onClick={() => openInvoiceDetail(inv.id)}
++                      className="group w-full text-left border border-border rounded-card px-3 py-2.5 hover:border-accent/50 transition-colors"
++                    >
++                      <div className="flex items-center justify-between">
++                        <span className="font-medium text-sm">{monthLabel(inv.invoice_month)}</span>
++                        <StampBadge status={inv.status} />
++                      </div>
++                      <div className="flex justify-between text-sm mt-1">
++                        <span className="text-ink/50">Received {formatPkr(inv.received)}</span>
++                        <span className="figures font-medium">{formatPkr(inv.total_amount)}</span>
++                      </div>
++                    </button>
++                  ))}
++                </div>
++                <div className="flex justify-between text-sm font-semibold pt-2 border-t border-border">
++                  <span>Total invoiced</span>
++                  <span className="figures">
++                    {formatPkr(roomDrilldownRow.period_invoices.reduce((sum, inv) => sum + inv.total_amount, 0))}
++                  </span>
++                </div>
++                <p className="text-xs text-ink/45">Click an invoice to view its complete details.</p>
++              </div>
++            ) : !roomDrilldownRow.current_invoice_id ? (
+               <p className="text-sm text-ink/45 py-4 text-center border border-dashed border-border rounded-card">
+                 No invoice has been generated for this room&apos;s current tenant yet.
+               </p>
+@@ -1155,6 +1234,25 @@ export default function ReportsPage() {
+                 </div>
+               </div>
+             )}
++
++            {roomDrilldownRow.other_receipts.length > 0 && (
++              <div>
++                <p className="text-xs uppercase tracking-wider text-ink/45 font-medium mb-2">
++                  Receipts not tied to an invoice (opening balance / advance)
++                </p>
++                <div className="space-y-1.5">
++                  {roomDrilldownRow.other_receipts.map((p) => (
++                    <div key={p.id} className="flex justify-between text-sm">
++                      <span className="text-ink/70">
++                        {p.payment_date}
++                        {p.payment_method ? ` · ${p.payment_method}` : ""}
++                      </span>
++                      <span className="figures">{formatPkr(p.amount + (p.discount_amount || 0))}</span>
++                    </div>
++                  ))}
++                </div>
++              </div>
++            )}
+           </div>
+         )}
+       </Modal>
