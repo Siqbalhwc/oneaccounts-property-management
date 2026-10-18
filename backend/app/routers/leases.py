@@ -5,11 +5,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import Client
 
-from app.core.deps import get_current_company_id, get_current_user, get_supabase
+from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
 from app.crud.generic import write_audit_log
 from app.services.ledger import get_account_id, get_tenant_account_balance_as_of, post_journal_entry, resolve_room_owner
 from app.services.invoicing import resync_current_month_invoice
 from app.services.lease_settlement import compute_settlement_preview, finalize_settlement
+from app.services.lease_reversal import build_reversal_plans, execute_reversal_plan, summarize_plan
 from app.routers.invoices import generate_invoice_for_lease
 
 router = APIRouter(prefix="/leases", tags=["Leases"])
@@ -764,6 +765,140 @@ def terminate_lease(
     ).execute()
 
     return {"message": "Lease terminated, room marked vacant"}
+
+
+# ---------------------------------------------------------------------------
+# Lease reversal (owner / admin only) -- undo invoices or a whole lease that
+# was entered in error. Nothing is deleted: journal entries are reversed with
+# equal-and-opposite entries and invoices are marked cancelled. See
+# app/services/lease_reversal.py for the exact rules.
+# ---------------------------------------------------------------------------
+MAX_LEASES_PER_REVERSAL_CALL = 5  # keeps one request well inside the 30s server limit
+
+
+class LeaseReverseRequest(BaseModel):
+    reason: str
+    mode: str = "before_date"  # 'before_date' | 'full'
+    before_date: date | None = None
+    dry_run: bool = True
+
+
+class LeaseBulkReverseRequest(BaseModel):
+    reason: str
+    before_date: date
+    building_id: str | None = None   # used to PREVIEW every lease in a building
+    lease_ids: List[str] | None = None  # used to EXECUTE, up to 5 per call
+    dry_run: bool = True
+
+
+def _validate_reversal_inputs(reason: str, mode: str, before_date: date | None, require_reason: bool = True) -> None:
+    if require_reason and (not reason or not reason.strip()):
+        raise HTTPException(status_code=400, detail="Please enter a reason -- it is kept in the audit trail.")
+    if mode not in ("before_date", "full"):
+        raise HTTPException(status_code=400, detail="mode must be 'before_date' or 'full'.")
+    if mode == "before_date":
+        if before_date is None:
+            raise HTTPException(status_code=400, detail="Please choose the date: invoices for months before it will be reversed.")
+        if before_date > date.today().replace(day=1):
+            raise HTTPException(
+                status_code=400,
+                detail="Only invoices for months BEFORE the current month can be reversed this way. "
+                       "To undo the whole lease, use 'Reverse entire lease'.",
+            )
+
+
+@router.post("/reverse-bulk")
+def reverse_leases_bulk(
+    payload: LeaseBulkReverseRequest,
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+    user: dict = Depends(get_current_user),
+    _admin: None = Depends(require_owner_or_admin),
+):
+    """
+    Reverses the invoices dated BEFORE `before_date` on many leases at once
+    (the leases themselves stay active). Send `building_id` with dry_run=true
+    to preview every lease in a building; send `lease_ids` (max 5 per call)
+    with dry_run=false to carry it out.
+    """
+    _validate_reversal_inputs(payload.reason, "before_date", payload.before_date, require_reason=not payload.dry_run)
+
+    if payload.lease_ids:
+        if len(payload.lease_ids) > MAX_LEASES_PER_REVERSAL_CALL and not payload.dry_run:
+            raise HTTPException(status_code=400, detail=f"Send at most {MAX_LEASES_PER_REVERSAL_CALL} leases per call.")
+        leases = (
+            supabase.table("leases").select("id, room_id, status, termination_reason")
+            .eq("company_id", company_id).in_("id", payload.lease_ids).execute().data
+        )
+    elif payload.building_id:
+        room_ids = [
+            r["id"] for r in
+            supabase.table("rooms").select("id").eq("company_id", company_id).eq("building_id", payload.building_id).execute().data
+        ]
+        leases = []
+        for i in range(0, len(room_ids), 80):
+            leases.extend(
+                supabase.table("leases").select("id, room_id, status, termination_reason")
+                .eq("company_id", company_id).in_("room_id", room_ids[i:i + 80]).execute().data
+            )
+    else:
+        raise HTTPException(status_code=400, detail="Send either building_id (preview) or lease_ids.")
+
+    plans = build_reversal_plans(supabase, company_id, leases, "before_date", payload.before_date)
+
+    if payload.dry_run:
+        affected = [p for p in plans if p["invoices"] or p["skipped_invoices"]]
+        return {
+            "dry_run": True,
+            "leases_checked": len(plans),
+            "leases_affected": len(affected),
+            "invoices_to_cancel": sum(len(p["invoices"]) for p in affected),
+            "entries_to_reverse": sum(len(p["entries"]) for p in affected),
+            "plans": [summarize_plan(p) for p in affected],
+        }
+
+    results = [
+        execute_reversal_plan(supabase, company_id, user["user_id"], p, payload.reason.strip())
+        for p in plans if p["invoices"]
+    ]
+    return {"dry_run": False, "results": results}
+
+
+@router.post("/{lease_id}/reverse")
+def reverse_lease(
+    lease_id: str,
+    payload: LeaseReverseRequest,
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+    user: dict = Depends(get_current_user),
+    _admin: None = Depends(require_owner_or_admin),
+):
+    """
+    Reverses one lease's entries. mode='before_date' reverses its invoices for
+    months before `before_date` and leaves the lease active; mode='full'
+    reverses every invoice and the deposit entry, then ends the lease. Always
+    preview first (dry_run=true, the default).
+    """
+    _validate_reversal_inputs(payload.reason, payload.mode, payload.before_date, require_reason=not payload.dry_run)
+    lease = (
+        supabase.table("leases").select("id, room_id, status, termination_reason")
+        .eq("company_id", company_id).eq("id", lease_id).execute().data
+    )
+    if not lease:
+        raise HTTPException(status_code=404, detail="Lease not found")
+
+    plan = build_reversal_plans(supabase, company_id, lease, payload.mode, payload.before_date)[0]
+
+    if payload.dry_run:
+        return {"dry_run": True, **summarize_plan(plan)}
+
+    if plan["blocked"]:
+        raise HTTPException(status_code=400, detail=" ".join(plan["blocked"]))
+    if not plan["invoices"] and payload.mode == "before_date":
+        raise HTTPException(status_code=400, detail="Nothing to reverse for this lease before that date.")
+
+    result = execute_reversal_plan(supabase, company_id, user["user_id"], plan, payload.reason.strip())
+    return {"dry_run": False, **result}
 
 
 # ---------------------------------------------------------------------------

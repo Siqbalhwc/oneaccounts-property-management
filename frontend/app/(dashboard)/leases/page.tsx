@@ -3,13 +3,14 @@
 import { useEffect, useRef, useState, Fragment } from "react";
 import Link from "next/link";
 import { api, Lease, Tenant, Room, Building, SecurityDeposit, SecurityDepositPayment, Account, fetchPdfBlob } from "@/lib/api";
+import { supabase } from "@/lib/supabaseClient";
 import { Card } from "@/components/ui/Card";
 import { StampBadge } from "@/components/ui/StampBadge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { HistoryPanel } from "@/components/ui/HistoryPanel";
 import { Field, Input, Select } from "@/components/ui/Field";
-import { ChevronRight, ChevronDown, FileText, Pencil, Printer, Banknote, SlidersHorizontal, Users } from "lucide-react";
+import { ChevronRight, ChevronDown, FileText, Pencil, Printer, Banknote, SlidersHorizontal, Users, Undo2 } from "lucide-react";
 
 type LeaseCharge = {
   id: string;
@@ -23,6 +24,22 @@ type LeaseCharge = {
 };
 
 type ChargeMapping = { label: string; account_id: string };
+
+type ReversePlan = {
+  lease_id: string;
+  room_id?: string | null;
+  blocked: string[];
+  invoices: { id: string; invoice_month: string; total_amount: number; status: string }[];
+  entries: { id: string; entry_date: string; source_type: string; description?: string | null }[];
+  skipped_invoices: { id: string; invoice_month: string; reason: string }[];
+  manual_entries_to_review: { id: string; entry_date: string; description?: string | null }[];
+};
+type ReversePreview = {
+  plans: ReversePlan[];
+  leases_checked?: number;
+  invoices_to_cancel?: number;
+  entries_to_reverse?: number;
+};
 
 function pageNumbers(current: number, total: number): (number | "…")[] {
   const delta = 1;
@@ -52,6 +69,22 @@ export default function LeasesPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+
+  // Reverse (owner / admin only). Nothing is deleted: entries are reversed
+  // with equal-and-opposite entries and invoices are marked cancelled.
+  const [role, setRole] = useState<string | null>(null);
+  const isOwnerOrAdmin = role === "owner" || role === "admin";
+  const [revOpen, setRevOpen] = useState(false);
+  const [revScope, setRevScope] = useState<"lease" | "building">("lease");
+  const [revLease, setRevLease] = useState<Lease | null>(null);
+  const [revMode, setRevMode] = useState<"before_date" | "full">("before_date");
+  const [revBuildingId, setRevBuildingId] = useState("");
+  const [revDate, setRevDate] = useState(() => new Date().toISOString().slice(0, 8) + "01");
+  const [revReason, setRevReason] = useState("");
+  const [revPreview, setRevPreview] = useState<ReversePreview | null>(null);
+  const [revBusy, setRevBusy] = useState(false);
+  const [revError, setRevError] = useState<string | null>(null);
+  const [revDone, setRevDone] = useState<string | null>(null);
 
   // --- List view: expandable row + optional column visibility ---
   const [expandedLeaseId, setExpandedLeaseId] = useState<string | null>(null);
@@ -158,6 +191,17 @@ export default function LeasesPage() {
   }
 
   useEffect(() => {
+    (async () => {
+      const { data } = await supabase.auth.getSession();
+      const userId = data.session?.user.id;
+      if (userId) {
+        const { data: profileRow } = await supabase.from("profiles").select("role").eq("id", userId).single();
+        setRole(profileRow?.role ?? null);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
     fetchLeases(1, "");
     loadDeposits();
     api.get<Tenant[]>("/tenants").then(setTenants);
@@ -187,6 +231,108 @@ export default function LeasesPage() {
     return room ? `${building?.name ?? "—"} — ${room.room_number}` : "—";
   };
   const depositForLease = (leaseId: string) => deposits?.find((d) => d.lease_id === leaseId) ?? null;
+
+  function resetReverse() {
+    setRevPreview(null);
+    setRevError(null);
+    setRevDone(null);
+  }
+
+  function openReverseForLease(l: Lease) {
+    resetReverse();
+    setRevScope("lease");
+    setRevLease(l);
+    setRevMode("before_date");
+    setRevReason("");
+    setRevOpen(true);
+  }
+
+  function openReverseBulk() {
+    resetReverse();
+    setRevScope("building");
+    setRevLease(null);
+    setRevMode("before_date");
+    setRevReason("");
+    setRevOpen(true);
+  }
+
+  async function previewReverse() {
+    setRevBusy(true);
+    setRevError(null);
+    setRevDone(null);
+    setRevPreview(null);
+    try {
+      if (revScope === "lease" && revLease) {
+        const res = await api.post<ReversePlan & { dry_run: boolean }>(`/leases/${revLease.id}/reverse`, {
+          reason: revReason,
+          mode: revMode,
+          before_date: revMode === "before_date" ? revDate : null,
+          dry_run: true,
+        });
+        setRevPreview({ plans: [res] });
+      } else {
+        if (!revBuildingId) throw new Error("Please choose a building first.");
+        const res = await api.post<ReversePreview>("/leases/reverse-bulk", {
+          reason: revReason,
+          before_date: revDate,
+          building_id: revBuildingId,
+          dry_run: true,
+        });
+        setRevPreview(res);
+      }
+    } catch (e) {
+      setRevError(e instanceof Error ? e.message : "Could not preview.");
+    } finally {
+      setRevBusy(false);
+    }
+  }
+
+  async function confirmReverse() {
+    if (!revPreview) return;
+    if (!revReason.trim()) {
+      setRevError("Please enter a reason -- it is kept in the audit trail.");
+      return;
+    }
+    setRevBusy(true);
+    setRevError(null);
+    try {
+      let cancelled = 0;
+      let reversed = 0;
+      const problems: string[] = [];
+      if (revScope === "lease" && revLease) {
+        const res = await api.post<{ invoices_cancelled: number; entries_reversed: number; errors: string[] }>(
+          `/leases/${revLease.id}/reverse`,
+          { reason: revReason, mode: revMode, before_date: revMode === "before_date" ? revDate : null, dry_run: false },
+        );
+        cancelled = res.invoices_cancelled;
+        reversed = res.entries_reversed;
+        problems.push(...res.errors);
+      } else {
+        const ids = revPreview.plans.filter((p) => p.invoices.length > 0).map((p) => p.lease_id);
+        for (let i = 0; i < ids.length; i += 5) {
+          const res = await api.post<{ results: { invoices_cancelled: number; entries_reversed: number; errors: string[] }[] }>(
+            "/leases/reverse-bulk",
+            { reason: revReason, before_date: revDate, lease_ids: ids.slice(i, i + 5), dry_run: false },
+          );
+          res.results.forEach((r) => {
+            cancelled += r.invoices_cancelled;
+            reversed += r.entries_reversed;
+            problems.push(...r.errors);
+          });
+        }
+      }
+      setRevPreview(null);
+      setRevDone(
+        `Done: ${cancelled} invoice(s) cancelled and ${reversed} journal entr${reversed === 1 ? "y" : "ies"} reversed.` +
+          (problems.length ? ` Some items need attention: ${problems.join(" | ")}` : ""),
+      );
+      load();
+    } catch (e) {
+      setRevError(e instanceof Error ? e.message : "Reversal failed.");
+    } finally {
+      setRevBusy(false);
+    }
+  }
 
   function openReceiveModal(deposit: SecurityDeposit) {
     setReceivingDeposit(deposit);
@@ -412,9 +558,16 @@ export default function LeasesPage() {
             structure and security deposit.
           </p>
         </div>
-        <Link href="/leases/new">
-          <Button>New lease</Button>
-        </Link>
+        <div className="flex gap-2">
+          {isOwnerOrAdmin && (
+            <Button type="button" variant="secondary" onClick={openReverseBulk}>
+              Reverse past invoices
+            </Button>
+          )}
+          <Link href="/leases/new">
+            <Button>New lease</Button>
+          </Link>
+        </div>
       </div>
 
       <Card>
@@ -593,6 +746,15 @@ export default function LeasesPage() {
                             >
                               <Pencil size={16} />
                             </button>
+                            {isOwnerOrAdmin && (
+                              <button
+                                onClick={() => openReverseForLease(l)}
+                                title="Reverse invoices or this lease"
+                                className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-stamp-red"
+                              >
+                                <Undo2 size={16} />
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -967,6 +1129,104 @@ export default function LeasesPage() {
           <div className="flex justify-end pt-2 border-t border-border">
             <Button type="button" variant="ghost" onClick={() => setEditModalOpen(false)}>
               Close
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal open={revOpen} onClose={() => setRevOpen(false)} title="Reverse entries">
+        <div className="space-y-4">
+          <p className="text-xs text-ink/60">
+            Nothing is deleted. Each journal entry is cancelled by an equal-and-opposite entry on the same date, and the
+            invoice is marked cancelled. Opening balances and manual entries are never touched. Invoices that already have
+            a payment are skipped.
+          </p>
+
+          {revScope === "lease" ? (
+            <div className="space-y-2">
+              <p className="text-sm font-medium">{revLease ? `${tenantName(revLease.tenant_id)} — ${roomAndBuilding(revLease.room_id)}` : ""}</p>
+              <label className="flex items-start gap-2 text-sm cursor-pointer">
+                <input type="radio" className="mt-1 accent-ledger" checked={revMode === "before_date"} onChange={() => { setRevMode("before_date"); setRevPreview(null); }} />
+                <span>Reverse invoices for months before a date (lease stays active)</span>
+              </label>
+              <label className="flex items-start gap-2 text-sm cursor-pointer">
+                <input type="radio" className="mt-1 accent-ledger" checked={revMode === "full"} onChange={() => { setRevMode("full"); setRevPreview(null); }} />
+                <span>Reverse the entire lease (all invoices and the deposit entry, then end the lease)</span>
+              </label>
+            </div>
+          ) : (
+            <Field label="Building">
+              <Select value={revBuildingId} onChange={(e) => { setRevBuildingId(e.target.value); setRevPreview(null); }}>
+                <option value="">Choose a building…</option>
+                {(buildings ?? []).map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </Select>
+            </Field>
+          )}
+
+          {(revScope === "building" || revMode === "before_date") && (
+            <Field label="Reverse invoices for months before">
+              <Input type="date" value={revDate} onChange={(e) => { setRevDate(e.target.value); setRevPreview(null); }} />
+            </Field>
+          )}
+
+          <Field label="Reason (kept in the audit trail)">
+            <Input value={revReason} onChange={(e) => setRevReason(e.target.value)} placeholder="e.g. Pre-October invoices duplicate opening balances" />
+          </Field>
+
+          {revError && <p className="text-sm text-stamp-red">{revError}</p>}
+          {revDone && <p className="text-sm text-ledger">{revDone}</p>}
+
+          {revPreview && (
+            <div className="border border-border rounded-card p-3 space-y-2 max-h-72 overflow-y-auto text-xs">
+              {revScope === "building" && (
+                <p className="font-medium">
+                  {revPreview.leases_checked} lease(s) checked — {revPreview.invoices_to_cancel} invoice(s) and{" "}
+                  {revPreview.entries_to_reverse} journal entr{revPreview.entries_to_reverse === 1 ? "y" : "ies"} will be reversed.
+                </p>
+              )}
+              {revPreview.plans.length === 0 && <p className="text-ink/60">Nothing to reverse.</p>}
+              {revPreview.plans.map((p) => (
+                <div key={p.lease_id} className="border-t border-border/60 pt-2 first:border-0 first:pt-0">
+                  {revScope === "building" && <p className="font-medium">{p.room_id ? roomAndBuilding(p.room_id) : p.lease_id}</p>}
+                  {p.blocked.map((b, i) => (
+                    <p key={i} className="text-stamp-red">Blocked: {b}</p>
+                  ))}
+                  {p.invoices.map((inv) => (
+                    <p key={inv.id} className="figures">
+                      Invoice {inv.invoice_month.slice(0, 7)} — Rs {Number(inv.total_amount).toLocaleString("en-PK")} ({inv.status})
+                    </p>
+                  ))}
+                  {p.entries.length > 0 && <p className="text-ink/60">{p.entries.length} journal entr{p.entries.length === 1 ? "y" : "ies"} will be reversed.</p>}
+                  {p.skipped_invoices.map((s2) => (
+                    <p key={s2.id} className="text-brass">Skipped {s2.invoice_month.slice(0, 7)}: {s2.reason}</p>
+                  ))}
+                  {p.manual_entries_to_review.length > 0 && (
+                    <p className="text-brass">
+                      {p.manual_entries_to_review.length} manual entr{p.manual_entries_to_review.length === 1 ? "y is" : "ies are"} tagged to this lease and will NOT be changed (review in Journal):{" "}
+                      {p.manual_entries_to_review.map((m) => m.description || m.id).join(", ")}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" onClick={() => setRevOpen(false)}>
+              Close
+            </Button>
+            <Button type="button" variant="secondary" onClick={previewReverse} disabled={revBusy}>
+              {revBusy && !revPreview ? "Checking…" : "Preview"}
+            </Button>
+            <Button
+              type="button"
+              variant="danger"
+              onClick={confirmReverse}
+              disabled={revBusy || !revPreview || revPreview.plans.every((p) => p.blocked.length > 0 || (p.invoices.length === 0 && p.entries.length === 0 && revMode !== "full"))}
+            >
+              {revBusy && revPreview ? "Reversing…" : "Confirm reversal"}
             </Button>
           </div>
         </div>
