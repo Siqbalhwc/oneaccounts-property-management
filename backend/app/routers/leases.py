@@ -827,7 +827,7 @@ def reverse_leases_bulk(
         if len(payload.lease_ids) > MAX_LEASES_PER_REVERSAL_CALL and not payload.dry_run:
             raise HTTPException(status_code=400, detail=f"Send at most {MAX_LEASES_PER_REVERSAL_CALL} leases per call.")
         leases = (
-            supabase.table("leases").select("id, room_id, status, termination_reason")
+            supabase.table("leases").select("id, room_id, start_date, status, termination_reason")
             .eq("company_id", company_id).in_("id", payload.lease_ids).execute().data
         )
     elif payload.building_id:
@@ -838,7 +838,7 @@ def reverse_leases_bulk(
         leases = []
         for i in range(0, len(room_ids), 80):
             leases.extend(
-                supabase.table("leases").select("id, room_id, status, termination_reason")
+                supabase.table("leases").select("id, room_id, start_date, status, termination_reason")
                 .eq("company_id", company_id).in_("room_id", room_ids[i:i + 80]).execute().data
             )
     else:
@@ -881,7 +881,7 @@ def reverse_lease(
     """
     _validate_reversal_inputs(payload.reason, payload.mode, payload.before_date, require_reason=not payload.dry_run)
     lease = (
-        supabase.table("leases").select("id, room_id, status, termination_reason")
+        supabase.table("leases").select("id, room_id, start_date, status, termination_reason")
         .eq("company_id", company_id).eq("id", lease_id).execute().data
     )
     if not lease:

@@ -15,6 +15,8 @@ Two modes:
     for a month that is already covered by opening balances.
   * "full" -- reverses + cancels every invoice, reverses the security-deposit
     entry made at lease creation, then ends the lease (terminated, room freed).
+    The lease is ended on its START date -- not today -- so it never counts as
+    having been in force for any period.
 
 Safety rules (enforced here, not in the UI):
   * Nothing is reversed for an invoice that already has a payment against it.
@@ -164,6 +166,7 @@ def build_reversal_plans(
             {
                 "lease_id": lid,
                 "room_id": lease.get("room_id"),
+                "start_date": lease.get("start_date"),
                 "mode": mode,
                 "blocked": blocked,
                 "invoices": [] if blocked else to_cancel,
@@ -220,9 +223,9 @@ def execute_reversal_plan(
     lease_ended = False
     if plan["mode"] == "full" and not errors:
         try:
-            today = str(date.today())
+            ended_on = str(plan.get("start_date") or date.today())
             supabase.table("leases").update(
-                {"status": "terminated", "terminated_at": today, "termination_reason": f"Reversed -- {reason}"}
+                {"status": "terminated", "terminated_at": ended_on, "termination_reason": f"Reversed -- {reason}"}
             ).eq("id", plan["lease_id"]).eq("company_id", company_id).execute()
             other_active = (
                 supabase.table("leases").select("id")

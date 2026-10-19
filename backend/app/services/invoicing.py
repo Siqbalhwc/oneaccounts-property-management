@@ -224,6 +224,7 @@ def _recalculate_invoice(
     month_start: date,
     entry_date: date,
     reason: str,
+    date_from_original: bool = False,
 ) -> dict:
     """
     The shared recalculation used by BOTH the lease-charge-edit path
@@ -233,9 +234,15 @@ def _recalculate_invoice(
     month on top, reverse every live journal entry for the invoice, replace
     its line items and post the corrected entry.
 
-    entry_date dates BOTH the reversal and the new entry. The charge-edit
-    path passes today (unchanged behaviour); the utility path passes the
-    invoice's own month so receivable stays in the right period.
+    entry_date dates BOTH the reversal and the new entry. The utility path
+    passes the invoice's own month so receivable stays in the right period.
+
+    date_from_original=True (used by the charge-edit path) ignores entry_date
+    whenever the invoice already has live entries: each old entry is reversed
+    on its OWN original date, and the corrected entry is posted on that same
+    date. So an October invoice that was posted on 1 October is never
+    reversed/re-posted "today" -- receivable as of ANY date stays right.
+    entry_date is only the fallback when there is no live entry to copy from.
     """
     charges = current_charges_with_earliest_start(supabase, lease["id"])
 
@@ -268,7 +275,7 @@ def _recalculate_invoice(
     # system, only reversed (see reference doc).
     live_entries = (
         supabase.table("journal_entries")
-        .select("id")
+        .select("id, entry_date")
         .eq("source_type", "invoice")
         .eq("source_id", invoice["id"])
         .eq("status", "posted")
@@ -276,8 +283,12 @@ def _recalculate_invoice(
         .execute()
         .data
     )
+    repost_date = entry_date
+    if date_from_original and live_entries:
+        repost_date = min(date.fromisoformat(str(e["entry_date"])) for e in live_entries)
     for entry in live_entries:
-        reverse_journal_entry(supabase, company_id, entry["id"], reason=reason, entry_date=str(entry_date))
+        reverse_date = str(entry["entry_date"]) if date_from_original else str(entry_date)
+        reverse_journal_entry(supabase, company_id, entry["id"], reason=reason, entry_date=reverse_date)
 
     supabase.table("invoice_line_items").delete().eq("invoice_id", invoice["id"]).execute()
     if prorated:
@@ -294,7 +305,7 @@ def _recalculate_invoice(
             ]
         ).execute()
 
-    new_total = post_invoice_journal(supabase, company_id, invoice, lease, prorated, entry_date=entry_date) if prorated else 0.0
+    new_total = post_invoice_journal(supabase, company_id, invoice, lease, prorated, entry_date=repost_date) if prorated else 0.0
 
     updated = (
         supabase.table("invoices")
@@ -346,7 +357,8 @@ def resync_current_month_invoice(supabase: Client, company_id: str, lease: dict)
         return None
 
     return _recalculate_invoice(
-        supabase, company_id, lease, invoice, month_start, today, "Lease charges changed — invoice recalculated"
+        supabase, company_id, lease, invoice, month_start, today, "Lease charges changed — invoice recalculated",
+        date_from_original=True,
     )
 
 
