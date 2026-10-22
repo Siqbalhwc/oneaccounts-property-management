@@ -263,7 +263,17 @@ def post_journal_entry(
         }
         for l in lines
     ]
-    supabase.table("journal_lines").insert(line_rows).execute()
+    try:
+        supabase.table("journal_lines").insert(line_rows).execute()
+    except Exception:
+        # The header is already written; without its lines it would sit in
+        # the books as an empty entry. Remove our own just-created header
+        # (best effort) before re-raising so the caller still sees the error.
+        try:
+            supabase.table("journal_entries").delete().eq("id", entry["id"]).execute()
+        except Exception:
+            pass
+        raise
 
     return entry
 

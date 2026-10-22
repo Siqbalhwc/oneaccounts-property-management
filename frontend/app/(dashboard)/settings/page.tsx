@@ -279,6 +279,135 @@ function ChargesImportSlot() {
   );
 }
 
+type JournalResponse = {
+  report: ImportReportRow[];
+  applied: boolean;
+  to_post: number;
+  posted: number;
+  warnings: string[];
+};
+
+// "Journal entries": Preview checks every entry (balanced, accounts and
+// rooms exist, duplicates) and posts nothing; Post then books the entries
+// that passed. An entry that doesn't balance is declined as a whole.
+function JournalImportSlot() {
+  const endpoint = "/data-transfer/import/journal";
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState<"" | "preview" | "post">("");
+  const [report, setReport] = useState<ImportReportRow[] | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [toPost, setToPost] = useState<number | null>(null);
+  const [posted, setPosted] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [downloadingTemplate, setDownloadingTemplate] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  async function handleDownloadTemplate() {
+    setDownloadingTemplate(true);
+    setError(null);
+    try {
+      await downloadFile("/data-transfer/templates/journal", "journal_template.xlsx");
+    } catch (err: any) {
+      setError(`Couldn't get the template — ${err.message}`);
+    } finally {
+      setDownloadingTemplate(false);
+    }
+  }
+
+  async function run(apply: boolean) {
+    if (!file) return;
+    setBusy(apply ? "post" : "preview");
+    setError(null);
+    setReport(null);
+    setPosted(null);
+    try {
+      const res = await uploadFileForReport<JournalResponse>(`${endpoint}?apply=${apply}`, file);
+      setReport(res.report);
+      setWarnings(res.warnings || []);
+      if (apply) {
+        setPosted(res.posted);
+        setToPost(null);
+      } else {
+        setToPost(res.to_post);
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  const okCount = report?.filter((r) => r.status === "created").length ?? 0;
+  const skippedCount = report?.filter((r) => r.status === "skipped").length ?? 0;
+  const errorCount = report?.filter((r) => r.status === "error").length ?? 0;
+
+  return (
+    <div className="border border-border rounded-card p-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <p className="text-sm font-medium">Journal entries</p>
+          <p className="text-xs text-ink/50 mt-0.5">
+            Columns: entry_no, entry_date, description, account_code, debit, credit, building_name, room_number,
+            tenant_cnic. Rows with the same entry_no form one entry; total debit must equal total credit or the entry
+            is declined. Lines on 1100 / 2100 need a room. Owner/admin only. Preview first.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <Button variant="ghost" onClick={handleDownloadTemplate} disabled={downloadingTemplate}>
+            {downloadingTemplate ? "Preparing…" : "Template"}
+          </Button>
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".xlsx"
+            className="hidden"
+            onChange={(e) => {
+              setFile(e.target.files?.[0] ?? null);
+              setReport(null);
+              setToPost(null);
+              setPosted(null);
+              setError(null);
+            }}
+          />
+          <Button variant="ghost" onClick={() => inputRef.current?.click()}>
+            {file ? file.name : "Choose file…"}
+          </Button>
+          <Button variant="secondary" onClick={() => run(false)} disabled={!file || busy !== ""}>
+            {busy === "preview" ? "Checking…" : "Preview"}
+          </Button>
+          <Button variant="secondary" onClick={() => run(true)} disabled={!file || busy !== "" || !toPost}>
+            {busy === "post" ? "Posting…" : "Post"}
+          </Button>
+        </div>
+      </div>
+
+      {error && <p className="text-sm text-stamp-red mt-3">{error}</p>}
+      {warnings.map((w, i) => (
+        <p key={i} className="text-xs text-stamp-red mt-2">{w}</p>
+      ))}
+
+      {report && (
+        <div className="mt-4">
+          <p className="text-xs text-ink/55 mb-2">
+            {posted !== null ? `${posted} entries posted` : `${okCount} entries will post (nothing saved yet — press Post)`}
+            {skippedCount > 0 ? `, ${skippedCount} skipped` : ""}
+            {errorCount > 0 ? `, ${errorCount} problems` : ""}.
+          </p>
+          <div className="max-h-72 overflow-y-auto space-y-1.5">
+            {report.map((r, i) => (
+              <div key={i} className="flex items-start gap-2 text-xs">
+                <span className="text-ink/40 w-10 shrink-0">Row {r.row}</span>
+                <span className={`stamp ${statusClass(r.status)} shrink-0`}>{r.status}</span>
+                <span className="text-ink/65">{r.detail}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const [company, setCompany] = useState<Company | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -611,6 +740,7 @@ export default function SettingsPage() {
               hint="Columns: tenant_cnic, building_name, room_number, start_date, end_date, rent_amount, one “charge: …” column per extra charge (e.g. charge: Parking, charge: Internet; add (one_time) for a one-off), security_deposit_amount, security_deposit_date_received. Blank or 0 = no such charge."
             />
             <ChargesImportSlot />
+            <JournalImportSlot />
           </div>
         </Card>
       )}

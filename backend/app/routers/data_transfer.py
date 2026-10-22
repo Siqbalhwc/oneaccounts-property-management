@@ -57,6 +57,7 @@ from app.core.deps import get_current_company_id, get_current_user, get_supabase
 from app.crud.generic import write_audit_log, friendly_db_error
 from postgrest.exceptions import APIError
 from app.services.invoice_batch import fetch_all
+from app.services.ledger import JournalLine, UnbalancedJournalEntry, post_journal_entry
 from app.services.invoicing import resync_current_month_invoice
 from app.services.utility_bills import label_key
 
@@ -389,6 +390,71 @@ def download_all_templates(supabase: Client = Depends(get_supabase)):
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="oneaccounts_import_template.xlsx"'},
+    )
+
+
+# ----------------------------------------------------------------------------
+# Journal entries template (separate from the five entity sheets above)
+# ----------------------------------------------------------------------------
+JOURNAL_HEADERS = [
+    "entry_no", "entry_date", "description", "account_code", "debit", "credit",
+    "building_name", "room_number", "tenant_cnic",
+]
+
+JOURNAL_INSTRUCTIONS = [
+    ("entry_no", "Required on every row. Rows with the same entry_no form ONE journal entry. Total debit must equal total credit within each entry, otherwise the whole entry is declined (nothing is posted for it)."),
+    ("entry_date", "Required. YYYY-MM-DD (e.g. 2026-09-30). Taken from the first row of the entry; every row of an entry must carry the same date."),
+    ("description", "Required on the first row of each entry (the entry's title). Used to detect duplicates: an entry with the same date + description as one already posted is skipped, so uploading the same file twice cannot double your balances."),
+    ("account_code", "Required. The account's code in your Chart of Accounts, e.g. 2100 Security Deposits Held, 1100 Accounts Receivable, 3001 Opening Balance. You choose the accounts and which side each goes on."),
+    ("debit / credit", "Fill ONE of the two on each row (the other blank or 0). Amounts must be positive."),
+    ("building_name", "Optional on offset lines; required whenever room_number is filled. Must match an existing building name."),
+    ("room_number", "REQUIRED for lines on 1100 Accounts Receivable and 2100 Security Deposits Held (their balances are tracked per tenant/room). Leave blank on the offset line (e.g. 3001)."),
+    ("tenant_cnic", "Optional. If blank, the tenant is taken from the active lease in that room. Fill it when the room has no active lease (e.g. a past tenant) -- it must match an existing tenant."),
+    ("Posting", "Entries are posted as manual journal entries (Journal Voucher), dated as given, tagged to the building/room/tenant of each line. Posted entries are never edited -- a wrong one is reversed from the Journal screen. Always press Preview first."),
+]
+
+
+def _build_journal_template(wb: Workbook) -> None:
+    ws = wb.create_sheet("Journal")
+    ws.append(JOURNAL_HEADERS)
+    sample = [
+        ("S-1", "2026-09-30", "Opening security deposits - Sunrise Heights", "3001", 30000, None, "Sunrise Heights", None, None),
+        ("S-1", "2026-09-30", "Opening security deposits - Sunrise Heights", "2100", None, 10000, "Sunrise Heights", "A-101", None),
+        ("S-1", "2026-09-30", "Opening security deposits - Sunrise Heights", "2100", None, 20000, "Sunrise Heights", "A-102", None),
+        ("R-1", "2026-09-30", "Opening receivable - Sunrise Heights", "1100", 12000, None, "Sunrise Heights", "A-101", None),
+        ("R-1", "2026-09-30", "Opening receivable - Sunrise Heights", "1100", 8000, None, "Sunrise Heights", "A-102", None),
+        ("R-1", "2026-09-30", "Opening receivable - Sunrise Heights", "3001", None, 20000, "Sunrise Heights", None, None),
+    ]
+    for row in sample:
+        ws.append(list(row))
+    style_header_row(ws, len(JOURNAL_HEADERS))
+    autosize_columns(ws, [10, 12, 44, 14, 12, 12, 20, 14, 18])
+
+    ins = wb.create_sheet("Instructions")
+    ins.append(["Column", "Rule"])
+    for col, rule in JOURNAL_INSTRUCTIONS:
+        ins.append([col, rule])
+    ins.append(["Sample", "The Journal sheet holds two example entries (opening security, opening receivable). Delete the example rows and put your own."])
+    style_header_row(ins, 2)
+    autosize_columns(ins, [18, 110])
+    for r in range(2, len(JOURNAL_INSTRUCTIONS) + 3):
+        ins.cell(row=r, column=2).alignment = ins.cell(row=r, column=2).alignment.copy(wrap_text=True)
+
+
+@router.get("/templates/journal")
+def download_journal_template():
+    """Template for the Journal entries import (must stay above the
+    /templates/{entity} route so 'journal' is not read as an entity name)."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    _build_journal_template(wb)
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="journal_template.xlsx"'},
     )
 
 
@@ -1161,3 +1227,254 @@ def import_lease_charges(
 
     report.sort(key=lambda r: r["row"])
     return {"report": report, "applied": True, "to_change": len(work), "remaining": len(rest), "warnings": warnings}
+
+
+# ============================================================================
+# IMPORT -- Journal entries (opening security, opening receivable, any
+# balanced adjustment).
+#
+# Rules, all enforced here in the backend:
+#   * Rows sharing an entry_no form one entry; debit total must equal credit
+#     total or the WHOLE entry is declined (nothing of it is posted).
+#   * Every line is checked (account exists, one side only, building/room/
+#     tenant resolve inside THIS company). Lines on 1100 / 2100 must name a
+#     room so the balance lands on the right tenant -- the same tagging the
+#     room-wise report and Receive Payment screen read.
+#   * Goes through post_journal_entry(), the same engine every other posting
+#     uses, as a manual_adjustment (Journal Voucher), never edited later.
+#   * Duplicate guard: an entry whose date + description match a posted
+#     manual entry (or an earlier entry in the same file) is skipped.
+#   * Overlap warning (not a block): a room that already has posted manual
+#     lines on the same account is flagged, since that is how an opening
+#     balance gets loaded twice under a different description.
+#   * Preview by default; owner/admin only; each entry posts independently.
+# ============================================================================
+
+def parse_journal_date(value: Any) -> date:
+    from datetime import datetime as _dt
+    if isinstance(value, _dt):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = cell_str(value)
+    if not text:
+        raise ValueError("entry_date is required.")
+    try:
+        return _dt.strptime(text[:10], "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError(f'entry_date "{text}" must look like 2026-09-30.')
+
+
+@router.post("/import/journal")
+def import_journal(
+    file: UploadFile = File(...),
+    apply: bool = Query(False, description="false = preview only (nothing is posted)"),
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+    user: dict = Depends(get_current_user),
+    _admin: None = Depends(require_owner_or_admin),
+):
+    wb = load_workbook(BytesIO(file.file.read()), data_only=True)
+    rows = read_sheet(wb, "Journal")
+    if not rows:
+        raise HTTPException(status_code=400, detail='No rows found on a sheet named "Journal" -- download the Journal template for the right layout.')
+
+    accounts = fetch_all(lambda: supabase.table("chart_of_accounts").select("id, code, name").eq("company_id", company_id).order("id"))
+    buildings = fetch_all(lambda: supabase.table("buildings").select("id, name").eq("company_id", company_id).order("id"))
+    rooms = fetch_all(lambda: supabase.table("rooms").select("id, room_number, building_id").eq("company_id", company_id).order("id"))
+    tenants = fetch_all(lambda: supabase.table("tenants").select("id, cnic, full_name").eq("company_id", company_id).order("id"))
+    leases = fetch_all(lambda: supabase.table("leases").select("id, room_id, tenant_id").eq("company_id", company_id).eq("status", "active").order("id"))
+    manual_entries = fetch_all(
+        lambda: supabase.table("journal_entries").select("id, entry_date, description, status")
+        .eq("company_id", company_id).eq("source_type", "manual_adjustment").order("id")
+    )
+
+    account_by_code = {str(a["code"]).strip(): a for a in accounts}
+    building_by_name = {str(b["name"]).strip().lower(): b for b in buildings}
+    room_by_key = {(r["building_id"], str(r["room_number"]).strip().lower()): r for r in rooms}
+    room_by_id = {r["id"]: r for r in rooms}
+    tenant_by_cnic = {re.sub(r"\D", "", str(t.get("cnic") or "")): t for t in tenants}
+    tenant_by_id = {t["id"]: t for t in tenants}
+    tenant_by_room: Dict[str, List[str]] = {}
+    for l in leases:
+        tenant_by_room.setdefault(l["room_id"], []).append(l["tenant_id"])
+    posted_keys = {
+        (str(e["entry_date"])[:10], str(e.get("description") or "").strip().lower())
+        for e in manual_entries if e.get("status") == "posted"
+    }
+
+    # Overlap check: existing posted manual lines per (room, account). Best
+    # effort -- if it can't run, the rest still works and we say so.
+    existing_manual: Dict[tuple, str] = {}
+    overlap_note = ""
+    try:
+        posted_ids = {e["id"]: str(e.get("description") or "") for e in manual_entries if e.get("status") == "posted"}
+        lines_existing = fetch_all(
+            lambda: supabase.table("journal_lines").select("id, journal_entry_id, account_id, room_id")
+            .eq("company_id", company_id).order("id")
+        )
+        for ln in lines_existing:
+            if ln.get("room_id") and ln["journal_entry_id"] in posted_ids:
+                existing_manual.setdefault((ln["room_id"], ln["account_id"]), posted_ids[ln["journal_entry_id"]])
+    except Exception:
+        overlap_note = "Overlap check against existing manual entries could not run - review opening balances manually."
+
+    # ---- group rows into entries -------------------------------------------
+    entries: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    report: List[Dict[str, Any]] = []
+    for i, row in enumerate(rows, start=2):
+        no = cell_str(row.get("entry_no"))
+        if not no:
+            report.append({"row": i, "status": "error", "detail": "entry_no is required on every row."})
+            continue
+        if no not in entries:
+            entries[no] = {"no": no, "first_row": i, "date_val": row.get("entry_date"), "description": cell_str(row.get("description")), "rows": [], "errors": []}
+            order.append(no)
+        entries[no]["rows"].append((i, row))
+
+    plans: List[Dict[str, Any]] = []
+    seen_keys = set()
+    for no in order:
+        e = entries[no]
+        errs: List[str] = []
+        try:
+            entry_date = parse_journal_date(e["date_val"])
+        except ValueError as ex:
+            entry_date = None
+            errs.append(f"row {e['first_row']}: {ex}")
+        if not e["description"]:
+            errs.append(f"row {e['first_row']}: description is required on the first row of the entry.")
+
+        lines: List[Dict[str, Any]] = []
+        notes: List[str] = []
+        for i, row in e["rows"]:
+            try:
+                if entry_date is not None:
+                    try:
+                        if parse_journal_date(row.get("entry_date")) != entry_date:
+                            raise ValueError("entry_date differs from the entry's first row.")
+                    except ValueError as ex:
+                        raise ValueError(str(ex))
+                code = cell_str(row.get("account_code"))
+                account = account_by_code.get(code)
+                if not account:
+                    raise ValueError(f'account_code "{code}" is not in your Chart of Accounts.')
+                debit = parse_amount(row.get("debit"), "debit")
+                credit = parse_amount(row.get("credit"), "credit")
+                if (debit > 0) == (credit > 0):
+                    raise ValueError("fill exactly one of debit or credit (a positive amount).")
+
+                building_name = cell_str(row.get("building_name"))
+                room_number = cell_str(row.get("room_number"))
+                cnic_digits = re.sub(r"\D", "", cell_str(row.get("tenant_cnic")))
+                building = None
+                room = None
+                tenant_id = None
+                if building_name:
+                    building = building_by_name.get(building_name.lower())
+                    if not building:
+                        raise ValueError(f'no building named "{building_name}".')
+                if room_number:
+                    if not building:
+                        raise ValueError("building_name is required when room_number is given.")
+                    room = room_by_key.get((building["id"], room_number.lower()))
+                    if not room:
+                        raise ValueError(f'no room "{room_number}" in "{building_name}".')
+                if cnic_digits:
+                    t = tenant_by_cnic.get(cnic_digits)
+                    if not t:
+                        raise ValueError(f"no tenant with CNIC {row.get('tenant_cnic')}.")
+                    tenant_id = t["id"]
+                elif room:
+                    holders = tenant_by_room.get(room["id"], [])
+                    if len(holders) == 1:
+                        tenant_id = holders[0]
+                    elif len(holders) > 1:
+                        raise ValueError(f"room {room_number} has more than one active lease - give tenant_cnic.")
+                if code in ("1100", "2100"):
+                    if not room:
+                        raise ValueError(f"lines on {code} must name a building and room so the balance lands on the right tenant.")
+                    if not tenant_id:
+                        raise ValueError(f"room {room_number} has no active lease - give tenant_cnic so the {code} balance is tagged to a tenant.")
+                if room and (room["id"], account["id"]) in existing_manual:
+                    notes.append(f'room {room_number} already has a posted manual line on {code} ("{existing_manual[(room["id"], account["id"])]}")')
+
+                lines.append({
+                    "account_id": account["id"],
+                    "direction": "debit" if debit > 0 else "credit",
+                    "amount": round(debit if debit > 0 else credit, 2),
+                    "building_id": building["id"] if building else None,
+                    "room_id": room["id"] if room else None,
+                    "tenant_id": tenant_id,
+                })
+            except ValueError as ex:
+                errs.append(f"row {i}: {ex}")
+
+        total_dr = round(sum(l["amount"] for l in lines if l["direction"] == "debit"), 2)
+        total_cr = round(sum(l["amount"] for l in lines if l["direction"] == "credit"), 2)
+        if not errs:
+            if len(lines) < 2:
+                errs.append("an entry needs at least two lines.")
+            elif total_dr != total_cr:
+                errs.append(f"does not balance: debit {total_dr:,.2f} vs credit {total_cr:,.2f} (difference {abs(total_dr - total_cr):,.2f}).")
+            elif total_dr == 0:
+                errs.append("total amount is zero.")
+
+        title = f'Entry {no}' + (f' ({entry_date}, "{e["description"]}")' if entry_date and e["description"] else "")
+        if errs:
+            for msg in errs:
+                report.append({"row": e["first_row"], "status": "error", "detail": f"{title}: {msg}"})
+            report.append({"row": e["first_row"], "status": "error", "detail": f"{title}: NOT posted - fix the rows above and upload again."})
+            continue
+
+        key = (str(entry_date), e["description"].strip().lower())
+        if key in posted_keys:
+            report.append({"row": e["first_row"], "status": "skipped", "detail": f"{title}: already posted (same date and description) - skipped."})
+            continue
+        if key in seen_keys:
+            report.append({"row": e["first_row"], "status": "skipped", "detail": f"{title}: same date and description as an earlier entry in this file - skipped."})
+            continue
+        seen_keys.add(key)
+        plans.append({"no": no, "row": e["first_row"], "date": entry_date, "description": e["description"], "lines": lines, "total": total_dr, "title": title, "notes": notes})
+
+    warnings = [overlap_note] if overlap_note else []
+
+    def describe(p, verb):
+        extra = (" | CHECK: " + "; ".join(p["notes"][:3]) + (f" (+{len(p['notes']) - 3} more)" if len(p["notes"]) > 3 else "")) if p["notes"] else ""
+        return f'{p["title"]}: {verb} {len(p["lines"])} lines, debit = credit = Rs {p["total"]:,.2f}{extra}'
+
+    if not apply:
+        for p in plans:
+            report.append({"row": p["row"], "status": "created", "detail": describe(p, "will post")})
+        report.sort(key=lambda r: r["row"])
+        return {"report": report, "applied": False, "to_post": len(plans), "posted": 0, "warnings": warnings}
+
+    posted = 0
+    for p in plans:
+        try:
+            jl: List[JournalLine] = [dict(l) for l in p["lines"]]  # type: ignore
+            entry = post_journal_entry(
+                supabase,
+                company_id=company_id,
+                entry_date=str(p["date"]),
+                source_type="manual_adjustment",
+                source_id=None,
+                description=p["description"],
+                lines=jl,
+                created_by=user["user_id"],
+            )
+            count = supabase.table("journal_lines").select("id", count="exact").eq("journal_entry_id", entry["id"]).execute().count
+            if count is not None and count != len(p["lines"]):
+                report.append({"row": p["row"], "status": "error", "detail": f'{p["title"]}: posted but only {count} of {len(p["lines"])} lines were saved - open the Journal screen and check this entry before doing anything else.'})
+                continue
+            write_audit_log(supabase, company_id, user["user_id"], "create", "journal_entries", entry["id"], None, {"source": "journal_import", "lines": len(p["lines"]), "total": p["total"]})
+            posted += 1
+            report.append({"row": p["row"], "status": "created", "detail": describe(p, "posted")})
+        except UnbalancedJournalEntry as ex:
+            report.append({"row": p["row"], "status": "error", "detail": f'{p["title"]}: {ex}'})
+        except Exception as ex:
+            report.append({"row": p["row"], "status": "error", "detail": f'{p["title"]}: could not post - {ex}'})
+
+    report.sort(key=lambda r: r["row"])
+    return {"report": report, "applied": True, "to_post": len(plans), "posted": posted, "warnings": warnings}
