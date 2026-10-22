@@ -51,6 +51,11 @@ export default function NewLeasePage() {
 
   // Step 1
   const [tenantId, setTenantId] = useState("");
+  // "Owner lives here": the tenant becomes the owner's own tenant record for
+  // this one apartment (created by the server from the owner's details).
+  const [ownerLives, setOwnerLives] = useState(false);
+  const [ownerBusy, setOwnerBusy] = useState(false);
+  const [ownerError, setOwnerError] = useState<string | null>(null);
   const [buildingId, setBuildingId] = useState("");
   const [roomId, setRoomId] = useState("");
   const [startDate, setStartDate] = useState("");
@@ -83,6 +88,30 @@ export default function NewLeasePage() {
     api.get<LeaseSummary[]>("/leases?status=active").then(setExistingLeases);
   }, []);
 
+  useEffect(() => {
+    if (!ownerLives || !roomId) return;
+    let cancelled = false;
+    setOwnerBusy(true);
+    setOwnerError(null);
+    setTenantId("");
+    api
+      .post<Tenant>("/owner-tenants", { room_id: roomId })
+      .then((t) => {
+        if (cancelled) return;
+        setTenants((prev) => (prev.some((x) => x.id === t.id) ? prev : [...prev, t]));
+        setTenantId(t.id);
+      })
+      .catch((e: any) => {
+        if (!cancelled) setOwnerError(e.message);
+      })
+      .finally(() => {
+        if (!cancelled) setOwnerBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ownerLives, roomId]);
+
   const vacantRooms = rooms.filter(
     (r) => r.building_id === buildingId && r.status === "vacant"
   );
@@ -91,7 +120,7 @@ export default function NewLeasePage() {
   // agreement -- filters the underlying list, the field itself still works
   // exactly as before.
   const availableTenants = tenants.filter(
-    (t) => !existingLeases.some((l) => l.tenant_id === t.id && l.status === "active")
+    (t) => !t.owner_id && !existingLeases.some((l) => l.tenant_id === t.id && l.status === "active")
   );
 
   // "Posts to account" options for the searchable dropdown -- label folds
@@ -276,16 +305,32 @@ export default function NewLeasePage() {
       <Card>
         {step === 0 && (
           <div className="space-y-4">
-            <Field label="Tenant" hint="Only tenants without a currently-active lease are shown.">
-              <Select value={tenantId} onChange={(e) => setTenantId(e.target.value)}>
-                <option value="">Select a tenant…</option>
-                {availableTenants.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.full_name} — {t.cnic}
-                  </option>
-                ))}
-              </Select>
+            <Field
+              label="Tenant"
+              hint={ownerLives ? "The owner of the chosen apartment is the tenant." : "Only tenants without a currently-active lease are shown."}
+            >
+              {ownerLives ? (
+                <p className="text-sm text-ink/70 border border-border rounded-card px-3 py-2">
+                  {ownerBusy
+                    ? "Preparing the owner as tenant…"
+                    : tenantId
+                    ? `${tenants.find((t) => t.id === tenantId)?.full_name ?? "Owner"} — owner lives here`
+                    : "Choose the apartment below — its owner becomes the tenant."}
+                </p>
+              ) : (
+                <Select value={tenantId} onChange={(e) => setTenantId(e.target.value)}>
+                  <option value="">Select a tenant…</option>
+                  {availableTenants.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.full_name} — {t.cnic}
+                    </option>
+                  ))}
+                </Select>
+              )}
             </Field>
+            {ownerError && (
+              <p className="text-sm text-stamp-red bg-stamp-red/5 border border-stamp-red/20 rounded-card px-3 py-2">{ownerError}</p>
+            )}
 
             {activeLeaseForTenant && (
               <p className="text-sm text-stamp-red bg-stamp-red/5 border border-stamp-red/20 rounded-card px-3 py-2">
@@ -322,6 +367,19 @@ export default function NewLeasePage() {
                 ))}
               </Select>
             </Field>
+
+            <label className="flex items-center gap-2 text-sm text-ink/70">
+              <input
+                type="checkbox"
+                checked={ownerLives}
+                onChange={(e) => {
+                  setOwnerLives(e.target.checked);
+                  setOwnerError(null);
+                  setTenantId("");
+                }}
+              />
+              Owner lives here — use the apartment's owner as the tenant (no rent; add service charges next)
+            </label>
 
             <div className="grid grid-cols-2 gap-4">
               <Field label="Start date">

@@ -20,6 +20,7 @@ from app.routers import (
     ledger,
     leases,
     owner_ledger,
+    owner_tenants,
     payments,
     platform_admin,
     property_search,
@@ -96,6 +97,7 @@ app.include_router(simple_resources.staff_router, prefix=API_PREFIX, dependencie
 app.include_router(expenses.router, prefix=API_PREFIX, dependencies=_GUARD)
 app.include_router(salary_payments.router, prefix=API_PREFIX, dependencies=_GUARD)
 app.include_router(room_occupants.router, prefix=API_PREFIX, dependencies=_GUARD)
+app.include_router(owner_tenants.router, prefix=API_PREFIX, dependencies=_GUARD)
 app.include_router(facilities.router, prefix=API_PREFIX, dependencies=_GUARD)
 
 app.include_router(leases.router, prefix=API_PREFIX, dependencies=_GUARD)

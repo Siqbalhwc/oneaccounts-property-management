@@ -188,7 +188,8 @@ export default function TenantsPage() {
               header: "Name",
               accessor: (t) => (
                 <span className={`font-medium ${t.is_archived ? "opacity-50" : ""}`}>
-                  {t.full_name} {t.is_archived && <span className="text-xs font-normal">(archived)</span>}
+                  {t.full_name} {t.owner_id && <span className="text-xs font-normal text-ink/50">(owner)</span>}{" "}
+                  {t.is_archived && <span className="text-xs font-normal">(archived)</span>}
                 </span>
               ),
             },

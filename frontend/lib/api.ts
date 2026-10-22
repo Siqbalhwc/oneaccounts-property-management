@@ -212,6 +212,8 @@ export type Tenant = {
   email?: string;
   address?: string;
   is_archived?: boolean;
+  owner_id?: string | null;
+  owner_room_id?: string | null;
 };
 
 export type Lease = {

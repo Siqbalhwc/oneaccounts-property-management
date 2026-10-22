@@ -57,6 +57,7 @@ from app.core.deps import get_current_company_id, get_current_user, get_supabase
 from app.crud.generic import write_audit_log, friendly_db_error
 from postgrest.exceptions import APIError
 from app.services.invoice_batch import fetch_all
+from app.services.owner_tenants import ensure_owner_tenant
 from app.services.ledger import JournalLine, UnbalancedJournalEntry, post_journal_entry
 from app.services.invoicing import resync_current_month_invoice
 from app.services.utility_bills import label_key
@@ -312,15 +313,15 @@ def _build_leases_template(ws: Worksheet, charge_labels: Optional[List[str]] = N
     headers = (
         ["tenant_cnic", "building_name", "room_number", "start_date", "end_date", "rent_amount"]
         + charge_headers
-        + ["security_deposit_amount", "security_deposit_date_received"]
+        + ["security_deposit_amount", "security_deposit_date_received", "owner_occupied"]
     )
     ws.append(headers)
     example = ["35202-1234567-1", "Sunrise Heights", "A-101", "2026-01-01", "2026-12-31", 20000]
     example += [1500 if i == 0 else None for i in range(len(charge_headers))]
-    example += [40000, "2026-01-01"]
+    example += [40000, "2026-01-01", None]
     ws.append(example)
     style_header_row(ws, len(headers))
-    autosize_columns(ws, [18, 20, 14, 14, 14, 14] + [max(14, len(h) + 2) for h in charge_headers] + [20, 26])
+    autosize_columns(ws, [18, 20, 14, 14, 14, 14] + [max(14, len(h) + 2) for h in charge_headers] + [20, 26, 16])
 
 
 TEMPLATE_BUILDERS = {
@@ -350,6 +351,7 @@ INSTRUCTIONS = [
     ("Leases", "start_date, end_date", "Required. Format YYYY-MM-DD (e.g. 2026-01-01)."),
     ("Leases", "rent_amount", "Creates the 'Rent' charge. May be 0 or blank if the lease has at least one other charge."),
     ("Leases", "charge: <Label>", "Optional, any number of columns -- one per extra charge (Parking, Internet, Service Charges, ...). Blank or 0 = no such charge. Add (one_time) to the header for a one-off charge, e.g. 'charge: Commission (one_time)'. The label must match one of your charge heads (Chart of Accounts > charge mapping) so it posts to the right income account; an unmapped label posts to Other Income."),
+    ("Leases", "owner_occupied", "Optional. Write yes when the OWNER lives in this room: tenant_cnic is then ignored and the lease is made for the owner's own tenant record for this room (created from the owner's name, CNIC and phone on the Owners page -- the row is refused if those are missing). Leave rent_amount blank/0 and fill only the service-type charges."),
     ("Leases", "Add charges to existing leases", "The 'Add charges to existing leases' slot reads this same sheet. It matches each row to the ACTIVE lease already in that building + room (tenant CNIC must agree), adds only the charges that lease doesn't have yet, never changes an existing amount, and recalculates the current month's invoice. Use Preview first."),
     ("Leases", "security_deposit_amount, security_deposit_date_received", "Optional -- leave both blank for no deposit."),
     ("General", "Blank rows", "Skipped automatically -- fine to leave extra empty rows below your data."),
@@ -854,8 +856,8 @@ def import_tenants(
     wb = load_workbook(BytesIO(file.file.read()), data_only=True)
     rows = read_sheet(wb, "Tenants")
 
-    existing = supabase.table("tenants").select("cnic").execute().data
-    seen_cnics = {re.sub(r"\D", "", t["cnic"]) for t in existing}
+    existing = supabase.table("tenants").select("cnic, owner_id").execute().data
+    seen_cnics = {re.sub(r"\D", "", t["cnic"]) for t in existing if not t.get("owner_id")}
 
     report = []
     # Validate every row first with no database writes yet, then write in
@@ -969,11 +971,11 @@ def import_leases(
     wb = load_workbook(BytesIO(file.file.read()), data_only=True)
     rows = read_sheet(wb, "Leases")
 
-    tenants = supabase.table("tenants").select("id, cnic").execute().data
+    tenants = supabase.table("tenants").select("id, cnic, owner_id").execute().data
     buildings = supabase.table("buildings").select("id, name").execute().data
     rooms = supabase.table("rooms").select("id, room_number, building_id, status").execute().data
 
-    tenant_by_cnic = {re.sub(r"\D", "", t["cnic"]): t["id"] for t in tenants}
+    tenant_by_cnic = {re.sub(r"\D", "", t["cnic"]): t["id"] for t in tenants if not t.get("owner_id")}
     building_by_name = {b["name"].strip().lower(): b["id"] for b in buildings}
 
     def find_room(building_id, room_number):
@@ -988,10 +990,13 @@ def import_leases(
         building_name = cell_str(row.get("building_name"))
         room_number = cell_str(row.get("room_number"))
 
-        tenant_id = tenant_by_cnic.get(tenant_cnic)
-        if not tenant_id:
-            report.append({"row": i, "status": "error", "detail": f"No tenant with CNIC {row.get('tenant_cnic')} — import Tenants first."})
-            continue
+        owner_occupied = cell_str(row.get("owner_occupied")).lower() in ("yes", "y", "true", "1")
+        tenant_id = None
+        if not owner_occupied:
+            tenant_id = tenant_by_cnic.get(tenant_cnic)
+            if not tenant_id:
+                report.append({"row": i, "status": "error", "detail": f"No tenant with CNIC {row.get('tenant_cnic')} — import Tenants first."})
+                continue
 
         building_id = building_by_name.get(building_name.lower())
         if not building_id:
@@ -1002,6 +1007,15 @@ def import_leases(
         if not room:
             report.append({"row": i, "status": "error", "detail": f'No room "{room_number}" in "{building_name}".'})
             continue
+
+        if owner_occupied:
+            # The owner lives here: use (or create) the owner's own tenant
+            # record for this room, built from the owner's details.
+            try:
+                tenant_id = ensure_owner_tenant(supabase, company_id, room["id"])["id"]
+            except HTTPException as e:
+                report.append({"row": i, "status": "error", "detail": f"{building_name} — {room_number}: {e.detail}"})
+                continue
 
         try:
             start_date = row["start_date"].date() if hasattr(row.get("start_date"), "date") else row.get("start_date")
@@ -1031,7 +1045,7 @@ def import_leases(
                 security_deposit_date_received=deposit_date,
             )
             result = create_lease(payload, supabase=supabase, company_id=company_id)
-            report.append({"row": i, "status": "created", "detail": f"{building_name} — {room_number} — {row.get('tenant_cnic')}"})
+            report.append({"row": i, "status": "created", "detail": f"{building_name} — {room_number} — {'owner' if owner_occupied else row.get('tenant_cnic')}"})
         except HTTPException as e:
             report.append({"row": i, "status": "error", "detail": e.detail})
         except Exception as e:
@@ -1282,7 +1296,7 @@ def import_journal(
     accounts = fetch_all(lambda: supabase.table("chart_of_accounts").select("id, code, name").eq("company_id", company_id).order("id"))
     buildings = fetch_all(lambda: supabase.table("buildings").select("id, name").eq("company_id", company_id).order("id"))
     rooms = fetch_all(lambda: supabase.table("rooms").select("id, room_number, building_id").eq("company_id", company_id).order("id"))
-    tenants = fetch_all(lambda: supabase.table("tenants").select("id, cnic, full_name").eq("company_id", company_id).order("id"))
+    tenants = fetch_all(lambda: supabase.table("tenants").select("id, cnic, full_name, owner_id").eq("company_id", company_id).order("id"))
     leases = fetch_all(lambda: supabase.table("leases").select("id, room_id, tenant_id").eq("company_id", company_id).eq("status", "active").order("id"))
     manual_entries = fetch_all(
         lambda: supabase.table("journal_entries").select("id, entry_date, description, status")
@@ -1293,7 +1307,7 @@ def import_journal(
     building_by_name = {str(b["name"]).strip().lower(): b for b in buildings}
     room_by_key = {(r["building_id"], str(r["room_number"]).strip().lower()): r for r in rooms}
     room_by_id = {r["id"]: r for r in rooms}
-    tenant_by_cnic = {re.sub(r"\D", "", str(t.get("cnic") or "")): t for t in tenants}
+    tenant_by_cnic = {re.sub(r"\D", "", str(t.get("cnic") or "")): t for t in tenants if not t.get("owner_id")}
     tenant_by_id = {t["id"]: t for t in tenants}
     tenant_by_room: Dict[str, List[str]] = {}
     for l in leases:
