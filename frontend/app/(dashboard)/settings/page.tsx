@@ -125,6 +125,160 @@ function ImportSlot({
   );
 }
 
+type ChargesResponse = {
+  report: ImportReportRow[];
+  applied: boolean;
+  to_change: number;
+  remaining: number;
+  warnings: string[];
+};
+
+// "Add charges to existing leases": Preview first (nothing is written), then
+// Apply. Apply works through the leases in small batches (the server has a
+// time limit per request) and repeats until none remain. Safe to re-run:
+// charges already on a lease are skipped, never duplicated.
+function ChargesImportSlot() {
+  const endpoint = "/data-transfer/import/lease-charges";
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState<"" | "preview" | "apply">("");
+  const [progress, setProgress] = useState<string>("");
+  const [report, setReport] = useState<ImportReportRow[] | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [toChange, setToChange] = useState<number | null>(null);
+  const [applied, setApplied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [downloadingTemplate, setDownloadingTemplate] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  async function handleDownloadTemplate() {
+    setDownloadingTemplate(true);
+    setError(null);
+    try {
+      await downloadFile("/data-transfer/templates/leases", "leases_template.xlsx");
+    } catch (err: any) {
+      setError(`Couldn't get the template — ${err.message}`);
+    } finally {
+      setDownloadingTemplate(false);
+    }
+  }
+
+  async function handlePreview() {
+    if (!file) return;
+    setBusy("preview");
+    setError(null);
+    setReport(null);
+    setApplied(false);
+    try {
+      const res = await uploadFileForReport<ChargesResponse>(`${endpoint}?apply=false`, file);
+      setReport(res.report);
+      setWarnings(res.warnings || []);
+      setToChange(res.to_change);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function handleApply() {
+    if (!file) return;
+    setBusy("apply");
+    setError(null);
+    const merged = new Map<number, ImportReportRow>();
+    try {
+      for (let guard = 0; guard < 60; guard++) {
+        const res = await uploadFileForReport<ChargesResponse>(`${endpoint}?apply=true&limit=10`, file);
+        for (const r of res.report) {
+          const prev = merged.get(r.row);
+          if (!prev || prev.status !== "created") merged.set(r.row, r);
+        }
+        setWarnings(res.warnings || []);
+        setProgress(res.remaining > 0 ? `${res.remaining} leases left…` : "");
+        if (res.remaining === 0) break;
+      }
+      setReport(Array.from(merged.values()).sort((a, b) => a.row - b.row));
+      setApplied(true);
+      setToChange(null);
+    } catch (err: any) {
+      setReport(Array.from(merged.values()).sort((a, b) => a.row - b.row));
+      setError(`${err.message} — safe to press Apply again; charges already added are skipped.`);
+    } finally {
+      setBusy("");
+      setProgress("");
+    }
+  }
+
+  const createdCount = report?.filter((r) => r.status === "created").length ?? 0;
+  const skippedCount = report?.filter((r) => r.status === "skipped").length ?? 0;
+  const errorCount = report?.filter((r) => r.status === "error").length ?? 0;
+
+  return (
+    <div className="border border-border rounded-card p-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <p className="text-sm font-medium">Add charges to existing leases</p>
+          <p className="text-xs text-ink/50 mt-0.5">
+            Same sheet as Leases (tenant_cnic, building_name, room_number, rent_amount and one “charge: …” column per
+            extra charge). Matches each row to the active lease in that room, adds only the charges it doesn’t have,
+            and recalculates this month’s invoice. Owner/admin only. Preview first.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <Button variant="ghost" onClick={handleDownloadTemplate} disabled={downloadingTemplate}>
+            {downloadingTemplate ? "Preparing…" : "Template"}
+          </Button>
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".xlsx"
+            className="hidden"
+            onChange={(e) => {
+              setFile(e.target.files?.[0] ?? null);
+              setReport(null);
+              setToChange(null);
+              setApplied(false);
+              setError(null);
+            }}
+          />
+          <Button variant="ghost" onClick={() => inputRef.current?.click()}>
+            {file ? file.name : "Choose file…"}
+          </Button>
+          <Button variant="secondary" onClick={handlePreview} disabled={!file || busy !== ""}>
+            {busy === "preview" ? "Checking…" : "Preview"}
+          </Button>
+          <Button variant="secondary" onClick={handleApply} disabled={!file || busy !== "" || !toChange}>
+            {busy === "apply" ? `Applying… ${progress}` : "Apply"}
+          </Button>
+        </div>
+      </div>
+
+      {error && <p className="text-sm text-stamp-red mt-3">{error}</p>}
+      {warnings.map((w, i) => (
+        <p key={i} className="text-xs text-stamp-red mt-2">{w}</p>
+      ))}
+
+      {report && (
+        <div className="mt-4">
+          <p className="text-xs text-ink/55 mb-2">
+            {applied ? `${createdCount} leases updated` : `${createdCount} leases will get new charges (nothing saved yet — press Apply)`}
+            {skippedCount > 0 ? `, ${skippedCount} skipped` : ""}
+            {errorCount > 0 ? `, ${errorCount} need attention` : ""}.
+          </p>
+          <div className="max-h-72 overflow-y-auto space-y-1.5">
+            {report.map((r, i) => (
+              <div key={i} className="flex items-start gap-2 text-xs">
+                <span className="text-ink/40 w-10 shrink-0">Row {r.row}</span>
+                <span className={`stamp ${statusClass(r.status)} shrink-0`}>{r.status}</span>
+                <span className="text-ink/65">{r.detail}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const [company, setCompany] = useState<Company | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -454,8 +608,9 @@ export default function SettingsPage() {
               label="Leases"
               endpoint="/data-transfer/import/leases"
               templateEndpoint="/data-transfer/templates/leases"
-              hint="Columns: tenant_cnic, building_name, room_number, start_date, end_date, rent_amount, security_deposit_amount, security_deposit_date_received, security_deposit_is_received (yes/no), security_deposit_received_account_code"
+              hint="Columns: tenant_cnic, building_name, room_number, start_date, end_date, rent_amount, one “charge: …” column per extra charge (e.g. charge: Parking, charge: Internet; add (one_time) for a one-off), security_deposit_amount, security_deposit_date_received. Blank or 0 = no such charge."
             />
+            <ChargesImportSlot />
           </div>
         </Card>
       )}

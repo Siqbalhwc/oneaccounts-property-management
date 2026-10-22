@@ -56,6 +56,9 @@ from supabase import Client
 from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
 from app.crud.generic import write_audit_log, friendly_db_error
 from postgrest.exceptions import APIError
+from app.services.invoice_batch import fetch_all
+from app.services.invoicing import resync_current_month_invoice
+from app.services.utility_bills import label_key
 
 router = APIRouter(prefix="/data-transfer", tags=["Import / Export"])
 
@@ -141,6 +144,112 @@ def cell_str(value: Any) -> str:
     return str(value).strip()
 
 
+# ============================================================================
+# Charge columns on the Leases sheet.
+#
+# A lease can carry many charges (Rent, Parking, Internet, Service, ...).
+# Besides rent_amount, ANY column headed  "charge: <Label>"  is read as one
+# more charge on that lease -- e.g. "charge: Parking", "charge: Internet".
+# Add "(one_time)" to the header for a one-off charge, e.g.
+# "charge: Commission (one_time)". A blank or 0 cell means "no such charge
+# on this lease". The label is what posts to the ledger, through the
+# company's own charge_type_accounts mapping -- exactly like a charge typed
+# on the New Lease form.
+# ============================================================================
+
+CHARGE_COL_RE = re.compile(r"^\s*charge\s*:\s*(.+?)\s*$", re.IGNORECASE)
+ONE_TIME_RE = re.compile(r"\s*\(\s*one[_\- ]?time\s*\)\s*$", re.IGNORECASE)
+DEFAULT_CHARGE_LABELS = ["Parking", "Internet", "Service Charges"]
+
+
+def charge_identity(label: str) -> str:
+    """Same-charge test that ignores case, spacing, 'bill', 'charge(s)' and a
+    trailing plural s -- so 'Gas' and 'Gas Bill', or 'Service' and 'Service
+    Charges', count as ONE charge and are never added twice."""
+    words = label_key(label).replace("&", " & ").split()
+    out = []
+    for w in words:
+        if w in ("charge", "charges"):
+            continue
+        if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]
+        out.append(w)
+    return " ".join(out) or label_key(label)
+
+
+def parse_charge_columns(headers) -> List[Dict[str, str]]:
+    """[{header, label, recurrence}] for every 'charge: ...' column, in sheet order."""
+    cols: List[Dict[str, str]] = []
+    seen = set()
+    for h in headers:
+        m = CHARGE_COL_RE.match(str(h or ""))
+        if not m:
+            continue
+        label = m.group(1).strip()
+        recurrence = "recurring"
+        ot = ONE_TIME_RE.search(label)
+        if ot:
+            recurrence = "one_time"
+            label = label[: ot.start()].strip()
+        if not label or charge_identity(label) in seen:
+            continue
+        seen.add(charge_identity(label))
+        cols.append({"header": h, "label": label, "recurrence": recurrence})
+    return cols
+
+
+def parse_amount(value: Any, what: str) -> float:
+    if value is None or str(value).strip() == "":
+        return 0.0
+    try:
+        amount = float(str(value).replace(",", "").strip())
+    except ValueError:
+        raise ValueError(f'"{what}" must be a number, found "{value}".')
+    if amount < 0:
+        raise ValueError(f'"{what}" cannot be negative.')
+    return amount
+
+
+def charges_from_row(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Rent (rent_amount) first, then every 'charge: ...' column with an
+    amount above 0. Raises ValueError with a plain-English reason."""
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    rent = parse_amount(row.get("rent_amount"), "rent_amount")
+    if rent > 0:
+        out.append({"label": "Rent", "amount": rent, "recurrence": "recurring"})
+        seen.add(charge_identity("Rent"))
+    for col in parse_charge_columns(list(row.keys())):
+        amount = parse_amount(row.get(col["header"]), col["header"])
+        if amount <= 0:
+            continue
+        ident = charge_identity(col["label"])
+        if ident in seen:
+            raise ValueError(f'"{col["label"]}" is listed twice for this lease.')
+        seen.add(ident)
+        out.append({"label": col["label"], "amount": amount, "recurrence": col["recurrence"]})
+    return out
+
+
+def company_charge_labels(supabase: Client) -> List[str]:
+    """The company's own charge heads (from charge_type_accounts, which RLS
+    scopes to the caller's company), minus Rent, de-duplicated -- used to
+    build the Leases template columns. Falls back to a short default list."""
+    try:
+        rows = supabase.table("charge_type_accounts").select("label").execute().data or []
+    except Exception:
+        rows = []
+    labels: List[str] = []
+    seen = {charge_identity("Rent")}
+    for r in sorted(rows, key=lambda r: str(r.get("label") or "").lower()):
+        label = str(r.get("label") or "").strip()
+        if not label or charge_identity(label) in seen:
+            continue
+        seen.add(charge_identity(label))
+        labels.append(label)
+    return labels or list(DEFAULT_CHARGE_LABELS)
+
+
 HEADER_FONT = Font(bold=True, color="FFFFFF")
 HEADER_FILL = PatternFill("solid", fgColor="2F4F3E")  # matches the app's "ledger" green
 NOTE_FONT = Font(italic=True, size=9, color="6B7280")
@@ -196,14 +305,21 @@ def _build_tenants_template(ws: Worksheet) -> None:
     autosize_columns(ws, [20, 18, 16, 24, 32])
 
 
-def _build_leases_template(ws: Worksheet) -> None:
-    ws.append([
-        "tenant_cnic", "building_name", "room_number", "start_date", "end_date",
-        "rent_amount", "security_deposit_amount", "security_deposit_date_received",
-    ])
-    ws.append(["35202-1234567-1", "Sunrise Heights", "A-101", "2026-01-01", "2026-12-31", 20000, 40000, "2026-01-01"])
-    style_header_row(ws, 8)
-    autosize_columns(ws, [18, 20, 14, 14, 14, 14, 20, 26])
+def _build_leases_template(ws: Worksheet, charge_labels: Optional[List[str]] = None) -> None:
+    labels = charge_labels or list(DEFAULT_CHARGE_LABELS)
+    charge_headers = [f"charge: {label}" for label in labels]
+    headers = (
+        ["tenant_cnic", "building_name", "room_number", "start_date", "end_date", "rent_amount"]
+        + charge_headers
+        + ["security_deposit_amount", "security_deposit_date_received"]
+    )
+    ws.append(headers)
+    example = ["35202-1234567-1", "Sunrise Heights", "A-101", "2026-01-01", "2026-12-31", 20000]
+    example += [1500 if i == 0 else None for i in range(len(charge_headers))]
+    example += [40000, "2026-01-01"]
+    ws.append(example)
+    style_header_row(ws, len(headers))
+    autosize_columns(ws, [18, 20, 14, 14, 14, 14] + [max(14, len(h) + 2) for h in charge_headers] + [20, 26])
 
 
 TEMPLATE_BUILDERS = {
@@ -231,7 +347,9 @@ INSTRUCTIONS = [
     ("Leases", "tenant_cnic", "Required. Must exactly match a tenant already imported/created -- import Tenants first."),
     ("Leases", "building_name, room_number", "Required. Must match an existing building + room -- import Buildings and Rooms first."),
     ("Leases", "start_date, end_date", "Required. Format YYYY-MM-DD (e.g. 2026-01-01)."),
-    ("Leases", "rent_amount", "Required. Must be greater than 0. Creates a single 'Rent' charge on the lease."),
+    ("Leases", "rent_amount", "Creates the 'Rent' charge. May be 0 or blank if the lease has at least one other charge."),
+    ("Leases", "charge: <Label>", "Optional, any number of columns -- one per extra charge (Parking, Internet, Service Charges, ...). Blank or 0 = no such charge. Add (one_time) to the header for a one-off charge, e.g. 'charge: Commission (one_time)'. The label must match one of your charge heads (Chart of Accounts > charge mapping) so it posts to the right income account; an unmapped label posts to Other Income."),
+    ("Leases", "Add charges to existing leases", "The 'Add charges to existing leases' slot reads this same sheet. It matches each row to the ACTIVE lease already in that building + room (tenant CNIC must agree), adds only the charges that lease doesn't have yet, never changes an existing amount, and recalculates the current month's invoice. Use Preview first."),
     ("Leases", "security_deposit_amount, security_deposit_date_received", "Optional -- leave both blank for no deposit."),
     ("General", "Blank rows", "Skipped automatically -- fine to leave extra empty rows below your data."),
     ("General", "Import order", "Owners -> Buildings -> Rooms -> Tenants -> Leases. Later sheets look up earlier ones by name/CNIC, not by ID."),
@@ -250,7 +368,7 @@ def _build_instructions_sheet(ws: Worksheet) -> None:
 
 
 @router.get("/templates")
-def download_all_templates():
+def download_all_templates(supabase: Client = Depends(get_supabase)):
     """One workbook with all five entity sheets (each header + one example
     row) plus an Instructions sheet listing every validation rule -- the
     safest starting point since it can't drift from what the importer
@@ -258,7 +376,10 @@ def download_all_templates():
     wb = Workbook()
     wb.remove(wb.active)
     for sheet_name, builder in TEMPLATE_BUILDERS.items():
-        builder(wb.create_sheet(sheet_name))
+        if sheet_name == "Leases":
+            _build_leases_template(wb.create_sheet(sheet_name), company_charge_labels(supabase))
+        else:
+            builder(wb.create_sheet(sheet_name))
     _build_instructions_sheet(wb.create_sheet("Instructions"))
 
     buf = BytesIO()
@@ -272,7 +393,7 @@ def download_all_templates():
 
 
 @router.get("/templates/{entity}")
-def download_template(entity: str):
+def download_template(entity: str, supabase: Client = Depends(get_supabase)):
     """Same as above but scoped to one entity -- what each 'Template' button
     next to an individual import slot downloads."""
     sheet_name = ENTITY_KEY_TO_SHEET.get(entity.lower())
@@ -281,7 +402,10 @@ def download_template(entity: str):
 
     wb = Workbook()
     wb.remove(wb.active)
-    TEMPLATE_BUILDERS[sheet_name](wb.create_sheet(sheet_name))
+    if sheet_name == "Leases":
+        _build_leases_template(wb.create_sheet(sheet_name), company_charge_labels(supabase))
+    else:
+        TEMPLATE_BUILDERS[sheet_name](wb.create_sheet(sheet_name))
     _build_instructions_sheet(wb.create_sheet("Instructions"))
 
     buf = BytesIO()
@@ -816,7 +940,7 @@ def import_leases(
         try:
             start_date = row["start_date"].date() if hasattr(row.get("start_date"), "date") else row.get("start_date")
             end_date = row["end_date"].date() if hasattr(row.get("end_date"), "date") else row.get("end_date")
-            rent_amount = float(row.get("rent_amount") or 0)
+            charge_rows = charges_from_row(row)
             deposit_amount = float(row.get("security_deposit_amount") or 0)
             deposit_date = (
                 row["security_deposit_date_received"].date()
@@ -824,8 +948,11 @@ def import_leases(
                 else (row.get("security_deposit_date_received") or start_date)
             )
 
-            if not start_date or not end_date or rent_amount <= 0:
-                report.append({"row": i, "status": "error", "detail": "start_date, end_date, and a positive rent_amount are required."})
+            if not start_date or not end_date:
+                report.append({"row": i, "status": "error", "detail": "start_date and end_date are required."})
+                continue
+            if not charge_rows:
+                report.append({"row": i, "status": "error", "detail": "At least one charge above 0 is required (rent_amount or a 'charge: ...' column)."})
                 continue
 
             payload = LeaseCreate(
@@ -833,7 +960,7 @@ def import_leases(
                 room_id=room["id"],
                 start_date=start_date,
                 end_date=end_date,
-                charges=[LeaseCharge(label="Rent", amount=rent_amount)],
+                charges=[LeaseCharge(label=c["label"], amount=c["amount"], recurrence=c["recurrence"]) for c in charge_rows],
                 security_deposit_amount=deposit_amount,
                 security_deposit_date_received=deposit_date,
             )
@@ -845,3 +972,192 @@ def import_leases(
             report.append({"row": i, "status": "error", "detail": str(e)})
 
     return {"report": report}
+
+
+# ============================================================================
+# IMPORT — Add charges to EXISTING leases.
+#
+# For leases that were created with rent only. Each row is matched to the
+# ACTIVE lease already sitting in that building + room (the tenant's CNIC
+# must agree), and only the charges that lease doesn't have yet are added.
+#
+# Safety rules, all enforced here in the backend:
+#   * Preview by default (apply=false) -- nothing is written.
+#   * Never changes or removes an existing charge; a different amount for a
+#     charge the lease already has is reported and left alone.
+#   * 'Gas' and 'Gas Bill' (etc.) count as the same charge, so nothing is
+#     ever added twice; re-running the same file is harmless.
+#   * New charges start on the lease's own start date, so they are never
+#     prorated against the first month.
+#   * The current month's invoice is then recalculated by the SAME routine
+#     the Add Charge button uses (old entry reversed on its original date,
+#     corrected entry posted on that date; an invoice with a payment against
+#     it is left untouched).
+#   * Owner/admin only, every lookup filtered to the caller's company.
+#   * apply=true works through `limit` leases per call (the host allows
+#     ~30s per request); the response says how many remain and the screen
+#     calls again until none do.
+# ============================================================================
+
+@router.post("/import/lease-charges")
+def import_lease_charges(
+    file: UploadFile = File(...),
+    apply: bool = Query(False, description="false = preview only (nothing is written)"),
+    limit: int = Query(10, ge=1, le=25),
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+    user: dict = Depends(get_current_user),
+    _admin: None = Depends(require_owner_or_admin),
+):
+    wb = load_workbook(BytesIO(file.file.read()), data_only=True)
+    rows = read_sheet(wb, "Leases")
+    if not rows:
+        raise HTTPException(status_code=400, detail='No rows found on a sheet named "Leases".')
+    if not parse_charge_columns(list(rows[0].keys())):
+        raise HTTPException(status_code=400, detail='No "charge: ..." columns found -- download the Leases template for the right layout.')
+
+    buildings = fetch_all(lambda: supabase.table("buildings").select("id, name").eq("company_id", company_id).order("id"))
+    rooms = fetch_all(lambda: supabase.table("rooms").select("id, room_number, building_id").eq("company_id", company_id).order("id"))
+    tenants = fetch_all(lambda: supabase.table("tenants").select("id, cnic, full_name").eq("company_id", company_id).order("id"))
+    leases = fetch_all(lambda: supabase.table("leases").select("*").eq("company_id", company_id).eq("status", "active").order("id"))
+    open_charges = fetch_all(
+        lambda: supabase.table("lease_charges").select("id, lease_id, label, amount").eq("company_id", company_id).is_("effective_to", "null").order("id")
+    )
+    mapped_labels = {
+        str(m["label"]).strip()
+        for m in fetch_all(lambda: supabase.table("charge_type_accounts").select("id, label").eq("company_id", company_id).order("id"))
+    }
+
+    building_by_name = {str(b["name"]).strip().lower(): b for b in buildings}
+    room_by_key = {(r["building_id"], str(r["room_number"]).strip().lower()): r for r in rooms}
+    tenant_by_id = {t["id"]: t for t in tenants}
+    leases_by_room: Dict[str, List[Dict[str, Any]]] = {}
+    for l in leases:
+        leases_by_room.setdefault(l["room_id"], []).append(l)
+    charges_by_lease: Dict[str, List[Dict[str, Any]]] = {}
+    for c in open_charges:
+        charges_by_lease.setdefault(c["lease_id"], []).append(c)
+
+    report: List[Dict[str, Any]] = []
+    work: List[Dict[str, Any]] = []
+    seen_leases = set()
+    unmapped = set()
+
+    for i, row in enumerate(rows, start=2):
+        building_name = cell_str(row.get("building_name"))
+        room_number = cell_str(row.get("room_number"))
+        cnic_digits = re.sub(r"\D", "", cell_str(row.get("tenant_cnic")))
+        where = f"{building_name} - {room_number}"
+        try:
+            wanted = charges_from_row(row)
+        except ValueError as e:
+            report.append({"row": i, "status": "error", "detail": f"{where}: {e}"})
+            continue
+        if not wanted:
+            report.append({"row": i, "status": "skipped", "detail": f"{where}: every amount is 0 - nothing to add."})
+            continue
+
+        building = building_by_name.get(building_name.lower())
+        if not building:
+            report.append({"row": i, "status": "error", "detail": f'No building named "{building_name}".'})
+            continue
+        room = room_by_key.get((building["id"], room_number.lower()))
+        if not room:
+            report.append({"row": i, "status": "error", "detail": f'No room "{room_number}" in "{building_name}".'})
+            continue
+        candidates = leases_by_room.get(room["id"], [])
+        if not candidates:
+            report.append({"row": i, "status": "error", "detail": f"{where}: no active lease in this room - nothing to add charges to (create the lease first)."})
+            continue
+        lease = None
+        for cand in candidates:
+            t = tenant_by_id.get(cand["tenant_id"])
+            if t and re.sub(r"\D", "", str(t.get("cnic") or "")) == cnic_digits:
+                lease = cand
+                break
+        if not lease:
+            t = tenant_by_id.get(candidates[0]["tenant_id"]) or {}
+            report.append({
+                "row": i, "status": "error",
+                "detail": f"{where}: the active lease here belongs to {t.get('full_name', 'another tenant')} (CNIC {t.get('cnic', '?')}), not CNIC {row.get('tenant_cnic')} - skipped, check this row.",
+            })
+            continue
+        if lease["id"] in seen_leases:
+            report.append({"row": i, "status": "skipped", "detail": f"{where}: this lease already appears earlier in the file - only the first row is used."})
+            continue
+        seen_leases.add(lease["id"])
+
+        existing = charges_by_lease.get(lease["id"], [])
+        by_identity = {charge_identity(c["label"]): c for c in existing}
+        to_add: List[Dict[str, Any]] = []
+        notes: List[str] = []
+        for c in wanted:
+            have = by_identity.get(charge_identity(c["label"]))
+            if have is None:
+                to_add.append(c)
+                if c["label"] not in mapped_labels:
+                    unmapped.add(c["label"])
+            elif abs(float(have["amount"]) - c["amount"]) > 0.005:
+                notes.append(f'{c["label"]}: lease already has {float(have["amount"]):,.0f}, file says {c["amount"]:,.0f} - left unchanged')
+
+        tenant_name = (tenant_by_id.get(lease["tenant_id"]) or {}).get("full_name", "")
+        note_txt = (" | " + "; ".join(notes)) if notes else ""
+        if not to_add:
+            report.append({"row": i, "status": "skipped", "detail": f"{where} ({tenant_name}): nothing to add - charges already on the lease{note_txt}"})
+            continue
+        work.append({"row": i, "lease": lease, "to_add": to_add, "where": where, "tenant": tenant_name, "note": note_txt})
+
+    warnings = [
+        f'"{label}" is not mapped to an account in your charge settings - it will post to Other Income (4100).'
+        for label in sorted(unmapped)
+    ]
+
+    def adds_text(items):
+        return ", ".join(f'{c["label"]} {c["amount"]:,.0f}' for c in items)
+
+    if not apply:
+        for w in work:
+            total = sum(c["amount"] for c in w["to_add"])
+            report.append({
+                "row": w["row"], "status": "created",
+                "detail": f'{w["where"]} ({w["tenant"]}): would add {adds_text(w["to_add"])} = Rs {total:,.0f} per month{w["note"]}',
+            })
+        report.sort(key=lambda r: r["row"])
+        return {"report": report, "applied": False, "to_change": len(work), "remaining": len(work), "warnings": warnings}
+
+    batch, rest = work[:limit], work[limit:]
+    for w in batch:
+        lease = w["lease"]
+        try:
+            new_rows = [
+                {
+                    "company_id": company_id,
+                    "lease_id": lease["id"],
+                    "label": c["label"],
+                    "amount": c["amount"],
+                    "recurrence": c["recurrence"],
+                    "effective_from": str(lease["start_date"]),
+                    "show_on_invoice": True,
+                }
+                for c in w["to_add"]
+            ]
+            inserted = supabase.table("lease_charges").insert(new_rows).execute().data or []
+            for ch in inserted:
+                write_audit_log(supabase, company_id, user["user_id"], "create", "lease_charges", ch["id"], None, ch)
+        except Exception as e:
+            report.append({"row": w["row"], "status": "error", "detail": f'{w["where"]}: could not add charges - {e}'})
+            continue
+
+        invoice_text = ""
+        try:
+            updated = resync_current_month_invoice(supabase, company_id, lease)
+            if updated:
+                invoice_text = f' - this month\'s invoice now Rs {float(updated["total_amount"]):,.0f}'
+            else:
+                invoice_text = " - no editable current-month invoice (applies from the next invoice)"
+        except Exception as e:
+            invoice_text = f" - CHARGES SAVED but the invoice was not recalculated ({e}); open the lease and press resync"
+        report.append({"row": w["row"], "status": "created", "detail": f'{w["where"]} ({w["tenant"]}): added {adds_text(w["to_add"])}{invoice_text}{w["note"]}'})
+
+    report.sort(key=lambda r: r["row"])
+    return {"report": report, "applied": True, "to_change": len(work), "remaining": len(rest), "warnings": warnings}
