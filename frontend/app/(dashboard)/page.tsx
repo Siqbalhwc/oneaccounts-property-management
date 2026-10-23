@@ -38,6 +38,7 @@ import { Select } from "@/components/ui/Field";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useCountUp } from "@/components/ui/useCountUp";
 import { KpiTile } from "@/components/ui/KpiTile";
+import { ExpiringLeasesCard } from "@/components/ui/ExpiringLeasesCard";
 
 type Payment = {
   id: string;
@@ -443,6 +444,8 @@ export default function DashboardHome() {
           </p>
         </Card>
       )}
+
+      <ExpiringLeasesCard />
 
       {/* KPI cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">

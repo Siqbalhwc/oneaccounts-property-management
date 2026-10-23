@@ -212,8 +212,6 @@ export type Tenant = {
   email?: string;
   address?: string;
   is_archived?: boolean;
-  owner_id?: string | null;
-  owner_room_id?: string | null;
 };
 
 export type Lease = {
@@ -265,4 +263,27 @@ export type SecurityDepositPayment = {
   amount: number;
   account_id: string;
   payment_date: string;
+};
+
+export type ExpiringLeaseCharge = {
+  id: string;
+  lease_id: string;
+  label: string;
+  amount: number;
+  recurrence: "recurring" | "one_time";
+};
+
+export type ExpiringLease = {
+  lease_id: string;
+  tenant_id: string;
+  tenant_name?: string | null;
+  tenant_phone?: string | null;
+  room_id: string;
+  room_number?: string | null;
+  building_name?: string | null;
+  start_date: string;
+  end_date: string;
+  days_left: number; // negative = already past end date
+  monthly_total: number;
+  charges: ExpiringLeaseCharge[];
 };

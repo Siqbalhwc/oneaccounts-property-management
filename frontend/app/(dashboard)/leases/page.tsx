@@ -2,15 +2,16 @@
 
 import { useEffect, useRef, useState, Fragment } from "react";
 import Link from "next/link";
-import { api, Lease, Tenant, Room, Building, SecurityDeposit, SecurityDepositPayment, Account, fetchPdfBlob } from "@/lib/api";
+import { api, ExpiringLease, Lease, Tenant, Room, Building, SecurityDeposit, SecurityDepositPayment, Account, fetchPdfBlob } from "@/lib/api";
 import { supabase } from "@/lib/supabaseClient";
 import { Card } from "@/components/ui/Card";
 import { StampBadge } from "@/components/ui/StampBadge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
+import { RenewLeaseModal } from "@/components/ui/RenewLeaseModal";
 import { HistoryPanel } from "@/components/ui/HistoryPanel";
 import { Field, Input, Select } from "@/components/ui/Field";
-import { ChevronRight, ChevronDown, FileText, Pencil, Printer, Banknote, SlidersHorizontal, Users, Undo2 } from "lucide-react";
+import { ChevronRight, ChevronDown, RefreshCw, FileText, Pencil, Printer, Banknote, SlidersHorizontal, Users, Undo2 } from "lucide-react";
 
 type LeaseCharge = {
   id: string;
@@ -63,6 +64,7 @@ export default function LeasesPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [chargeMappings, setChargeMappings] = useState<ChargeMapping[]>([]);
 
+  const [renewing, setRenewing] = useState<ExpiringLease | null>(null);
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [editingLease, setEditingLease] = useState<Lease | null>(null);
   const [editForm, setEditForm] = useState({ start_date: "", end_date: "" });
@@ -392,6 +394,17 @@ export default function LeasesPage() {
       window.open(url, "_blank");
     } finally {
       setPrintingDepositId(null);
+    }
+  }
+
+  async function openRenew(lease: Lease) {
+    try {
+      const rows = await api.get<ExpiringLease[]>(`/leases/expiring?through=9999-12-31&lease_id=${lease.id}`);
+      const match = rows.find((r) => r.lease_id === lease.id);
+      if (match) setRenewing(match);
+      else setError("Couldn't load this lease's current rates for renewal.");
+    } catch (err: any) {
+      setError(err.message ?? "Couldn't load this lease for renewal.");
     }
   }
 
@@ -739,6 +752,15 @@ export default function LeasesPage() {
                             >
                               <FileText size={16} />
                             </Link>
+                            {l.status === "active" && (
+                              <button
+                                onClick={() => openRenew(l)}
+                                title="Renew lease"
+                                className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-ink"
+                              >
+                                <RefreshCw size={16} />
+                              </button>
+                            )}
                             <button
                               onClick={() => openEditModal(l)}
                               title="Edit lease"
@@ -886,6 +908,7 @@ export default function LeasesPage() {
         )}
       </Card>
 
+      <RenewLeaseModal lease={renewing} onClose={() => setRenewing(null)} onRenewed={() => load()} />
       <Modal open={editModalOpen} onClose={() => setEditModalOpen(false)} title="Edit lease" size="full">
         <div className="space-y-6">
           <p className="text-xs text-ink/50">

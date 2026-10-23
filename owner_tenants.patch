@@ -1,0 +1,484 @@
+diff --git a/014_schema_patch_030_owner_occupant_tenants.sql b/014_schema_patch_030_owner_occupant_tenants.sql
+new file mode 100644
+index 0000000..92a1324
+--- /dev/null
++++ b/014_schema_patch_030_owner_occupant_tenants.sql
+@@ -0,0 +1,25 @@
++alter table tenants add column if not exists owner_id uuid references owners(id) on delete restrict;
++
++alter table tenants add column if not exists owner_room_id uuid references rooms(id) on delete restrict;
++
++do $$
++begin
++  if not exists (select 1 from pg_constraint where conname = 'tenants_owner_link_check') then
++    alter table tenants add constraint tenants_owner_link_check check ((owner_id is null) = (owner_room_id is null));
++  end if;
++end
++$$;
++
++create unique index if not exists tenants_company_cnic_normal_key on tenants (company_id, cnic) where owner_id is null;
++
++create unique index if not exists tenants_company_owner_room_key on tenants (company_id, owner_room_id) where owner_room_id is not null;
++
++create index if not exists idx_tenants_owner on tenants (owner_id) where owner_id is not null;
++
++alter table tenants drop constraint if exists tenants_company_id_cnic_key;
++
++select
++  (select count(*) from tenants) as tenants_total,
++  (select count(*) from tenants where owner_id is not null) as owner_linked_tenants,
++  (select count(*) from pg_indexes where tablename = 'tenants' and indexname in ('tenants_company_cnic_normal_key', 'tenants_company_owner_room_key')) as new_indexes_present,
++  (select count(*) from pg_constraint where conname = 'tenants_company_id_cnic_key') as old_constraint_left;
+diff --git a/backend/app/main.py b/backend/app/main.py
+index 3868eea..1802166 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -20,6 +20,7 @@ from app.routers import (
+     ledger,
+     leases,
+     owner_ledger,
++    owner_tenants,
+     payments,
+     platform_admin,
+     property_search,
+@@ -96,6 +97,7 @@ app.include_router(simple_resources.staff_router, prefix=API_PREFIX, dependencie
+ app.include_router(expenses.router, prefix=API_PREFIX, dependencies=_GUARD)
+ app.include_router(salary_payments.router, prefix=API_PREFIX, dependencies=_GUARD)
+ app.include_router(room_occupants.router, prefix=API_PREFIX, dependencies=_GUARD)
++app.include_router(owner_tenants.router, prefix=API_PREFIX, dependencies=_GUARD)
+ app.include_router(facilities.router, prefix=API_PREFIX, dependencies=_GUARD)
+ 
+ app.include_router(leases.router, prefix=API_PREFIX, dependencies=_GUARD)
+diff --git a/backend/app/routers/data_transfer.py b/backend/app/routers/data_transfer.py
+index f9dd0e2..be1da85 100644
+--- a/backend/app/routers/data_transfer.py
++++ b/backend/app/routers/data_transfer.py
+@@ -57,6 +57,7 @@ from app.core.deps import get_current_company_id, get_current_user, get_supabase
+ from app.crud.generic import write_audit_log, friendly_db_error
+ from postgrest.exceptions import APIError
+ from app.services.invoice_batch import fetch_all
++from app.services.owner_tenants import ensure_owner_tenant
+ from app.services.ledger import JournalLine, UnbalancedJournalEntry, post_journal_entry
+ from app.services.invoicing import resync_current_month_invoice
+ from app.services.utility_bills import label_key
+@@ -312,15 +313,15 @@ def _build_leases_template(ws: Worksheet, charge_labels: Optional[List[str]] = N
+     headers = (
+         ["tenant_cnic", "building_name", "room_number", "start_date", "end_date", "rent_amount"]
+         + charge_headers
+-        + ["security_deposit_amount", "security_deposit_date_received"]
++        + ["security_deposit_amount", "security_deposit_date_received", "owner_occupied"]
+     )
+     ws.append(headers)
+     example = ["35202-1234567-1", "Sunrise Heights", "A-101", "2026-01-01", "2026-12-31", 20000]
+     example += [1500 if i == 0 else None for i in range(len(charge_headers))]
+-    example += [40000, "2026-01-01"]
++    example += [40000, "2026-01-01", None]
+     ws.append(example)
+     style_header_row(ws, len(headers))
+-    autosize_columns(ws, [18, 20, 14, 14, 14, 14] + [max(14, len(h) + 2) for h in charge_headers] + [20, 26])
++    autosize_columns(ws, [18, 20, 14, 14, 14, 14] + [max(14, len(h) + 2) for h in charge_headers] + [20, 26, 16])
+ 
+ 
+ TEMPLATE_BUILDERS = {
+@@ -350,6 +351,7 @@ INSTRUCTIONS = [
+     ("Leases", "start_date, end_date", "Required. Format YYYY-MM-DD (e.g. 2026-01-01)."),
+     ("Leases", "rent_amount", "Creates the 'Rent' charge. May be 0 or blank if the lease has at least one other charge."),
+     ("Leases", "charge: <Label>", "Optional, any number of columns -- one per extra charge (Parking, Internet, Service Charges, ...). Blank or 0 = no such charge. Add (one_time) to the header for a one-off charge, e.g. 'charge: Commission (one_time)'. The label must match one of your charge heads (Chart of Accounts > charge mapping) so it posts to the right income account; an unmapped label posts to Other Income."),
++    ("Leases", "owner_occupied", "Optional. Write yes when the OWNER lives in this room: tenant_cnic is then ignored and the lease is made for the owner's own tenant record for this room (created from the owner's name, CNIC and phone on the Owners page -- the row is refused if those are missing). Leave rent_amount blank/0 and fill only the service-type charges."),
+     ("Leases", "Add charges to existing leases", "The 'Add charges to existing leases' slot reads this same sheet. It matches each row to the ACTIVE lease already in that building + room (tenant CNIC must agree), adds only the charges that lease doesn't have yet, never changes an existing amount, and recalculates the current month's invoice. Use Preview first."),
+     ("Leases", "security_deposit_amount, security_deposit_date_received", "Optional -- leave both blank for no deposit."),
+     ("General", "Blank rows", "Skipped automatically -- fine to leave extra empty rows below your data."),
+@@ -854,8 +856,8 @@ def import_tenants(
+     wb = load_workbook(BytesIO(file.file.read()), data_only=True)
+     rows = read_sheet(wb, "Tenants")
+ 
+-    existing = supabase.table("tenants").select("cnic").execute().data
+-    seen_cnics = {re.sub(r"\D", "", t["cnic"]) for t in existing}
++    existing = supabase.table("tenants").select("cnic, owner_id").execute().data
++    seen_cnics = {re.sub(r"\D", "", t["cnic"]) for t in existing if not t.get("owner_id")}
+ 
+     report = []
+     # Validate every row first with no database writes yet, then write in
+@@ -969,11 +971,11 @@ def import_leases(
+     wb = load_workbook(BytesIO(file.file.read()), data_only=True)
+     rows = read_sheet(wb, "Leases")
+ 
+-    tenants = supabase.table("tenants").select("id, cnic").execute().data
++    tenants = supabase.table("tenants").select("id, cnic, owner_id").execute().data
+     buildings = supabase.table("buildings").select("id, name").execute().data
+     rooms = supabase.table("rooms").select("id, room_number, building_id, status").execute().data
+ 
+-    tenant_by_cnic = {re.sub(r"\D", "", t["cnic"]): t["id"] for t in tenants}
++    tenant_by_cnic = {re.sub(r"\D", "", t["cnic"]): t["id"] for t in tenants if not t.get("owner_id")}
+     building_by_name = {b["name"].strip().lower(): b["id"] for b in buildings}
+ 
+     def find_room(building_id, room_number):
+@@ -988,10 +990,13 @@ def import_leases(
+         building_name = cell_str(row.get("building_name"))
+         room_number = cell_str(row.get("room_number"))
+ 
+-        tenant_id = tenant_by_cnic.get(tenant_cnic)
+-        if not tenant_id:
+-            report.append({"row": i, "status": "error", "detail": f"No tenant with CNIC {row.get('tenant_cnic')} — import Tenants first."})
+-            continue
++        owner_occupied = cell_str(row.get("owner_occupied")).lower() in ("yes", "y", "true", "1")
++        tenant_id = None
++        if not owner_occupied:
++            tenant_id = tenant_by_cnic.get(tenant_cnic)
++            if not tenant_id:
++                report.append({"row": i, "status": "error", "detail": f"No tenant with CNIC {row.get('tenant_cnic')} — import Tenants first."})
++                continue
+ 
+         building_id = building_by_name.get(building_name.lower())
+         if not building_id:
+@@ -1003,6 +1008,15 @@ def import_leases(
+             report.append({"row": i, "status": "error", "detail": f'No room "{room_number}" in "{building_name}".'})
+             continue
+ 
++        if owner_occupied:
++            # The owner lives here: use (or create) the owner's own tenant
++            # record for this room, built from the owner's details.
++            try:
++                tenant_id = ensure_owner_tenant(supabase, company_id, room["id"])["id"]
++            except HTTPException as e:
++                report.append({"row": i, "status": "error", "detail": f"{building_name} — {room_number}: {e.detail}"})
++                continue
++
+         try:
+             start_date = row["start_date"].date() if hasattr(row.get("start_date"), "date") else row.get("start_date")
+             end_date = row["end_date"].date() if hasattr(row.get("end_date"), "date") else row.get("end_date")
+@@ -1031,7 +1045,7 @@ def import_leases(
+                 security_deposit_date_received=deposit_date,
+             )
+             result = create_lease(payload, supabase=supabase, company_id=company_id)
+-            report.append({"row": i, "status": "created", "detail": f"{building_name} — {room_number} — {row.get('tenant_cnic')}"})
++            report.append({"row": i, "status": "created", "detail": f"{building_name} — {room_number} — {'owner' if owner_occupied else row.get('tenant_cnic')}"})
+         except HTTPException as e:
+             report.append({"row": i, "status": "error", "detail": e.detail})
+         except Exception as e:
+@@ -1282,7 +1296,7 @@ def import_journal(
+     accounts = fetch_all(lambda: supabase.table("chart_of_accounts").select("id, code, name").eq("company_id", company_id).order("id"))
+     buildings = fetch_all(lambda: supabase.table("buildings").select("id, name").eq("company_id", company_id).order("id"))
+     rooms = fetch_all(lambda: supabase.table("rooms").select("id, room_number, building_id").eq("company_id", company_id).order("id"))
+-    tenants = fetch_all(lambda: supabase.table("tenants").select("id, cnic, full_name").eq("company_id", company_id).order("id"))
++    tenants = fetch_all(lambda: supabase.table("tenants").select("id, cnic, full_name, owner_id").eq("company_id", company_id).order("id"))
+     leases = fetch_all(lambda: supabase.table("leases").select("id, room_id, tenant_id").eq("company_id", company_id).eq("status", "active").order("id"))
+     manual_entries = fetch_all(
+         lambda: supabase.table("journal_entries").select("id, entry_date, description, status")
+@@ -1293,7 +1307,7 @@ def import_journal(
+     building_by_name = {str(b["name"]).strip().lower(): b for b in buildings}
+     room_by_key = {(r["building_id"], str(r["room_number"]).strip().lower()): r for r in rooms}
+     room_by_id = {r["id"]: r for r in rooms}
+-    tenant_by_cnic = {re.sub(r"\D", "", str(t.get("cnic") or "")): t for t in tenants}
++    tenant_by_cnic = {re.sub(r"\D", "", str(t.get("cnic") or "")): t for t in tenants if not t.get("owner_id")}
+     tenant_by_id = {t["id"]: t for t in tenants}
+     tenant_by_room: Dict[str, List[str]] = {}
+     for l in leases:
+diff --git a/backend/app/routers/owner_tenants.py b/backend/app/routers/owner_tenants.py
+new file mode 100644
+index 0000000..78d397d
+--- /dev/null
++++ b/backend/app/routers/owner_tenants.py
+@@ -0,0 +1,31 @@
++"""
++Owner lives in his own room -- gives the New Lease form (and any other
++caller) the tenant record that represents the owner in that one room.
++Creates it on first use, returns the same one afterwards.
++
++Gated centrally (app/core/access.py): not in ACCOUNTANT_WRITES, so only
++Owner/Admin may call it when Access Control is on -- the same people who
++can create tenants and leases.
++"""
++
++from fastapi import APIRouter, Depends
++from pydantic import BaseModel
++from supabase import Client
++
++from app.core.deps import get_current_company_id, get_supabase
++from app.services.owner_tenants import ensure_owner_tenant
++
++router = APIRouter(prefix="/owner-tenants", tags=["Owner tenants"])
++
++
++class OwnerTenantRequest(BaseModel):
++    room_id: str
++
++
++@router.post("")
++def get_or_create_owner_tenant(
++    payload: OwnerTenantRequest,
++    supabase: Client = Depends(get_supabase),
++    company_id: str = Depends(get_current_company_id),
++):
++    return ensure_owner_tenant(supabase, company_id, payload.room_id)
+diff --git a/backend/app/services/owner_tenants.py b/backend/app/services/owner_tenants.py
+new file mode 100644
+index 0000000..2b76caf
+--- /dev/null
++++ b/backend/app/services/owner_tenants.py
+@@ -0,0 +1,120 @@
++"""
++Owner-occupied rooms.
++
++When an owner lives in one of his own rooms, the lease needs a tenant. A
++person can hold only one active lease and all tenant balances (invoice
++opening balance, receipts, room-wise receivable, security held) are worked
++out PER TENANT, so one owner can't simply be the tenant of many rooms --
++every room's figures would merge. Instead each owner-occupied room gets its
++OWN tenant record, created from the owner's details and linked to both the
++owner (tenants.owner_id) and the room (tenants.owner_room_id).
++
++The database allows the same CNIC on these owner-linked records only; for
++everybody else (owner_id is null) the CNIC stays unique per company.
++
++Everything here runs as the calling user (RLS applies) and is filtered to
++the caller's company.
++"""
++
++import re
++from typing import Any, Dict
++
++from fastapi import HTTPException
++from postgrest.exceptions import APIError
++from supabase import Client
++
++from app.services.ledger import resolve_room_owner
++
++
++def _digits(value: Any) -> str:
++    return re.sub(r"\D", "", str(value or ""))
++
++
++def ensure_owner_tenant(supabase: Client, company_id: str, room_id: str) -> Dict[str, Any]:
++    """Return the tenant record that represents the owner living in this
++    room, creating it (once) from the owner's details. Raises HTTPException
++    with a plain-English reason if it can't."""
++    room_rows = (
++        supabase.table("rooms")
++        .select("id, room_number")
++        .eq("id", room_id)
++        .eq("company_id", company_id)
++        .execute()
++        .data
++    )
++    if not room_rows:
++        raise HTTPException(status_code=404, detail="Room not found.")
++    room = room_rows[0]
++
++    owner_id = resolve_room_owner(supabase, room_id)
++    if not owner_id:
++        raise HTTPException(
++            status_code=400,
++            detail=f"Room {room['room_number']} has no owner (neither on the room nor on its building). Set the owner first.",
++        )
++    owner_rows = (
++        supabase.table("owners")
++        .select("id, name, phone, cnic, address")
++        .eq("id", owner_id)
++        .eq("company_id", company_id)
++        .execute()
++        .data
++    )
++    if not owner_rows:
++        raise HTTPException(status_code=400, detail="This room's owner record could not be found.")
++    owner = owner_rows[0]
++
++    existing = (
++        supabase.table("tenants")
++        .select("*")
++        .eq("company_id", company_id)
++        .eq("owner_room_id", room_id)
++        .execute()
++        .data
++    )
++    if existing:
++        rec = existing[0]
++        if rec.get("owner_id") != owner["id"]:
++            raise HTTPException(
++                status_code=400,
++                detail=f"Room {room['room_number']} already has an owner-occupant record for a different owner. The room's owner has changed - check the Tenants list before continuing.",
++            )
++        if rec.get("is_archived"):
++            supabase.table("tenants").update({"is_archived": False}).eq("id", rec["id"]).execute()
++            rec["is_archived"] = False
++        return rec
++
++    cnic = _digits(owner.get("cnic"))
++    if len(cnic) != 13:
++        raise HTTPException(
++            status_code=400,
++            detail=f'Owner "{owner["name"]}" has no valid CNIC (13 digits). Update the owner on the Owners page first.',
++        )
++    phone = _digits(owner.get("phone"))
++    if len(phone) not in (10, 11) or (len(phone) == 11 and not phone.startswith("0")):
++        raise HTTPException(
++            status_code=400,
++            detail=f'Owner "{owner["name"]}" has no valid phone number (e.g. 0300-1234567). Update the owner on the Owners page first.',
++        )
++
++    row = {
++        "company_id": company_id,
++        "full_name": owner["name"],
++        "cnic": f"{cnic[:5]}-{cnic[5:12]}-{cnic[12]}",
++        "phone": str(owner["phone"]).strip(),
++        "address": owner.get("address"),
++        "owner_id": owner["id"],
++        "owner_room_id": room_id,
++    }
++    try:
++        created = supabase.table("tenants").insert(row).execute().data
++    except APIError:
++        # Two requests racing for the same room: the unique index let one
++        # win, so just return the record that now exists.
++        again = (
++            supabase.table("tenants").select("*").eq("company_id", company_id).eq("owner_room_id", room_id).execute().data
++        )
++        if again:
++            return again[0]
++        raise
++    return created[0]
+diff --git a/frontend/app/(dashboard)/leases/new/page.tsx b/frontend/app/(dashboard)/leases/new/page.tsx
+index 6c62aea..45e27d9 100644
+--- a/frontend/app/(dashboard)/leases/new/page.tsx
++++ b/frontend/app/(dashboard)/leases/new/page.tsx
+@@ -51,6 +51,11 @@ export default function NewLeasePage() {
+ 
+   // Step 1
+   const [tenantId, setTenantId] = useState("");
++  // "Owner lives here": the tenant becomes the owner's own tenant record for
++  // this one apartment (created by the server from the owner's details).
++  const [ownerLives, setOwnerLives] = useState(false);
++  const [ownerBusy, setOwnerBusy] = useState(false);
++  const [ownerError, setOwnerError] = useState<string | null>(null);
+   const [buildingId, setBuildingId] = useState("");
+   const [roomId, setRoomId] = useState("");
+   const [startDate, setStartDate] = useState("");
+@@ -83,6 +88,30 @@ export default function NewLeasePage() {
+     api.get<LeaseSummary[]>("/leases?status=active").then(setExistingLeases);
+   }, []);
+ 
++  useEffect(() => {
++    if (!ownerLives || !roomId) return;
++    let cancelled = false;
++    setOwnerBusy(true);
++    setOwnerError(null);
++    setTenantId("");
++    api
++      .post<Tenant>("/owner-tenants", { room_id: roomId })
++      .then((t) => {
++        if (cancelled) return;
++        setTenants((prev) => (prev.some((x) => x.id === t.id) ? prev : [...prev, t]));
++        setTenantId(t.id);
++      })
++      .catch((e: any) => {
++        if (!cancelled) setOwnerError(e.message);
++      })
++      .finally(() => {
++        if (!cancelled) setOwnerBusy(false);
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, [ownerLives, roomId]);
++
+   const vacantRooms = rooms.filter(
+     (r) => r.building_id === buildingId && r.status === "vacant"
+   );
+@@ -91,7 +120,7 @@ export default function NewLeasePage() {
+   // agreement -- filters the underlying list, the field itself still works
+   // exactly as before.
+   const availableTenants = tenants.filter(
+-    (t) => !existingLeases.some((l) => l.tenant_id === t.id && l.status === "active")
++    (t) => !t.owner_id && !existingLeases.some((l) => l.tenant_id === t.id && l.status === "active")
+   );
+ 
+   // "Posts to account" options for the searchable dropdown -- label folds
+@@ -276,16 +305,32 @@ export default function NewLeasePage() {
+       <Card>
+         {step === 0 && (
+           <div className="space-y-4">
+-            <Field label="Tenant" hint="Only tenants without a currently-active lease are shown.">
+-              <Select value={tenantId} onChange={(e) => setTenantId(e.target.value)}>
+-                <option value="">Select a tenant…</option>
+-                {availableTenants.map((t) => (
+-                  <option key={t.id} value={t.id}>
+-                    {t.full_name} — {t.cnic}
+-                  </option>
+-                ))}
+-              </Select>
++            <Field
++              label="Tenant"
++              hint={ownerLives ? "The owner of the chosen apartment is the tenant." : "Only tenants without a currently-active lease are shown."}
++            >
++              {ownerLives ? (
++                <p className="text-sm text-ink/70 border border-border rounded-card px-3 py-2">
++                  {ownerBusy
++                    ? "Preparing the owner as tenant…"
++                    : tenantId
++                    ? `${tenants.find((t) => t.id === tenantId)?.full_name ?? "Owner"} — owner lives here`
++                    : "Choose the apartment below — its owner becomes the tenant."}
++                </p>
++              ) : (
++                <Select value={tenantId} onChange={(e) => setTenantId(e.target.value)}>
++                  <option value="">Select a tenant…</option>
++                  {availableTenants.map((t) => (
++                    <option key={t.id} value={t.id}>
++                      {t.full_name} — {t.cnic}
++                    </option>
++                  ))}
++                </Select>
++              )}
+             </Field>
++            {ownerError && (
++              <p className="text-sm text-stamp-red bg-stamp-red/5 border border-stamp-red/20 rounded-card px-3 py-2">{ownerError}</p>
++            )}
+ 
+             {activeLeaseForTenant && (
+               <p className="text-sm text-stamp-red bg-stamp-red/5 border border-stamp-red/20 rounded-card px-3 py-2">
+@@ -323,6 +368,19 @@ export default function NewLeasePage() {
+               </Select>
+             </Field>
+ 
++            <label className="flex items-center gap-2 text-sm text-ink/70">
++              <input
++                type="checkbox"
++                checked={ownerLives}
++                onChange={(e) => {
++                  setOwnerLives(e.target.checked);
++                  setOwnerError(null);
++                  setTenantId("");
++                }}
++              />
++              Owner lives here — use the apartment's owner as the tenant (no rent; add service charges next)
++            </label>
++
+             <div className="grid grid-cols-2 gap-4">
+               <Field label="Start date">
+                 <Input type="date" value={startDate} onChange={(e) => handleStartDateChange(e.target.value)} />
+diff --git a/frontend/app/(dashboard)/tenants/page.tsx b/frontend/app/(dashboard)/tenants/page.tsx
+index 3ed3c3b..1d963ae 100644
+--- a/frontend/app/(dashboard)/tenants/page.tsx
++++ b/frontend/app/(dashboard)/tenants/page.tsx
+@@ -188,7 +188,8 @@ export default function TenantsPage() {
+               header: "Name",
+               accessor: (t) => (
+                 <span className={`font-medium ${t.is_archived ? "opacity-50" : ""}`}>
+-                  {t.full_name} {t.is_archived && <span className="text-xs font-normal">(archived)</span>}
++                  {t.full_name} {t.owner_id && <span className="text-xs font-normal text-ink/50">(owner)</span>}{" "}
++                  {t.is_archived && <span className="text-xs font-normal">(archived)</span>}
+                 </span>
+               ),
+             },
+diff --git a/frontend/lib/api.ts b/frontend/lib/api.ts
+index cd4bc8c..c3727cb 100644
+--- a/frontend/lib/api.ts
++++ b/frontend/lib/api.ts
+@@ -212,6 +212,8 @@ export type Tenant = {
+   email?: string;
+   address?: string;
+   is_archived?: boolean;
++  owner_id?: string | null;
++  owner_room_id?: string | null;
+ };
+ 
+ export type Lease = {

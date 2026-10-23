@@ -217,6 +217,186 @@ def list_leases(
     return res.data
 
 
+# ---------------------------------------------------------------------------
+# Expiry & renewal
+# ---------------------------------------------------------------------------
+class RenewRateChange(BaseModel):
+    charge_id: str
+    new_amount: float
+
+
+class LeaseRenew(BaseModel):
+    new_end_date: date
+    # Only the recurring charges whose rate actually changes need listing;
+    # everything else carries on at its current rate automatically.
+    rate_changes: List[RenewRateChange] = []
+
+
+def _month_end(d: date) -> date:
+    nxt = date(d.year + 1, 1, 1) if d.month == 12 else date(d.year, d.month + 1, 1)
+    return nxt - timedelta(days=1)
+
+
+@router.get("/expiring")
+def list_expiring_leases(
+    through: Optional[date] = None,
+    lease_id: Optional[str] = None,
+    supabase: Client = Depends(get_supabase),
+):
+    """
+    Active leases whose end_date falls on or before `through` (default: the
+    last day of NEXT month), oldest first. Leases already past their end
+    date come back with a negative days_left -- they're still "active" in
+    the database (nothing auto-expires them) and are still the ones that
+    most need a renewal or a settlement. Each row carries the lease's
+    current recurring charges so the renewal form can pre-fill the rates.
+    """
+    today = date.today()
+    cutoff = through or _month_end(
+        date(today.year + 1, 1, 1) if today.month == 12 else date(today.year, today.month + 1, 1)
+    )
+    q = supabase.table("leases").select("*").eq("status", "active").lte("end_date", str(cutoff))
+    if lease_id:
+        q = q.eq("id", lease_id)  # single-lease lookup used by the Renew button
+    leases = q.order("end_date").execute().data
+    if not leases:
+        return []
+
+    lease_ids = [l["id"] for l in leases]
+    tenants = {
+        t["id"]: t
+        for t in supabase.table("tenants").select("id, full_name, phone")
+        .in_("id", list({l["tenant_id"] for l in leases})).execute().data
+    }
+    rooms = {
+        r["id"]: r
+        for r in supabase.table("rooms").select("id, room_number, building_id")
+        .in_("id", list({l["room_id"] for l in leases})).execute().data
+    }
+    buildings = {
+        b["id"]: b
+        for b in supabase.table("buildings").select("id, name")
+        .in_("id", list({r["building_id"] for r in rooms.values()})).execute().data
+    } if rooms else {}
+    charges = (
+        supabase.table("lease_charges")
+        .select("id, lease_id, label, amount, recurrence, show_on_invoice")
+        .in_("lease_id", lease_ids)
+        .is_("effective_to", "null")
+        .execute()
+        .data
+    )
+    charges_by_lease: Dict[str, list] = {}
+    for c in charges:
+        if c.get("recurrence", "recurring") == "recurring":
+            charges_by_lease.setdefault(c["lease_id"], []).append(c)
+
+    out = []
+    for l in leases:
+        room = rooms.get(l["room_id"], {})
+        end = date.fromisoformat(str(l["end_date"]))
+        lc = charges_by_lease.get(l["id"], [])
+        out.append({
+            "lease_id": l["id"],
+            "tenant_id": l["tenant_id"],
+            "tenant_name": tenants.get(l["tenant_id"], {}).get("full_name"),
+            "tenant_phone": tenants.get(l["tenant_id"], {}).get("phone"),
+            "room_id": l["room_id"],
+            "room_number": room.get("room_number"),
+            "building_name": buildings.get(room.get("building_id"), {}).get("name"),
+            "start_date": l["start_date"],
+            "end_date": l["end_date"],
+            "days_left": (end - today).days,
+            "monthly_total": sum(float(c["amount"]) for c in lc),
+            "charges": lc,
+        })
+    return out
+
+
+@router.post("/{lease_id}/renew")
+def renew_lease(
+    lease_id: str,
+    payload: LeaseRenew,
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+    user: dict = Depends(get_current_user),
+):
+    """
+    Renews a lease by EXTENDING the same lease record to a new end date --
+    so the security deposit, invoice history and room all simply carry on,
+    with nothing to collect or refund. Recurring charges continue at their
+    current rate; any rate in rate_changes is closed on the old end date
+    and re-opened at the new rate from the day after, so past invoices
+    keep their old rates. One-time charges (e.g. commission) are never
+    carried over -- they only ever bill at signing.
+    """
+    lease = _lease_or_404(supabase, lease_id)
+    if lease["status"] != "active":
+        raise HTTPException(status_code=400, detail="Only an active lease can be renewed.")
+
+    old_end = date.fromisoformat(str(lease["end_date"]))
+    if payload.new_end_date <= old_end:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The new end date must be after the current end date ({old_end}).",
+        )
+    renewal_start = old_end + timedelta(days=1)
+
+    open_charges = {
+        c["id"]: c
+        for c in supabase.table("lease_charges").select("*")
+        .eq("lease_id", lease_id).is_("effective_to", "null").execute().data
+    }
+    changes = []
+    for rc in payload.rate_changes:
+        ch = open_charges.get(rc.charge_id)
+        if ch is None:
+            raise HTTPException(status_code=400, detail="A rate change refers to a charge that isn't currently active on this lease.")
+        if ch.get("recurrence", "recurring") != "recurring":
+            raise HTTPException(status_code=400, detail=f"'{ch['label']}' is a one-time charge and can't be renewed.")
+        if rc.new_amount < 0:
+            raise HTTPException(status_code=400, detail=f"Rate for '{ch['label']}' can't be negative.")
+        if round(rc.new_amount, 2) != round(float(ch["amount"]), 2):
+            changes.append((ch, rc.new_amount))
+
+    # Extend the lease first, then re-rate the changed charges.
+    res = supabase.table("leases").update({"end_date": str(payload.new_end_date)}).eq("id", lease_id).execute()
+    after = res.data[0]
+    write_audit_log(
+        supabase, company_id, user["user_id"], "renew", "leases", lease_id,
+        lease, {**after, "_renewal": {"from": str(old_end), "to": str(payload.new_end_date)}},
+    )
+
+    for ch, new_amount in changes:
+        supabase.table("lease_charges").update({"effective_to": str(old_end)}).eq("id", ch["id"]).execute()
+        new_row = (
+            supabase.table("lease_charges")
+            .insert({
+                "company_id": company_id,
+                "lease_id": lease_id,
+                "label": ch["label"],
+                "amount": new_amount,
+                "recurrence": "recurring",
+                "effective_from": str(renewal_start),
+                "show_on_invoice": ch.get("show_on_invoice", True),
+            })
+            .execute()
+            .data[0]
+        )
+        write_audit_log(supabase, company_id, user["user_id"], "update", "lease_charges", ch["id"], ch, new_row)
+
+    return {
+        "lease": after,
+        "renewal_start": str(renewal_start),
+        "rates_changed": len(changes),
+        "message": (
+            f"Lease renewed until {payload.new_end_date}. "
+            + (f"{len(changes)} rate(s) updated from {renewal_start}. " if changes else "Rates unchanged. ")
+            + "Security deposit carries over; no new deposit or one-time charges."
+        ),
+    }
+
+
 @router.get("/{lease_id}")
 def get_lease(lease_id: str, supabase: Client = Depends(get_supabase)):
     res = supabase.table("leases").select("*").eq("id", lease_id).single().execute()

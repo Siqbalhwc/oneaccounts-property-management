@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { api, Building, Invoice, Lease, Room, Tenant } from "@/lib/api";
+import { api, Building, ExpiringLease, Invoice, Lease, Room, Tenant } from "@/lib/api";
 import { IconBell } from "@/components/ui/LedgerIcons";
 
 function pkr(n: number) {
@@ -21,6 +21,7 @@ export function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [invoices, setInvoices] = useState<Invoice[] | null>(null);
   const [leases, setLeases] = useState<Lease[] | null>(null);
+  const [expiringLeases, setExpiringLeases] = useState<ExpiringLease[] | null>(null);
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
   const [rooms, setRooms] = useState<Room[] | null>(null);
   const [buildings, setBuildings] = useState<Building[] | null>(null);
@@ -32,6 +33,7 @@ export function NotificationBell() {
   useEffect(() => {
     api.get<Invoice[]>("/invoices?exclude_paid=true").then(setInvoices).catch(() => setInvoices([]));
     api.get<Lease[]>("/leases").then(setLeases).catch(() => setLeases([]));
+    api.get<ExpiringLease[]>("/leases/expiring").then(setExpiringLeases).catch(() => setExpiringLeases([]));
     api.get<Tenant[]>("/tenants").then(setTenants).catch(() => setTenants([]));
     api.get<Room[]>("/rooms").then(setRooms).catch(() => setRooms([]));
     api.get<Building[]>("/buildings").then(setBuildings).catch(() => setBuildings([]));
@@ -62,25 +64,21 @@ export function NotificationBell() {
         };
       });
 
-    const ninetyDaysOut = new Date(today);
-    ninetyDaysOut.setDate(today.getDate() + 90);
-    const expiring: NotificationItem[] = leases
-      .filter((l) => l.status === "active" && new Date(l.end_date) <= ninetyDaysOut && new Date(l.end_date) >= today)
-      .map((l) => {
-        const tenant = tenantsById.get(l.tenant_id);
-        const room = roomsById.get(l.room_id);
-        const daysLeft = Math.ceil((new Date(l.end_date).getTime() - today.getTime()) / 86400000);
-        return {
-          key: `lease-${l.id}`,
-          href: "/leases",
-          title: `Lease expiring — ${tenant?.full_name ?? "Tenant"}${room ? `, Apartment ${room.room_number}` : ""}`,
-          subtitle: `Renews in ${daysLeft} day${daysLeft === 1 ? "" : "s"}`,
-          tone: "amber" as const,
-        };
-      });
+    // Leases ending by next month-end, plus any already past their end date
+    // (still "active" because nothing auto-expires them).
+    const expiring: NotificationItem[] = (expiringLeases ?? []).map((l) => ({
+      key: `lease-${l.lease_id}`,
+      href: "/leases",
+      title: `${l.days_left < 0 ? "Lease ended — renew or settle" : "Lease expiring — renewal due"} · ${l.tenant_name ?? "Tenant"}${l.room_number ? `, Room ${l.room_number}` : ""}`,
+      subtitle:
+        l.days_left < 0
+          ? `Ended ${Math.abs(l.days_left)} day${Math.abs(l.days_left) === 1 ? "" : "s"} ago`
+          : `Ends in ${l.days_left} day${l.days_left === 1 ? "" : "s"} · ${l.end_date}`,
+      tone: (l.days_left < 0 ? "red" : "amber") as "red" | "amber",
+    }));
 
-    return [...overdue, ...expiring].slice(0, 8);
-  }, [invoices, leases, tenants, rooms, buildings]);
+    return [...expiring, ...overdue].slice(0, 8);
+  }, [invoices, leases, expiringLeases, tenants, rooms, buildings]);
 
   return (
     <div className="relative">

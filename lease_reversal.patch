@@ -1,0 +1,769 @@
+diff --git a/backend/app/routers/leases.py b/backend/app/routers/leases.py
+index 0c1a00c..7064236 100644
+--- a/backend/app/routers/leases.py
++++ b/backend/app/routers/leases.py
+@@ -5,11 +5,12 @@ from fastapi import APIRouter, Depends, HTTPException
+ from pydantic import BaseModel
+ from supabase import Client
+ 
+-from app.core.deps import get_current_company_id, get_current_user, get_supabase
++from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
+ from app.crud.generic import write_audit_log
+ from app.services.ledger import get_account_id, get_tenant_account_balance_as_of, post_journal_entry, resolve_room_owner
+ from app.services.invoicing import resync_current_month_invoice
+ from app.services.lease_settlement import compute_settlement_preview, finalize_settlement
++from app.services.lease_reversal import build_reversal_plans, execute_reversal_plan, summarize_plan
+ from app.routers.invoices import generate_invoice_for_lease
+ 
+ router = APIRouter(prefix="/leases", tags=["Leases"])
+@@ -766,6 +767,140 @@ def terminate_lease(
+     return {"message": "Lease terminated, room marked vacant"}
+ 
+ 
++# ---------------------------------------------------------------------------
++# Lease reversal (owner / admin only) -- undo invoices or a whole lease that
++# was entered in error. Nothing is deleted: journal entries are reversed with
++# equal-and-opposite entries and invoices are marked cancelled. See
++# app/services/lease_reversal.py for the exact rules.
++# ---------------------------------------------------------------------------
++MAX_LEASES_PER_REVERSAL_CALL = 5  # keeps one request well inside the 30s server limit
++
++
++class LeaseReverseRequest(BaseModel):
++    reason: str
++    mode: str = "before_date"  # 'before_date' | 'full'
++    before_date: date | None = None
++    dry_run: bool = True
++
++
++class LeaseBulkReverseRequest(BaseModel):
++    reason: str
++    before_date: date
++    building_id: str | None = None   # used to PREVIEW every lease in a building
++    lease_ids: List[str] | None = None  # used to EXECUTE, up to 5 per call
++    dry_run: bool = True
++
++
++def _validate_reversal_inputs(reason: str, mode: str, before_date: date | None, require_reason: bool = True) -> None:
++    if require_reason and (not reason or not reason.strip()):
++        raise HTTPException(status_code=400, detail="Please enter a reason -- it is kept in the audit trail.")
++    if mode not in ("before_date", "full"):
++        raise HTTPException(status_code=400, detail="mode must be 'before_date' or 'full'.")
++    if mode == "before_date":
++        if before_date is None:
++            raise HTTPException(status_code=400, detail="Please choose the date: invoices for months before it will be reversed.")
++        if before_date > date.today().replace(day=1):
++            raise HTTPException(
++                status_code=400,
++                detail="Only invoices for months BEFORE the current month can be reversed this way. "
++                       "To undo the whole lease, use 'Reverse entire lease'.",
++            )
++
++
++@router.post("/reverse-bulk")
++def reverse_leases_bulk(
++    payload: LeaseBulkReverseRequest,
++    supabase: Client = Depends(get_supabase),
++    company_id: str = Depends(get_current_company_id),
++    user: dict = Depends(get_current_user),
++    _admin: None = Depends(require_owner_or_admin),
++):
++    """
++    Reverses the invoices dated BEFORE `before_date` on many leases at once
++    (the leases themselves stay active). Send `building_id` with dry_run=true
++    to preview every lease in a building; send `lease_ids` (max 5 per call)
++    with dry_run=false to carry it out.
++    """
++    _validate_reversal_inputs(payload.reason, "before_date", payload.before_date, require_reason=not payload.dry_run)
++
++    if payload.lease_ids:
++        if len(payload.lease_ids) > MAX_LEASES_PER_REVERSAL_CALL and not payload.dry_run:
++            raise HTTPException(status_code=400, detail=f"Send at most {MAX_LEASES_PER_REVERSAL_CALL} leases per call.")
++        leases = (
++            supabase.table("leases").select("id, room_id, status, termination_reason")
++            .eq("company_id", company_id).in_("id", payload.lease_ids).execute().data
++        )
++    elif payload.building_id:
++        room_ids = [
++            r["id"] for r in
++            supabase.table("rooms").select("id").eq("company_id", company_id).eq("building_id", payload.building_id).execute().data
++        ]
++        leases = []
++        for i in range(0, len(room_ids), 80):
++            leases.extend(
++                supabase.table("leases").select("id, room_id, status, termination_reason")
++                .eq("company_id", company_id).in_("room_id", room_ids[i:i + 80]).execute().data
++            )
++    else:
++        raise HTTPException(status_code=400, detail="Send either building_id (preview) or lease_ids.")
++
++    plans = build_reversal_plans(supabase, company_id, leases, "before_date", payload.before_date)
++
++    if payload.dry_run:
++        affected = [p for p in plans if p["invoices"] or p["skipped_invoices"]]
++        return {
++            "dry_run": True,
++            "leases_checked": len(plans),
++            "leases_affected": len(affected),
++            "invoices_to_cancel": sum(len(p["invoices"]) for p in affected),
++            "entries_to_reverse": sum(len(p["entries"]) for p in affected),
++            "plans": [summarize_plan(p) for p in affected],
++        }
++
++    results = [
++        execute_reversal_plan(supabase, company_id, user["user_id"], p, payload.reason.strip())
++        for p in plans if p["invoices"]
++    ]
++    return {"dry_run": False, "results": results}
++
++
++@router.post("/{lease_id}/reverse")
++def reverse_lease(
++    lease_id: str,
++    payload: LeaseReverseRequest,
++    supabase: Client = Depends(get_supabase),
++    company_id: str = Depends(get_current_company_id),
++    user: dict = Depends(get_current_user),
++    _admin: None = Depends(require_owner_or_admin),
++):
++    """
++    Reverses one lease's entries. mode='before_date' reverses its invoices for
++    months before `before_date` and leaves the lease active; mode='full'
++    reverses every invoice and the deposit entry, then ends the lease. Always
++    preview first (dry_run=true, the default).
++    """
++    _validate_reversal_inputs(payload.reason, payload.mode, payload.before_date, require_reason=not payload.dry_run)
++    lease = (
++        supabase.table("leases").select("id, room_id, status, termination_reason")
++        .eq("company_id", company_id).eq("id", lease_id).execute().data
++    )
++    if not lease:
++        raise HTTPException(status_code=404, detail="Lease not found")
++
++    plan = build_reversal_plans(supabase, company_id, lease, payload.mode, payload.before_date)[0]
++
++    if payload.dry_run:
++        return {"dry_run": True, **summarize_plan(plan)}
++
++    if plan["blocked"]:
++        raise HTTPException(status_code=400, detail=" ".join(plan["blocked"]))
++    if not plan["invoices"] and payload.mode == "before_date":
++        raise HTTPException(status_code=400, detail="Nothing to reverse for this lease before that date.")
++
++    result = execute_reversal_plan(supabase, company_id, user["user_id"], plan, payload.reason.strip())
++    return {"dry_run": False, **result}
++
++
+ # ---------------------------------------------------------------------------
+ # Lease closing / settlement statement
+ # ---------------------------------------------------------------------------
+diff --git a/backend/app/services/lease_reversal.py b/backend/app/services/lease_reversal.py
+new file mode 100644
+index 0000000..e7267b1
+--- /dev/null
++++ b/backend/app/services/lease_reversal.py
+@@ -0,0 +1,270 @@
++"""
++Lease reversal -- undoes invoices (and, optionally, a whole lease) that were
++created in error, WITHOUT deleting anything.
++
++Same rule as everywhere else in this ledger: posted journal entries are never
++edited or deleted, only reversed with an equal-and-opposite entry
++(reverse_journal_entry). Each reversal is dated the SAME day as the entry it
++cancels, so the pair nets to zero in every period -- a balance "as of" any
++date, before or after, never sees half of a reversed pair.
++
++Two modes:
++  * "before_date" -- reverses + cancels the lease's invoices for months
++    BEFORE a given date. The lease itself stays active. This is the fix for a
++    lease entered with an old start date, whose first invoice was auto-created
++    for a month that is already covered by opening balances.
++  * "full" -- reverses + cancels every invoice, reverses the security-deposit
++    entry made at lease creation, then ends the lease (terminated, room freed).
++
++Safety rules (enforced here, not in the UI):
++  * Nothing is reversed for an invoice that already has a payment against it.
++    In "full" mode, any payment or deposit receipt blocks the whole lease.
++  * Manual journal entries (e.g. opening balances) are NEVER reversed here,
++    even if tagged to the lease -- they can be shared across many leases.
++  * Every query is filtered by company_id, on top of RLS.
++  * Re-running is safe: already-reversed entries and already-cancelled
++    invoices are skipped.
++"""
++from collections import defaultdict
++from datetime import date
++from typing import Dict, Iterable, List, Optional
++
++from supabase import Client
++
++from app.crud.generic import write_audit_log
++from app.services.ledger import reverse_journal_entry
++
++_CHUNK = 80  # ids per IN (...) query, keeps the request URL short
++
++
++def _chunks(items: List[str], n: int = _CHUNK) -> Iterable[List[str]]:
++    for i in range(0, len(items), n):
++        yield items[i : i + n]
++
++
++def _fetch_in(supabase: Client, table: str, columns: str, column: str, ids: List[str], company_id: Optional[str] = None, extra=None) -> List[dict]:
++    rows: List[dict] = []
++    for part in _chunks(ids):
++        q = supabase.table(table).select(columns).in_(column, part)
++        if company_id:
++            q = q.eq("company_id", company_id)
++        if extra:
++            q = extra(q)
++        rows.extend(q.execute().data or [])
++    return rows
++
++
++def build_reversal_plans(
++    supabase: Client,
++    company_id: str,
++    leases: List[dict],
++    mode: str,
++    before_date: Optional[date],
++) -> List[dict]:
++    """
++    Read-only. Works out, for each lease, exactly what a reversal WOULD do:
++    which invoices get cancelled, which journal entries get reversed, and
++    anything that blocks it. Same function is used for the preview and for
++    the real run, so what is previewed is exactly what is executed.
++    """
++    lease_ids = [l["id"] for l in leases]
++    if not lease_ids:
++        return []
++
++    inv_extra = lambda q: q.neq("status", "cancelled")
++    if mode == "before_date" and before_date:
++        inv_extra = lambda q: q.neq("status", "cancelled").lt("invoice_month", str(before_date))
++    invoices = _fetch_in(
++        supabase, "invoices", "id, lease_id, invoice_month, total_amount, status",
++        "lease_id", lease_ids, company_id, inv_extra,
++    )
++    invoice_ids = [i["id"] for i in invoices]
++
++    payments = _fetch_in(supabase, "payments", "id, invoice_id", "invoice_id", invoice_ids, company_id) if invoice_ids else []
++    invoice_ids_with_payment = {p["invoice_id"] for p in payments}
++
++    invoice_entries = (
++        _fetch_in(
++            supabase, "journal_entries", "id, entry_date, source_type, source_id, description, status, reversal_of",
++            "source_id", invoice_ids, company_id, lambda q: q.eq("source_type", "invoice"),
++        )
++        if invoice_ids else []
++    )
++    live_entries_by_invoice: Dict[str, List[dict]] = defaultdict(list)
++    for e in invoice_entries:
++        if e["status"] == "posted" and not e.get("reversal_of"):
++            live_entries_by_invoice[e["source_id"]].append(e)
++
++    deposit_by_lease: Dict[str, dict] = {}
++    deposit_payment_leases: set = set()
++    deposit_entries_by_lease: Dict[str, List[dict]] = defaultdict(list)
++    manual_by_lease: Dict[str, List[dict]] = defaultdict(list)
++    if mode == "full":
++        deposits = _fetch_in(supabase, "security_deposits", "id, lease_id", "lease_id", lease_ids, company_id)
++        deposit_by_lease = {d["lease_id"]: d for d in deposits}
++        if deposits:
++            dep_pay = _fetch_in(supabase, "security_deposit_payments", "id, security_deposit_id", "security_deposit_id", [d["id"] for d in deposits], company_id)
++            paid_deposit_ids = {p["security_deposit_id"] for p in dep_pay}
++            deposit_payment_leases = {d["lease_id"] for d in deposits if d["id"] in paid_deposit_ids}
++        for e in _fetch_in(
++            supabase, "journal_entries", "id, entry_date, source_type, source_id, description, status, reversal_of",
++            "source_id", lease_ids, company_id, lambda q: q.eq("source_type", "security_deposit"),
++        ):
++            if e["status"] == "posted" and not e.get("reversal_of"):
++                deposit_entries_by_lease[e["source_id"]].append(e)
++
++        lines = _fetch_in(supabase, "journal_lines", "journal_entry_id, lease_id", "lease_id", lease_ids, company_id)
++        entry_lease_pairs = {(l["journal_entry_id"], l["lease_id"]) for l in lines}
++        entry_ids = list({p[0] for p in entry_lease_pairs})
++        if entry_ids:
++            auto_ids = {e["id"] for es in live_entries_by_invoice.values() for e in es} | {e["id"] for es in deposit_entries_by_lease.values() for e in es}
++            manual = _fetch_in(
++                supabase, "journal_entries", "id, entry_date, source_type, description, status, reversal_of",
++                "id", entry_ids, company_id,
++            )
++            manual_by_id = {
++                m["id"]: m for m in manual
++                if m["status"] == "posted" and not m.get("reversal_of") and m["id"] not in auto_ids
++                and m["source_type"] not in ("invoice", "security_deposit")
++            }
++            for entry_id, lease_id in entry_lease_pairs:
++                if entry_id in manual_by_id:
++                    manual_by_lease[lease_id].append(manual_by_id[entry_id])
++
++    plans: List[dict] = []
++    for lease in leases:
++        lid = lease["id"]
++        lease_invoices = [i for i in invoices if i["lease_id"] == lid]
++        blocked: List[str] = []
++        skipped: List[dict] = []
++        to_cancel: List[dict] = []
++
++        for inv in lease_invoices:
++            if inv["id"] in invoice_ids_with_payment:
++                skipped.append({"id": inv["id"], "invoice_month": inv["invoice_month"], "reason": "Has a payment recorded against it -- reverse the receipt first"})
++            else:
++                to_cancel.append(inv)
++
++        if mode == "full":
++            if str(lease.get("termination_reason") or "").startswith("Reversed"):
++                blocked.append("This lease was already reversed.")
++            if skipped:
++                blocked.append("Payments have been received against this lease's invoices -- reverse those receipts first.")
++            if lid in deposit_payment_leases:
++                blocked.append("Security deposit money has been received on this lease -- reverse that receipt first.")
++
++        entries: List[dict] = []
++        if not blocked:
++            for inv in to_cancel:
++                entries.extend(live_entries_by_invoice.get(inv["id"], []))
++            if mode == "full":
++                entries.extend(deposit_entries_by_lease.get(lid, []))
++
++        plans.append(
++            {
++                "lease_id": lid,
++                "room_id": lease.get("room_id"),
++                "mode": mode,
++                "blocked": blocked,
++                "invoices": [] if blocked else to_cancel,
++                "entries": entries,
++                "skipped_invoices": skipped,
++                "manual_entries_to_review": manual_by_lease.get(lid, []),
++            }
++        )
++    return plans
++
++
++def execute_reversal_plan(
++    supabase: Client,
++    company_id: str,
++    user_id: str,
++    plan: dict,
++    reason: str,
++) -> dict:
++    """
++    Carries out one lease's plan. Entries are reversed first and an invoice is
++    only cancelled once ALL of its entries were reversed, so a failure partway
++    never leaves an invoice cancelled while its entry is still live.
++    """
++    errors: List[str] = []
++    reversed_ids: List[str] = []
++    failed_invoice_ids: set = set()
++
++    for entry in plan["entries"]:
++        try:
++            reverse_journal_entry(
++                supabase, company_id, entry["id"], reason=reason, entry_date=str(entry["entry_date"]),
++            )
++            reversed_ids.append(entry["id"])
++        except Exception as exc:
++            errors.append(f"Entry {entry['id']}: {exc}")
++            if entry.get("source_type") == "invoice":
++                failed_invoice_ids.add(entry["source_id"])
++
++    cancelled_ids: List[str] = []
++    for inv in plan["invoices"]:
++        if inv["id"] in failed_invoice_ids:
++            continue
++        try:
++            supabase.table("invoices").update({"status": "cancelled"}).eq("id", inv["id"]).eq("company_id", company_id).execute()
++            cancelled_ids.append(inv["id"])
++            write_audit_log(
++                supabase, company_id, user_id, "reverse", "invoices", inv["id"],
++                before={"status": inv["status"], "total_amount": inv["total_amount"], "invoice_month": inv["invoice_month"]},
++                after={"status": "cancelled", "reason": reason},
++            )
++        except Exception as exc:
++            errors.append(f"Invoice {inv['id']}: {exc}")
++
++    lease_ended = False
++    if plan["mode"] == "full" and not errors:
++        try:
++            today = str(date.today())
++            supabase.table("leases").update(
++                {"status": "terminated", "terminated_at": today, "termination_reason": f"Reversed -- {reason}"}
++            ).eq("id", plan["lease_id"]).eq("company_id", company_id).execute()
++            other_active = (
++                supabase.table("leases").select("id")
++                .eq("company_id", company_id).eq("room_id", plan["room_id"]).eq("status", "active")
++                .neq("id", plan["lease_id"]).execute().data
++            )
++            if not other_active:
++                supabase.table("rooms").update({"status": "vacant"}).eq("id", plan["room_id"]).eq("company_id", company_id).execute()
++            write_audit_log(
++                supabase, company_id, user_id, "reverse", "leases", plan["lease_id"],
++                before={"status": "active"}, after={"status": "terminated", "reason": f"Reversed -- {reason}"},
++            )
++            lease_ended = True
++        except Exception as exc:
++            errors.append(f"Lease: {exc}")
++
++    return {
++        "lease_id": plan["lease_id"],
++        "entries_reversed": len(reversed_ids),
++        "invoices_cancelled": len(cancelled_ids),
++        "lease_ended": lease_ended,
++        "errors": errors,
++    }
++
++
++def summarize_plan(plan: dict) -> dict:
++    """Small, UI-friendly view of a plan (no internal fields)."""
++    return {
++        "lease_id": plan["lease_id"],
++        "room_id": plan["room_id"],
++        "blocked": plan["blocked"],
++        "invoices": [
++            {"id": i["id"], "invoice_month": i["invoice_month"], "total_amount": float(i["total_amount"]), "status": i["status"]}
++            for i in plan["invoices"]
++        ],
++        "entries": [
++            {"id": e["id"], "entry_date": e["entry_date"], "source_type": e["source_type"], "description": e.get("description")}
++            for e in plan["entries"]
++        ],
++        "skipped_invoices": plan["skipped_invoices"],
++        "manual_entries_to_review": [
++            {"id": m["id"], "entry_date": m["entry_date"], "description": m.get("description")}
++            for m in plan["manual_entries_to_review"]
++        ],
++    }
+diff --git a/frontend/app/(dashboard)/leases/page.tsx b/frontend/app/(dashboard)/leases/page.tsx
+index 7c068e4..0307fd1 100644
+--- a/frontend/app/(dashboard)/leases/page.tsx
++++ b/frontend/app/(dashboard)/leases/page.tsx
+@@ -3,13 +3,14 @@
+ import { useEffect, useRef, useState, Fragment } from "react";
+ import Link from "next/link";
+ import { api, Lease, Tenant, Room, Building, SecurityDeposit, SecurityDepositPayment, Account, fetchPdfBlob } from "@/lib/api";
++import { supabase } from "@/lib/supabaseClient";
+ import { Card } from "@/components/ui/Card";
+ import { StampBadge } from "@/components/ui/StampBadge";
+ import { Button } from "@/components/ui/Button";
+ import { Modal } from "@/components/ui/Modal";
+ import { HistoryPanel } from "@/components/ui/HistoryPanel";
+ import { Field, Input, Select } from "@/components/ui/Field";
+-import { ChevronRight, ChevronDown, FileText, Pencil, Printer, Banknote, SlidersHorizontal, Users } from "lucide-react";
++import { ChevronRight, ChevronDown, FileText, Pencil, Printer, Banknote, SlidersHorizontal, Users, Undo2 } from "lucide-react";
+ 
+ type LeaseCharge = {
+   id: string;
+@@ -24,6 +25,22 @@ type LeaseCharge = {
+ 
+ type ChargeMapping = { label: string; account_id: string };
+ 
++type ReversePlan = {
++  lease_id: string;
++  room_id?: string | null;
++  blocked: string[];
++  invoices: { id: string; invoice_month: string; total_amount: number; status: string }[];
++  entries: { id: string; entry_date: string; source_type: string; description?: string | null }[];
++  skipped_invoices: { id: string; invoice_month: string; reason: string }[];
++  manual_entries_to_review: { id: string; entry_date: string; description?: string | null }[];
++};
++type ReversePreview = {
++  plans: ReversePlan[];
++  leases_checked?: number;
++  invoices_to_cancel?: number;
++  entries_to_reverse?: number;
++};
++
+ function pageNumbers(current: number, total: number): (number | "…")[] {
+   const delta = 1;
+   const range: (number | "…")[] = [];
+@@ -53,6 +70,22 @@ export default function LeasesPage() {
+   const [error, setError] = useState<string | null>(null);
+   const [search, setSearch] = useState("");
+ 
++  // Reverse (owner / admin only). Nothing is deleted: entries are reversed
++  // with equal-and-opposite entries and invoices are marked cancelled.
++  const [role, setRole] = useState<string | null>(null);
++  const isOwnerOrAdmin = role === "owner" || role === "admin";
++  const [revOpen, setRevOpen] = useState(false);
++  const [revScope, setRevScope] = useState<"lease" | "building">("lease");
++  const [revLease, setRevLease] = useState<Lease | null>(null);
++  const [revMode, setRevMode] = useState<"before_date" | "full">("before_date");
++  const [revBuildingId, setRevBuildingId] = useState("");
++  const [revDate, setRevDate] = useState(() => new Date().toISOString().slice(0, 8) + "01");
++  const [revReason, setRevReason] = useState("");
++  const [revPreview, setRevPreview] = useState<ReversePreview | null>(null);
++  const [revBusy, setRevBusy] = useState(false);
++  const [revError, setRevError] = useState<string | null>(null);
++  const [revDone, setRevDone] = useState<string | null>(null);
++
+   // --- List view: expandable row + optional column visibility ---
+   const [expandedLeaseId, setExpandedLeaseId] = useState<string | null>(null);
+   const [colsMenuOpen, setColsMenuOpen] = useState(false);
+@@ -157,6 +190,17 @@ export default function LeasesPage() {
+     fetchLeases(p, search);
+   }
+ 
++  useEffect(() => {
++    (async () => {
++      const { data } = await supabase.auth.getSession();
++      const userId = data.session?.user.id;
++      if (userId) {
++        const { data: profileRow } = await supabase.from("profiles").select("role").eq("id", userId).single();
++        setRole(profileRow?.role ?? null);
++      }
++    })();
++  }, []);
++
+   useEffect(() => {
+     fetchLeases(1, "");
+     loadDeposits();
+@@ -188,6 +232,108 @@ export default function LeasesPage() {
+   };
+   const depositForLease = (leaseId: string) => deposits?.find((d) => d.lease_id === leaseId) ?? null;
+ 
++  function resetReverse() {
++    setRevPreview(null);
++    setRevError(null);
++    setRevDone(null);
++  }
++
++  function openReverseForLease(l: Lease) {
++    resetReverse();
++    setRevScope("lease");
++    setRevLease(l);
++    setRevMode("before_date");
++    setRevReason("");
++    setRevOpen(true);
++  }
++
++  function openReverseBulk() {
++    resetReverse();
++    setRevScope("building");
++    setRevLease(null);
++    setRevMode("before_date");
++    setRevReason("");
++    setRevOpen(true);
++  }
++
++  async function previewReverse() {
++    setRevBusy(true);
++    setRevError(null);
++    setRevDone(null);
++    setRevPreview(null);
++    try {
++      if (revScope === "lease" && revLease) {
++        const res = await api.post<ReversePlan & { dry_run: boolean }>(`/leases/${revLease.id}/reverse`, {
++          reason: revReason,
++          mode: revMode,
++          before_date: revMode === "before_date" ? revDate : null,
++          dry_run: true,
++        });
++        setRevPreview({ plans: [res] });
++      } else {
++        if (!revBuildingId) throw new Error("Please choose a building first.");
++        const res = await api.post<ReversePreview>("/leases/reverse-bulk", {
++          reason: revReason,
++          before_date: revDate,
++          building_id: revBuildingId,
++          dry_run: true,
++        });
++        setRevPreview(res);
++      }
++    } catch (e) {
++      setRevError(e instanceof Error ? e.message : "Could not preview.");
++    } finally {
++      setRevBusy(false);
++    }
++  }
++
++  async function confirmReverse() {
++    if (!revPreview) return;
++    if (!revReason.trim()) {
++      setRevError("Please enter a reason -- it is kept in the audit trail.");
++      return;
++    }
++    setRevBusy(true);
++    setRevError(null);
++    try {
++      let cancelled = 0;
++      let reversed = 0;
++      const problems: string[] = [];
++      if (revScope === "lease" && revLease) {
++        const res = await api.post<{ invoices_cancelled: number; entries_reversed: number; errors: string[] }>(
++          `/leases/${revLease.id}/reverse`,
++          { reason: revReason, mode: revMode, before_date: revMode === "before_date" ? revDate : null, dry_run: false },
++        );
++        cancelled = res.invoices_cancelled;
++        reversed = res.entries_reversed;
++        problems.push(...res.errors);
++      } else {
++        const ids = revPreview.plans.filter((p) => p.invoices.length > 0).map((p) => p.lease_id);
++        for (let i = 0; i < ids.length; i += 5) {
++          const res = await api.post<{ results: { invoices_cancelled: number; entries_reversed: number; errors: string[] }[] }>(
++            "/leases/reverse-bulk",
++            { reason: revReason, before_date: revDate, lease_ids: ids.slice(i, i + 5), dry_run: false },
++          );
++          res.results.forEach((r) => {
++            cancelled += r.invoices_cancelled;
++            reversed += r.entries_reversed;
++            problems.push(...r.errors);
++          });
++        }
++      }
++      setRevPreview(null);
++      setRevDone(
++        `Done: ${cancelled} invoice(s) cancelled and ${reversed} journal entr${reversed === 1 ? "y" : "ies"} reversed.` +
++          (problems.length ? ` Some items need attention: ${problems.join(" | ")}` : ""),
++      );
++      load();
++    } catch (e) {
++      setRevError(e instanceof Error ? e.message : "Reversal failed.");
++    } finally {
++      setRevBusy(false);
++    }
++  }
++
+   function openReceiveModal(deposit: SecurityDeposit) {
+     setReceivingDeposit(deposit);
+     setDepositPayments(null);
+@@ -412,9 +558,16 @@ export default function LeasesPage() {
+             structure and security deposit.
+           </p>
+         </div>
+-        <Link href="/leases/new">
+-          <Button>New lease</Button>
+-        </Link>
++        <div className="flex gap-2">
++          {isOwnerOrAdmin && (
++            <Button type="button" variant="secondary" onClick={openReverseBulk}>
++              Reverse past invoices
++            </Button>
++          )}
++          <Link href="/leases/new">
++            <Button>New lease</Button>
++          </Link>
++        </div>
+       </div>
+ 
+       <Card>
+@@ -593,6 +746,15 @@ export default function LeasesPage() {
+                             >
+                               <Pencil size={16} />
+                             </button>
++                            {isOwnerOrAdmin && (
++                              <button
++                                onClick={() => openReverseForLease(l)}
++                                title="Reverse invoices or this lease"
++                                className="p-1.5 rounded hover:bg-accent/5 text-ink/50 hover:text-stamp-red"
++                              >
++                                <Undo2 size={16} />
++                              </button>
++                            )}
+                           </div>
+                         </td>
+                       </tr>
+@@ -972,6 +1134,104 @@ export default function LeasesPage() {
+         </div>
+       </Modal>
+ 
++      <Modal open={revOpen} onClose={() => setRevOpen(false)} title="Reverse entries">
++        <div className="space-y-4">
++          <p className="text-xs text-ink/60">
++            Nothing is deleted. Each journal entry is cancelled by an equal-and-opposite entry on the same date, and the
++            invoice is marked cancelled. Opening balances and manual entries are never touched. Invoices that already have
++            a payment are skipped.
++          </p>
++
++          {revScope === "lease" ? (
++            <div className="space-y-2">
++              <p className="text-sm font-medium">{revLease ? `${tenantName(revLease.tenant_id)} — ${roomAndBuilding(revLease.room_id)}` : ""}</p>
++              <label className="flex items-start gap-2 text-sm cursor-pointer">
++                <input type="radio" className="mt-1 accent-ledger" checked={revMode === "before_date"} onChange={() => { setRevMode("before_date"); setRevPreview(null); }} />
++                <span>Reverse invoices for months before a date (lease stays active)</span>
++              </label>
++              <label className="flex items-start gap-2 text-sm cursor-pointer">
++                <input type="radio" className="mt-1 accent-ledger" checked={revMode === "full"} onChange={() => { setRevMode("full"); setRevPreview(null); }} />
++                <span>Reverse the entire lease (all invoices and the deposit entry, then end the lease)</span>
++              </label>
++            </div>
++          ) : (
++            <Field label="Building">
++              <Select value={revBuildingId} onChange={(e) => { setRevBuildingId(e.target.value); setRevPreview(null); }}>
++                <option value="">Choose a building…</option>
++                {(buildings ?? []).map((b) => (
++                  <option key={b.id} value={b.id}>{b.name}</option>
++                ))}
++              </Select>
++            </Field>
++          )}
++
++          {(revScope === "building" || revMode === "before_date") && (
++            <Field label="Reverse invoices for months before">
++              <Input type="date" value={revDate} onChange={(e) => { setRevDate(e.target.value); setRevPreview(null); }} />
++            </Field>
++          )}
++
++          <Field label="Reason (kept in the audit trail)">
++            <Input value={revReason} onChange={(e) => setRevReason(e.target.value)} placeholder="e.g. Pre-October invoices duplicate opening balances" />
++          </Field>
++
++          {revError && <p className="text-sm text-stamp-red">{revError}</p>}
++          {revDone && <p className="text-sm text-ledger">{revDone}</p>}
++
++          {revPreview && (
++            <div className="border border-border rounded-card p-3 space-y-2 max-h-72 overflow-y-auto text-xs">
++              {revScope === "building" && (
++                <p className="font-medium">
++                  {revPreview.leases_checked} lease(s) checked — {revPreview.invoices_to_cancel} invoice(s) and{" "}
++                  {revPreview.entries_to_reverse} journal entr{revPreview.entries_to_reverse === 1 ? "y" : "ies"} will be reversed.
++                </p>
++              )}
++              {revPreview.plans.length === 0 && <p className="text-ink/60">Nothing to reverse.</p>}
++              {revPreview.plans.map((p) => (
++                <div key={p.lease_id} className="border-t border-border/60 pt-2 first:border-0 first:pt-0">
++                  {revScope === "building" && <p className="font-medium">{p.room_id ? roomAndBuilding(p.room_id) : p.lease_id}</p>}
++                  {p.blocked.map((b, i) => (
++                    <p key={i} className="text-stamp-red">Blocked: {b}</p>
++                  ))}
++                  {p.invoices.map((inv) => (
++                    <p key={inv.id} className="figures">
++                      Invoice {inv.invoice_month.slice(0, 7)} — Rs {Number(inv.total_amount).toLocaleString("en-PK")} ({inv.status})
++                    </p>
++                  ))}
++                  {p.entries.length > 0 && <p className="text-ink/60">{p.entries.length} journal entr{p.entries.length === 1 ? "y" : "ies"} will be reversed.</p>}
++                  {p.skipped_invoices.map((s2) => (
++                    <p key={s2.id} className="text-brass">Skipped {s2.invoice_month.slice(0, 7)}: {s2.reason}</p>
++                  ))}
++                  {p.manual_entries_to_review.length > 0 && (
++                    <p className="text-brass">
++                      {p.manual_entries_to_review.length} manual entr{p.manual_entries_to_review.length === 1 ? "y is" : "ies are"} tagged to this lease and will NOT be changed (review in Journal):{" "}
++                      {p.manual_entries_to_review.map((m) => m.description || m.id).join(", ")}
++                    </p>
++                  )}
++                </div>
++              ))}
++            </div>
++          )}
++
++          <div className="flex justify-end gap-2">
++            <Button type="button" variant="ghost" onClick={() => setRevOpen(false)}>
++              Close
++            </Button>
++            <Button type="button" variant="secondary" onClick={previewReverse} disabled={revBusy}>
++              {revBusy && !revPreview ? "Checking…" : "Preview"}
++            </Button>
++            <Button
++              type="button"
++              variant="danger"
++              onClick={confirmReverse}
++              disabled={revBusy || !revPreview || revPreview.plans.every((p) => p.blocked.length > 0 || (p.invoices.length === 0 && p.entries.length === 0 && revMode !== "full"))}
++            >
++              {revBusy && revPreview ? "Reversing…" : "Confirm reversal"}
++            </Button>
++          </div>
++        </div>
++      </Modal>
++
+       <Modal open={!!chargeToEnd} onClose={() => setChargeToEnd(null)} title="End this charge?">
+         <div className="space-y-4">
+           <p className="text-sm text-ink/70">

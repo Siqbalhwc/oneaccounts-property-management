@@ -1,0 +1,137 @@
+diff --git a/backend/app/routers/leases.py b/backend/app/routers/leases.py
+index 7064236..b50977c 100644
+--- a/backend/app/routers/leases.py
++++ b/backend/app/routers/leases.py
+@@ -827,7 +827,7 @@ def reverse_leases_bulk(
+         if len(payload.lease_ids) > MAX_LEASES_PER_REVERSAL_CALL and not payload.dry_run:
+             raise HTTPException(status_code=400, detail=f"Send at most {MAX_LEASES_PER_REVERSAL_CALL} leases per call.")
+         leases = (
+-            supabase.table("leases").select("id, room_id, status, termination_reason")
++            supabase.table("leases").select("id, room_id, start_date, status, termination_reason")
+             .eq("company_id", company_id).in_("id", payload.lease_ids).execute().data
+         )
+     elif payload.building_id:
+@@ -838,7 +838,7 @@ def reverse_leases_bulk(
+         leases = []
+         for i in range(0, len(room_ids), 80):
+             leases.extend(
+-                supabase.table("leases").select("id, room_id, status, termination_reason")
++                supabase.table("leases").select("id, room_id, start_date, status, termination_reason")
+                 .eq("company_id", company_id).in_("room_id", room_ids[i:i + 80]).execute().data
+             )
+     else:
+@@ -881,7 +881,7 @@ def reverse_lease(
+     """
+     _validate_reversal_inputs(payload.reason, payload.mode, payload.before_date, require_reason=not payload.dry_run)
+     lease = (
+-        supabase.table("leases").select("id, room_id, status, termination_reason")
++        supabase.table("leases").select("id, room_id, start_date, status, termination_reason")
+         .eq("company_id", company_id).eq("id", lease_id).execute().data
+     )
+     if not lease:
+diff --git a/backend/app/services/invoicing.py b/backend/app/services/invoicing.py
+index 20df39d..af13b71 100644
+--- a/backend/app/services/invoicing.py
++++ b/backend/app/services/invoicing.py
+@@ -224,6 +224,7 @@ def _recalculate_invoice(
+     month_start: date,
+     entry_date: date,
+     reason: str,
++    date_from_original: bool = False,
+ ) -> dict:
+     """
+     The shared recalculation used by BOTH the lease-charge-edit path
+@@ -233,9 +234,15 @@ def _recalculate_invoice(
+     month on top, reverse every live journal entry for the invoice, replace
+     its line items and post the corrected entry.
+ 
+-    entry_date dates BOTH the reversal and the new entry. The charge-edit
+-    path passes today (unchanged behaviour); the utility path passes the
+-    invoice's own month so receivable stays in the right period.
++    entry_date dates BOTH the reversal and the new entry. The utility path
++    passes the invoice's own month so receivable stays in the right period.
++
++    date_from_original=True (used by the charge-edit path) ignores entry_date
++    whenever the invoice already has live entries: each old entry is reversed
++    on its OWN original date, and the corrected entry is posted on that same
++    date. So an October invoice that was posted on 1 October is never
++    reversed/re-posted "today" -- receivable as of ANY date stays right.
++    entry_date is only the fallback when there is no live entry to copy from.
+     """
+     charges = current_charges_with_earliest_start(supabase, lease["id"])
+ 
+@@ -268,7 +275,7 @@ def _recalculate_invoice(
+     # system, only reversed (see reference doc).
+     live_entries = (
+         supabase.table("journal_entries")
+-        .select("id")
++        .select("id, entry_date")
+         .eq("source_type", "invoice")
+         .eq("source_id", invoice["id"])
+         .eq("status", "posted")
+@@ -276,8 +283,12 @@ def _recalculate_invoice(
+         .execute()
+         .data
+     )
++    repost_date = entry_date
++    if date_from_original and live_entries:
++        repost_date = min(date.fromisoformat(str(e["entry_date"])) for e in live_entries)
+     for entry in live_entries:
+-        reverse_journal_entry(supabase, company_id, entry["id"], reason=reason, entry_date=str(entry_date))
++        reverse_date = str(entry["entry_date"]) if date_from_original else str(entry_date)
++        reverse_journal_entry(supabase, company_id, entry["id"], reason=reason, entry_date=reverse_date)
+ 
+     supabase.table("invoice_line_items").delete().eq("invoice_id", invoice["id"]).execute()
+     if prorated:
+@@ -294,7 +305,7 @@ def _recalculate_invoice(
+             ]
+         ).execute()
+ 
+-    new_total = post_invoice_journal(supabase, company_id, invoice, lease, prorated, entry_date=entry_date) if prorated else 0.0
++    new_total = post_invoice_journal(supabase, company_id, invoice, lease, prorated, entry_date=repost_date) if prorated else 0.0
+ 
+     updated = (
+         supabase.table("invoices")
+@@ -346,7 +357,8 @@ def resync_current_month_invoice(supabase: Client, company_id: str, lease: dict)
+         return None
+ 
+     return _recalculate_invoice(
+-        supabase, company_id, lease, invoice, month_start, today, "Lease charges changed — invoice recalculated"
++        supabase, company_id, lease, invoice, month_start, today, "Lease charges changed — invoice recalculated",
++        date_from_original=True,
+     )
+ 
+ 
+diff --git a/backend/app/services/lease_reversal.py b/backend/app/services/lease_reversal.py
+index e7267b1..2390fc2 100644
+--- a/backend/app/services/lease_reversal.py
++++ b/backend/app/services/lease_reversal.py
+@@ -15,6 +15,8 @@ Two modes:
+     for a month that is already covered by opening balances.
+   * "full" -- reverses + cancels every invoice, reverses the security-deposit
+     entry made at lease creation, then ends the lease (terminated, room freed).
++    The lease is ended on its START date -- not today -- so it never counts as
++    having been in force for any period.
+ 
+ Safety rules (enforced here, not in the UI):
+   * Nothing is reversed for an invoice that already has a payment against it.
+@@ -164,6 +166,7 @@ def build_reversal_plans(
+             {
+                 "lease_id": lid,
+                 "room_id": lease.get("room_id"),
++                "start_date": lease.get("start_date"),
+                 "mode": mode,
+                 "blocked": blocked,
+                 "invoices": [] if blocked else to_cancel,
+@@ -220,9 +223,9 @@ def execute_reversal_plan(
+     lease_ended = False
+     if plan["mode"] == "full" and not errors:
+         try:
+-            today = str(date.today())
++            ended_on = str(plan.get("start_date") or date.today())
+             supabase.table("leases").update(
+-                {"status": "terminated", "terminated_at": today, "termination_reason": f"Reversed -- {reason}"}
++                {"status": "terminated", "terminated_at": ended_on, "termination_reason": f"Reversed -- {reason}"}
+             ).eq("id", plan["lease_id"]).eq("company_id", company_id).execute()
+             other_active = (
+                 supabase.table("leases").select("id")
