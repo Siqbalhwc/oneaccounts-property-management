@@ -1,0 +1,13 @@
+diff --git a/frontend/lib/api.ts b/frontend/lib/api.ts
+index 34c6031..fbf8c4c 100644
+--- a/frontend/lib/api.ts
++++ b/frontend/lib/api.ts
+@@ -212,6 +212,8 @@ export type Tenant = {
+   email?: string;
+   address?: string;
+   is_archived?: boolean;
++  owner_id?: string | null;
++  owner_room_id?: string | null;
+ };
+ 
+ export type Lease = {

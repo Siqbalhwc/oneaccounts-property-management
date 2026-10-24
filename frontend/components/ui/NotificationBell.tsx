@@ -68,7 +68,7 @@ export function NotificationBell() {
     // (still "active" because nothing auto-expires them).
     const expiring: NotificationItem[] = (expiringLeases ?? []).map((l) => ({
       key: `lease-${l.lease_id}`,
-      href: "/leases",
+      href: "/leases/expiring",
       title: `${l.days_left < 0 ? "Lease ended — renew or settle" : "Lease expiring — renewal due"} · ${l.tenant_name ?? "Tenant"}${l.room_number ? `, Room ${l.room_number}` : ""}`,
       subtitle:
         l.days_left < 0
@@ -77,8 +77,11 @@ export function NotificationBell() {
       tone: (l.days_left < 0 ? "red" : "amber") as "red" | "amber",
     }));
 
-    return [...expiring, ...overdue].slice(0, 8);
+    return [...expiring.slice(0, 3), ...overdue].slice(0, 8);
   }, [invoices, leases, expiringLeases, tenants, rooms, buildings]);
+
+  const badgeCount =
+    (expiringLeases?.length ?? 0) + items.filter((i) => !i.key.startsWith("lease-")).length;
 
   return (
     <div className="relative">
@@ -88,9 +91,9 @@ export function NotificationBell() {
         aria-label="Notifications"
       >
         <IconBell size={16} />
-        {items.length > 0 && (
+        {badgeCount > 0 && (
           <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-stamp-red text-white text-[9px] font-semibold flex items-center justify-center border-2 border-paper-card">
-            {items.length > 9 ? "9+" : items.length}
+            {badgeCount > 9 ? "9+" : badgeCount}
           </span>
         )}
       </button>
@@ -127,6 +130,15 @@ export function NotificationBell() {
                   </Link>
                 ))}
               </div>
+            )}
+            {(expiringLeases?.length ?? 0) > 0 && (
+              <Link
+                href="/leases/expiring"
+                onClick={() => setOpen(false)}
+                className="block mt-1 px-2.5 py-2 border-t border-border text-[12px] font-medium text-accent hover:underline"
+              >
+                View all expiring leases ({expiringLeases!.length}) →
+              </Link>
             )}
           </div>
         </>
