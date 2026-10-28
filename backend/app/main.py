@@ -5,6 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.core.access import enforce_access
+from app.plugins import registry as plugin_registry
+from app.plugins import tenant_portal
 from app.routers import (
     access,
     audit_log,
@@ -121,6 +123,10 @@ app.include_router(access.router, prefix=API_PREFIX)
 app.include_router(data_transfer.router, prefix=API_PREFIX, dependencies=_GUARD)
 app.include_router(utility_bills.router, prefix=API_PREFIX, dependencies=_GUARD)
 app.include_router(property_search.router, prefix=API_PREFIX, dependencies=_GUARD)
+
+# Optional plug-ins. To DETACH one, delete its line below (core features are unaffected).
+app.include_router(plugin_registry.router, prefix=API_PREFIX, dependencies=_GUARD)
+tenant_portal.register(app, guard=_GUARD, api_prefix=API_PREFIX)
 
 
 @app.get("/")

@@ -571,7 +571,8 @@ export default function TowerPage() {
               <div className="space-y-2">
                 {Object.entries(featureKeys).map(([key, label]) => {
                   const flag = detail.feature_flags.find((f) => f.feature_key === key);
-                  const enabled = flag ? flag.enabled : true; // no row = enabled by default
+                  // Most features are opt-OUT (no row = on). Plug-ins are opt-IN (no row = off).
+                  const enabled = flag ? flag.enabled : !["tenant_portal"].includes(key);
                   return (
                     <label key={key} className="flex items-center gap-2 text-sm">
                       <input

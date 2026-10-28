@@ -103,6 +103,7 @@ export function Sidebar({
   isPlatformAdmin,
   showImplementation,
   access,
+  plugins,
 }: {
   company: Company | null;
   mobileOpen: boolean;
@@ -110,6 +111,7 @@ export function Sidebar({
   isPlatformAdmin?: boolean;
   showImplementation?: boolean;
   access?: AccessInfo | null;
+  plugins?: string[];
 }) {
   const pathname = usePathname();
   const { L } = useLabels();
@@ -143,10 +145,13 @@ export function Sidebar({
       if (sec.key === "company" && access?.can_manage_users) {
         items = [...items, { href: "/users", label: "Users & access", icon: IconUsers }];
       }
+      if (sec.key === "property" && plugins?.includes("tenant_portal") && !(access && !access.can_manage_master_data)) {
+        items = [...items, { href: "/tenant-portal", label: "Tenant portal", icon: IconUsers }];
+      }
       return { ...sec, items };
     });
     return [...base, ...extra];
-  }, [isPlatformAdmin, showImplementation, access]);
+  }, [isPlatformAdmin, showImplementation, access, plugins]);
 
   const [openSection, setOpenSection] = useState<string | null>(null);
 

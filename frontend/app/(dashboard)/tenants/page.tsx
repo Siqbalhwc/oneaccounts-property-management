@@ -10,6 +10,8 @@ import { HistoryPanel } from "@/components/ui/HistoryPanel";
 import { Field, Input } from "@/components/ui/Field";
 import { usePropertySearch } from "@/lib/usePropertySearch";
 import { useLabels } from "@/lib/labels";
+import { usePlugins } from "@/lib/plugins";
+import { LoginSlipModal } from "@/components/portal/LoginSlipModal";
 
 function validateCnic(value: string): string | null {
   const digits = value.replace(/\D/g, "");
@@ -32,6 +34,8 @@ const emptyForm = { full_name: "", cnic: "", phone: "", email: "", address: "" }
 
 export default function TenantsPage() {
   const { L } = useLabels();
+  const portalOn = usePlugins().includes("tenant_portal");
+  const [slipTenantId, setSlipTenantId] = useState<string | null>(null);
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
   const [myRole, setMyRole] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
@@ -123,7 +127,9 @@ export default function TenantsPage() {
       if (editingId) {
         await api.patch(`/tenants/${editingId}`, form);
       } else {
-        await api.post("/tenants", form);
+        const created = await api.post<{ id: string }>("/tenants", form);
+        // The portal account is created together with the tenant; show its first-login details now.
+        if (portalOn && canManage && created?.id) setSlipTenantId(created.id);
       }
       setModalOpen(false);
       load();
@@ -219,6 +225,11 @@ export default function TenantsPage() {
                   <Button variant="ghost" onClick={() => openEditModal(t)}>
                     Edit
                   </Button>
+                  {portalOn && canManage && !t.is_archived && (
+                    <Button variant="ghost" onClick={() => setSlipTenantId(t.id)}>
+                      Portal login
+                    </Button>
+                  )}
                   {canManage && t.is_archived && (
                     <Button variant="ghost" onClick={() => handleUnarchive(t)}>
                       Unarchive
@@ -236,6 +247,8 @@ export default function TenantsPage() {
           ]}
         />
       </Card>
+
+      <LoginSlipModal tenantId={slipTenantId} onClose={() => setSlipTenantId(null)} />
 
       <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editingId ? "Edit tenant" : "Add tenant"}>
         <form onSubmit={handleSubmit} className="space-y-4">

@@ -53,6 +53,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.worksheet.worksheet import Worksheet
 from supabase import Client
 
+from app.core.hooks import emit
 from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
 from app.crud.generic import write_audit_log, friendly_db_error
 from postgrest.exceptions import APIError
@@ -947,6 +948,7 @@ def import_tenants(
                 except Exception as e:
                     status, detail = friendly_db_error(e)
                     report.append({"row": i, "status": "error", "detail": detail})
+    emit("tenants.bulk_created", company_id=company_id)  # optional plug-ins (e.g. Tenant Portal) react; no-op if none
     return {"report": report}
 
 

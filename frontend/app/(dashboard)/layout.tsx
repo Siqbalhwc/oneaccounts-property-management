@@ -11,6 +11,7 @@ import { Company, api } from "@/lib/api";
 import { ThemeProvider } from "@/lib/theme";
 import { AccessContext, AccessInfo } from "@/lib/access";
 import { DEFAULT_LABELS, LabelsContext, UnitLabels } from "@/lib/labels";
+import { PluginsContext } from "@/lib/plugins";
 
 const LABELS_CACHE_KEY = "oa_unit_labels";
 
@@ -38,6 +39,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [access, setAccess] = useState<AccessInfo | null>(null);
   const [labels, setLabels] = useState<UnitLabels>(DEFAULT_LABELS);
+  const [plugins, setPlugins] = useState<string[]>([]);
   const [companyBlocked, setCompanyBlocked] = useState(false);
   const [blockedReason, setBlockedReason] = useState<"pending" | "suspended" | null>(null);
   const [blockedMessage, setBlockedMessage] = useState<string | null>(null);
@@ -137,6 +139,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       // rules, this only decides which menu items to show.
       api.get<AccessInfo>("/access/me").then(setAccess).catch(() => setAccess(null));
       loadLabels();
+      // Optional plug-ins switched on for this company. A failure just leaves them hidden.
+      api.get<{ enabled: string[] }>("/company/plugins").then((r) => setPlugins(r.enabled)).catch(() => setPlugins([]));
     }
 
     checkSessionAndLoadProfile();
@@ -208,9 +212,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     <ThemeProvider initialTheme={profile?.theme_preference}>
     <AccessContext.Provider value={access}>
     <LabelsContext.Provider value={{ labels, reload: loadLabels }}>
+    <PluginsContext.Provider value={plugins}>
     <div className="flex items-start gap-4 p-4 min-h-screen">
       <Sidebar
         access={access}
+        plugins={plugins}
         company={company}
         mobileOpen={mobileNavOpen}
         onClose={() => setMobileNavOpen(false)}
@@ -275,6 +281,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </main>
       </div>
     </div>
+    </PluginsContext.Provider>
     </LabelsContext.Provider>
     </AccessContext.Provider>
     </ThemeProvider>

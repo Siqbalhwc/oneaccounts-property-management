@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from postgrest.exceptions import APIError
 from supabase import Client
 
+from app.core.hooks import emit
 from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
 
 
@@ -153,6 +154,7 @@ def build_crud_router(
         created = res.data[0] if res.data else None
         if created:
             write_audit_log(supabase, company_id, user["user_id"], "create", table, created["id"])
+            emit(f"{table}.created", row=created, company_id=company_id)
         return created
 
     @router.patch("/{record_id}")
@@ -181,6 +183,7 @@ def build_crud_router(
 
         after = res.data[0]
         write_audit_log(supabase, company_id, user["user_id"], "update", table, record_id, before.data, after)
+        emit(f"{table}.updated", before=before.data, after=after, company_id=company_id)
         return after
 
     if archivable:
@@ -197,6 +200,7 @@ def build_crud_router(
             if not res.data:
                 raise HTTPException(status_code=404, detail="Not found")
             write_audit_log(supabase, company_id, user["user_id"], "archive", table, record_id)
+            emit(f"{table}.archived", row=res.data[0], company_id=company_id)
             return res.data[0]
 
         @router.post("/{record_id}/unarchive")
@@ -211,6 +215,7 @@ def build_crud_router(
             if not res.data:
                 raise HTTPException(status_code=404, detail="Not found")
             write_audit_log(supabase, company_id, user["user_id"], "unarchive", table, record_id)
+            emit(f"{table}.unarchived", row=res.data[0], company_id=company_id)
             return res.data[0]
 
     return router
