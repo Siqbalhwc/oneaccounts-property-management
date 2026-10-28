@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from supabase import Client
 
+from app.core.labels import get_unit
 from app.core.access import load_access_context
 from app.core.deps import get_current_company_id, get_current_user, get_supabase
 from app.crud.generic import write_audit_log
@@ -119,7 +120,7 @@ def _post_expense_journal(supabase: Client, company_id: str, expense: dict):
                 status_code=400,
                 detail="This room has no owner configured (on the room or its building), so this expense can't be charged to an owner.",
             )
-        description = expense.get("description") or f"{(cat_name_row or {}).get('name', 'Owner charge')} — Room"
+        description = expense.get("description") or f"{(cat_name_row or {}).get('name', 'Owner charge')} — {get_unit(supabase, company_id)['singular']}"
         post_journal_entry(
             supabase,
             company_id=company_id,

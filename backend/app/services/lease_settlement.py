@@ -24,6 +24,7 @@ from typing import Optional, TypedDict
 from fastapi import HTTPException
 from supabase import Client
 
+from app.core.labels import get_unit
 from app.services.invoicing import (
     compute_prorated_charges,
     current_charges_with_earliest_start,
@@ -360,7 +361,7 @@ def finalize_settlement(
             entry_date=str(move_out_date),
             source_type="manual_adjustment",
             source_id=None,
-            description=f"Move-out discount — {tenant_name}, Room {room_label}" + (f" ({discount_reason})" if discount_reason else ""),
+            description=f"Move-out discount — {tenant_name}, {get_unit(supabase, company_id)['singular']} {room_label}" + (f" ({discount_reason})" if discount_reason else ""),
             lines=[
                 {"account_id": discount_account_id, "direction": "debit", "amount": discount_amount, **tags},
                 {"account_id": ar_id, "direction": "credit", "amount": discount_amount, **tags},

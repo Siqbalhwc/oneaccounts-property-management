@@ -8,6 +8,7 @@ import { Field, Input, AmountInput } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { HistoryPanel } from "@/components/ui/HistoryPanel";
 import { api, Building, Tenant, Account } from "@/lib/api";
+import { useLabels } from "@/lib/labels";
 
 // Same local-extension pattern as journal/new/page.tsx and owners/page.tsx.
 type BuildingWithOwner = Building & { owner_id?: string | null };
@@ -66,6 +67,7 @@ function formatPkr(n: number) {
 }
 
 export default function EditJournalEntryPage() {
+  const { L } = useLabels();
   const router = useRouter();
   const params = useParams();
   const entryId = params.id as string;
@@ -281,7 +283,7 @@ export default function EditJournalEntryPage() {
                     Owner
                   </th>
                   <th className="text-left text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 px-2 whitespace-nowrap min-w-[110px]">
-                    Apartment
+                    {L("Apartment")}
                   </th>
                   <th className="text-left text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 px-2 whitespace-nowrap min-w-[150px]">
                     Building
@@ -340,9 +342,9 @@ export default function EditJournalEntryPage() {
                         value={line.room_id}
                         onChange={(v) => handleRoomChange(i, v)}
                         options={roomOptionsFor(line.building_id)}
-                        placeholder="Search apartment…"
+                        placeholder={L("Search apartment…")}
                         disabled={!line.building_id}
-                        emptyLabel="No apartments match"
+                        emptyLabel={L("No apartments match")}
                       />
                     </td>
                     <td className="py-2 px-2 align-middle">

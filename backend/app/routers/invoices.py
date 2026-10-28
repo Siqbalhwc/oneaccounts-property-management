@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from supabase import Client
 
+from app.core.labels import unit_from_company
 from app.core.config import settings
 from app.core.deps import get_current_company_id, get_service_client, get_supabase
 from app.services.invoice_batch import count_invoice_numbers, generate_batch, plan_generation
@@ -383,7 +384,7 @@ def get_whatsapp_link(invoice_id: str, supabase: Client = Depends(get_supabase))
     message = (
         f"Hi {tenant.get('full_name') or ''}, your rent invoice "
         f"({invoice.get('invoice_number') or invoice['invoice_month']}) for "
-        f"{invoice['invoice_month']} ({building.get('name') or ''} - Room "
+        f"{invoice['invoice_month']} ({building.get('name') or ''} - {unit_from_company(company)['singular']} "
         f"{room.get('room_number') or ''}) is Rs {float(invoice['total_amount']):,.0f}, "
         f"due on {invoice['due_date']}.\n\nView/download invoice: {pdf_url}\n\n"
         f"Thank you — {company.get('name') or ''}"

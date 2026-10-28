@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { api, Building, ExpiringLease, Invoice, Lease, Room, Tenant } from "@/lib/api";
 import { IconBell } from "@/components/ui/LedgerIcons";
+import { useLabels } from "@/lib/labels";
 
 function pkr(n: number) {
   return `Rs ${Number(n || 0).toLocaleString("en-PK")}`;
@@ -18,6 +19,7 @@ type NotificationItem = {
 };
 
 export function NotificationBell() {
+  const { L } = useLabels();
   const [open, setOpen] = useState(false);
   const [invoices, setInvoices] = useState<Invoice[] | null>(null);
   const [leases, setLeases] = useState<Lease[] | null>(null);
@@ -58,7 +60,7 @@ export function NotificationBell() {
         return {
           key: `inv-${i.id}`,
           href: "/invoices",
-          title: `Invoice overdue — ${tenant?.full_name ?? "Tenant"}${room ? `, Apartment ${room.room_number}` : ""}`,
+          title: `Invoice overdue — ${tenant?.full_name ?? "Tenant"}${room ? `, ${L("Apartment")} ${room.room_number}` : ""}`,
           subtitle: `${pkr(i.total_amount)} · ${daysOverdue} day${daysOverdue === 1 ? "" : "s"} overdue`,
           tone: "red" as const,
         };

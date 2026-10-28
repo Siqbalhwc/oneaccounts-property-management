@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import Client
 
+from app.core.labels import get_unit
 from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
 from app.crud.generic import write_audit_log
 from app.services.ledger import get_account_id, get_tenant_account_balance_as_of, post_journal_entry, resolve_room_owner
@@ -650,7 +651,7 @@ def create_lease(
                 entry_date=str(payload.security_deposit_date_received),
                 source_type="security_deposit",
                 source_id=lease_id,
-                description=f"Security deposit — {tenant_name}, Room {room_label}",
+                description=f"Security deposit — {tenant_name}, {get_unit(supabase, company_id)['singular']} {room_label}",
                 lines=[
                     {
                         "account_id": received_account_id, "direction": "debit", "amount": payload.security_deposit_amount,

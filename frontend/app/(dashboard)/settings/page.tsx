@@ -6,6 +6,7 @@ import { Card, DataTable } from "@/components/ui/Card";
 import { Field, Input, Select } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
+import { useLabels } from "@/lib/labels";
 
 type TeamMember = { id: string; full_name: string; role: string; phone?: string };
 
@@ -408,6 +409,72 @@ function JournalImportSlot() {
   );
 }
 
+/** "Name of unit": what this company calls the things it rents out. Select-only
+ *  -- the list (with correct plurals) comes from the server, nothing is typed. */
+function UnitNameCard({ canEdit }: { canEdit: boolean }) {
+  const { options, unitType, reload } = useLabels();
+  const [choice, setChoice] = useState(unitType);
+  const [saving, setSaving] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setChoice(unitType);
+  }, [unitType]);
+
+  const picked = options.find((o) => o.key === choice);
+  const changed = choice !== unitType;
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    setDone(null);
+    try {
+      await api.put("/company/labels", { unit_type: choice });
+      await reload();
+      setDone("Saved. Every screen, report and PDF now uses this name.");
+    } catch (err: any) {
+      setError(err.message || "Couldn't save the change.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card title="Name of unit">
+      <div className="space-y-4">
+        <Field
+          label="What do you call what you rent out?"
+          hint="Pick the closest name. It is used on every screen, report, invoice and receipt. Only the name changes; none of your data does."
+        >
+          <Select value={choice} onChange={(e) => setChoice(e.target.value)} disabled={!canEdit || options.length === 0}>
+            {options.map((o) => (
+              <option key={o.key} value={o.key}>
+                {o.singular}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {picked && (
+          <p className="text-sm text-ink/60">
+            Screens will say <span className="font-medium text-ink">{picked.singular}</span> for one and{" "}
+            <span className="font-medium text-ink">{picked.plural}</span> for many.
+          </p>
+        )}
+        {error && <p className="text-sm text-stamp-red">{error}</p>}
+        {done && <p className="text-sm text-accent">{done}</p>}
+        {canEdit ? (
+          <Button onClick={save} disabled={saving || !changed}>
+            {saving ? "Saving…" : "Save name"}
+          </Button>
+        ) : (
+          <p className="text-xs text-ink/45">Only an owner or admin can change this.</p>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 export default function SettingsPage() {
   const [company, setCompany] = useState<Company | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -615,6 +682,8 @@ export default function SettingsPage() {
           </Button>
         </div>
       </Card>
+
+      <UnitNameCard canEdit={canInvite} />
 
       <Card title="Your profile">
         <div className="space-y-4">

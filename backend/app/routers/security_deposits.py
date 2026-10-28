@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import Client
 
+from app.core.labels import get_unit
 from app.core.deps import get_current_company_id, get_supabase
 from app.services.ledger import get_account_id, post_journal_entry, resolve_room_owner
 
@@ -212,7 +213,7 @@ def record_deposit_payment(
         entry_date=str(payment_date),
         source_type="security_deposit_payment",
         source_id=payment["id"],
-        description=f"Security deposit ({label}) — {tenant_name}, Room {room_label}",
+        description=f"Security deposit ({label}) — {tenant_name}, {get_unit(supabase, company_id)['singular']} {room_label}",
         lines=[
             {"account_id": payload.account_id, "direction": "debit", "amount": payload.amount, **tags},
             {"account_id": deposits_held_id, "direction": "credit", "amount": payload.amount, **tags},

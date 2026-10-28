@@ -8,6 +8,7 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Field, Input, AmountInput, Select } from "@/components/ui/Field";
 import { SearchableSelect, ComboOption } from "@/components/ui/SearchableSelect";
+import { useLabels } from "@/lib/labels";
 
 function formatPkr(n: number) {
   return `Rs ${n.toLocaleString("en-PK", { maximumFractionDigits: 2 })}`;
@@ -25,6 +26,7 @@ type Summary = {
 };
 
 export default function ReceivePaymentPage() {
+  const { L } = useLabels();
   const router = useRouter();
   const searchParams = useSearchParams();
   const leaseId = searchParams.get("lease_id") || "";
@@ -210,7 +212,7 @@ export default function ReceivePaymentPage() {
         <h1 className="text-2xl font-display font-semibold">Receive payment</h1>
         <p className="text-sm text-ink/55 mt-1">
           {tenant?.full_name ?? "—"} — {building?.name ?? "—"}
-          {room ? `, Apartment ${room.room_number}` : ""}
+          {room ? `, ${L("Apartment")} ${room.room_number}` : ""}
         </p>
       </div>
 

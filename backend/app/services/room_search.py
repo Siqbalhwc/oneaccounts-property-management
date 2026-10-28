@@ -33,7 +33,11 @@ from app.services.invoice_batch import fetch_all, fetch_in
 
 # Words people type around a room number that are labels, not part of any
 # building name or room number.
-FILLER_WORDS = {"apartment", "apt", "apt.", "room", "flat", "unit", "no", "no.", "-", "\u2013", "\u2014"}
+FILLER_WORDS = {
+    "apartment", "apt", "apt.", "room", "flat", "unit", "no", "no.", "-", "\u2013", "\u2014",
+    # the other selectable "Name of unit" words that are unlikely to be part of a building name
+    "shop", "office", "portion", "villa", "suite", "studio", "plot", "godown", "showroom", "kiosk", "stall", "booth", "cabin",
+}
 MAX_TERMS = 6
 MAX_TERM_LENGTH = 60
 
@@ -74,11 +78,11 @@ class PropertyMatch:
     def empty(self) -> bool:
         return not self.rooms and not self.building_ids
 
-    def room_label(self, room_id: str) -> str:
+    def room_label(self, room_id: str, unit_word: str = "Apartment") -> str:
         room = self.rooms.get(room_id) or {}
         building = self.buildings.get(room.get("building_id")) or {}
         building_name = building.get("name") or "\u2014"
-        return f"{building_name} \u2014 Apartment {room.get('room_number', '?')}"
+        return f"{building_name} \u2014 {unit_word} {room.get('room_number', '?')}"
 
     def building_scope(self) -> set[str]:
         """Buildings for records that belong to a building, never to a room

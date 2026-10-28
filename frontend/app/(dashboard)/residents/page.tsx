@@ -14,6 +14,7 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { PrintHeader } from "@/components/ui/PrintHeader";
 import { Input, Select } from "@/components/ui/Field";
+import { useLabels } from "@/lib/labels";
 
 type Tab = "roommates" | "facilities";
 
@@ -27,6 +28,7 @@ const KIND_LABELS: Record<FacilityKind, string> = {
 };
 
 export default function ResidentsPage() {
+  const { L } = useLabels();
   const [tab, setTab] = useState<Tab>("roommates");
   const [company, setCompany] = useState<Company | null>(null);
   const [buildings, setBuildings] = useState<Building[]>([]);
@@ -86,8 +88,7 @@ export default function ResidentsPage() {
         <div>
           <h1 className="text-2xl font-display font-semibold">Residents &amp; facilities</h1>
           <p className="text-sm text-ink/55 mt-1">
-            Who lives in each apartment, and the vehicle, internet, meter and other facility details tenants have opted
-            for. Add or change entries from a lease&apos;s{" "}
+            {L("Who lives in each apartment, and the vehicle, internet, meter and other facility details tenants have opted for. Add or change entries from a lease's")}{" "}
             <Link href="/leases" className="text-accent hover:underline">Residents</Link> page.
           </p>
         </div>

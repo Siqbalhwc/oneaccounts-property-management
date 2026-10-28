@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { StampBadge } from "@/components/ui/StampBadge";
 import { Field, Input, Select } from "@/components/ui/Field";
 import { api, Building } from "@/lib/api";
+import { useLabels } from "@/lib/labels";
 
 type JournalLine = {
   line_id: string;
@@ -43,6 +44,7 @@ const SOURCE_TYPES = [
 ];
 
 export default function JournalEntriesPage() {
+  const { L } = useLabels();
   const [lines, setLines] = useState<JournalLine[] | null>(null);
   const [buildings, setBuildings] = useState<Building[] | null>(null);
   const [owners, setOwners] = useState<Owner[] | null>(null);
@@ -145,7 +147,7 @@ export default function JournalEntriesPage() {
       <Input
         value={propertySearch}
         onChange={(e) => setPropertySearch(e.target.value)}
-        placeholder="Search by building or apartment (e.g. Sunrise 101)…"
+        placeholder={L("Search by building or apartment (e.g. Sunrise 101)…")}
         className="max-w-sm no-print"
       />
 

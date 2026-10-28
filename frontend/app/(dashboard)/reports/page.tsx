@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { PrintHeader } from "@/components/ui/PrintHeader";
 import { api, Tenant, Lease, Room, Building, Invoice, Company, fetchPdfBlob, downloadFile } from "@/lib/api";
+import { useLabels } from "@/lib/labels";
 
 type SecurityDeposit = {
   id: string;
@@ -141,6 +142,7 @@ const TABS = [
 type Tab = (typeof TABS)[number];
 
 export default function ReportsPage() {
+  const { L } = useLabels();
   const [tab, setTab] = useState<Tab>("Receipts by Head");
 
   const [deposits, setDeposits] = useState<SecurityDeposit[] | null>(null);
@@ -704,7 +706,7 @@ export default function ReportsPage() {
             emptyMessage="No security deposits recorded yet."
             columns={[
               { header: "Tenant", accessor: (d) => tenantName(leaseById(d.lease_id)?.tenant_id ?? "") },
-              { header: "Building / Apartment", accessor: (d) => roomLabel(leaseById(d.lease_id)?.room_id) },
+              { header: L("Building / Apartment"), accessor: (d) => roomLabel(leaseById(d.lease_id)?.room_id) },
               { header: "Received", accessor: (d) => <span className="figures">{formatPkr(d.amount_received)}</span>, align: "right" },
               { header: "Date received", accessor: (d) => d.date_received },
               { header: "Status", accessor: (d) => <StampBadge status={d.status} /> },
@@ -849,7 +851,7 @@ export default function ReportsPage() {
               onRowClick={(r) => openRoomDrilldown(r)}
               columns={[
                 {
-                  header: "Room",
+                  header: L("Apartment"),
                   accessor: (r) => (
                     <span className="font-medium">
                       {r.building_name} — {r.room_number}

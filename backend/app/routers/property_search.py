@@ -23,6 +23,7 @@ from typing import Callable
 from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase import Client
 
+from app.core.labels import get_unit
 from app.core.deps import get_current_company_id, get_supabase
 from app.services.room_search import PropertyMatch, resolve_property_term, rows_in
 
@@ -47,7 +48,7 @@ def _tenants(supabase: Client, company_id: str, m: PropertyMatch) -> tuple[set[s
     for tenant_id, tenant_leases in by_tenant.items():
         ids.add(tenant_id)
         if not any(l.get("status") == "active" for l in tenant_leases):
-            notes[tenant_id] = f"Past tenant \u00b7 {m.room_label(tenant_leases[0]['room_id'])}"
+            notes[tenant_id] = f"Past tenant \u00b7 {m.room_label(tenant_leases[0]['room_id'], get_unit(supabase, company_id)['singular'])}"
     return ids, notes
 
 

@@ -26,6 +26,7 @@ from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from supabase import Client
+from app.core.labels import unit_from_company
 
 LEDGER = (0.184, 0.310, 0.239)
 BRASS = (0.784, 0.608, 0.361)
@@ -230,7 +231,7 @@ def render_receipt_pdf(ctx: dict) -> bytes:
     c.drawString(20 * mm, y, f"CNIC: {tenant.get('cnic') or ''}")
     if room and building:
         y -= 5 * mm
-        c.drawString(20 * mm, y, f"{building.get('name') or ''} — Room {room.get('room_number') or ''}")
+        c.drawString(20 * mm, y, f"{building.get('name') or ''} — {unit_from_company(company)['singular']} {room.get('room_number') or ''}")
     c.setFillColorRGB(*INK)
 
     y -= 14 * mm

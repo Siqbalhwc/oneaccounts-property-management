@@ -9,6 +9,7 @@ import { ConfirmModal } from "@/components/ui/ConfirmModal";
 import { HistoryPanel } from "@/components/ui/HistoryPanel";
 import { Field, Input } from "@/components/ui/Field";
 import { usePropertySearch } from "@/lib/usePropertySearch";
+import { useLabels } from "@/lib/labels";
 
 function validateCnic(value: string): string | null {
   const digits = value.replace(/\D/g, "");
@@ -30,6 +31,7 @@ function validatePhone(value: string): string | null {
 const emptyForm = { full_name: "", cnic: "", phone: "", email: "", address: "" };
 
 export default function TenantsPage() {
+  const { L } = useLabels();
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
   const [myRole, setMyRole] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
@@ -70,7 +72,7 @@ export default function TenantsPage() {
     if (!activeLease) return "Not assigned";
     const room = rooms.find((r) => r.id === activeLease.room_id);
     const building = buildings.find((b) => b.id === room?.building_id);
-    return room ? `${building?.name ?? "—"} — Apartment ${room.room_number}` : "Not assigned";
+    return room ? `${building?.name ?? "—"} — ${L("Apartment")} ${room.room_number}` : "Not assigned";
   }
 
   // Room / apartment / building matches come from the server (including past
@@ -156,7 +158,7 @@ export default function TenantsPage() {
           <h1 className="text-2xl font-display font-semibold">Tenants</h1>
           <p className="text-sm text-ink/55 mt-1">
             Identified by CNIC — a tenant&apos;s record follows them across every
-            apartment they&apos;ve rented.
+            {" "}{L("apartment they've rented.")}
           </p>
         </div>
         <Button onClick={openAddModal}>Add tenant</Button>
@@ -167,7 +169,7 @@ export default function TenantsPage() {
           <Input
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="Search by name, CNIC, address, building or apartment…"
+            placeholder={L("Search by name, CNIC, address, building or apartment…")}
             className="max-w-sm"
           />
           <label className="flex items-center gap-2 text-xs text-ink/50">

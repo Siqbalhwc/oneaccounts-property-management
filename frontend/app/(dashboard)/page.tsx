@@ -38,6 +38,7 @@ import { Select } from "@/components/ui/Field";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useCountUp } from "@/components/ui/useCountUp";
 import { KpiTile } from "@/components/ui/KpiTile";
+import { useLabels } from "@/lib/labels";
 
 type Payment = {
   id: string;
@@ -88,6 +89,7 @@ function relativeTime(iso?: string) {
 }
 
 export default function DashboardHome() {
+  const { L } = useLabels();
   const router = useRouter();
   const { theme } = useTheme();
   const themeColors = THEME_COLORS[theme];
@@ -546,7 +548,7 @@ export default function DashboardHome() {
               </div>
             </div>
           ) : (
-            <p className="text-sm text-ink/45 py-6 text-center">No apartments recorded yet.</p>
+            <p className="text-sm text-ink/45 py-6 text-center">{L("No apartments recorded yet.")}</p>
           )}
         </Card>
 
@@ -622,7 +624,7 @@ export default function DashboardHome() {
             onRowClick={() => router.push("/invoices")}
             columns={[
               { header: "Tenant", accessor: (r) => <span className="font-medium">{r.tenantName}</span> },
-              { header: "Building / Apartment", accessor: (r) => r.roomLabel },
+              { header: L("Building / Apartment"), accessor: (r) => r.roomLabel },
               { header: "Amount", accessor: (r) => <span className="figures">{pkr(r.total_amount)}</span>, align: "right" },
               { header: "Due date", accessor: (r) => r.due_date },
               {

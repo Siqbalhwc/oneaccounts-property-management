@@ -39,6 +39,7 @@ from typing import Callable, Iterable, Optional
 
 from supabase import Client
 
+from app.core.labels import get_unit
 from app.services.invoicing import compute_prorated_charges, merge_current_charges
 from app.services.ledger import UnbalancedJournalEntry
 from app.services.utility_bills import apply_utility_overrides, fetch_bills
@@ -324,7 +325,7 @@ def _generate_slice_bulk(
                     "entry_date": str(invoice_month),
                     "source_type": "invoice",
                     "source_id": inv["id"],
-                    "description": f"Rent invoice — {tenant_name}, Room {room_label} — {invoice_month.strftime('%B %Y')}",
+                    "description": f"Rent invoice — {tenant_name}, {get_unit(supabase, company_id)['singular']} {room_label} — {invoice_month.strftime('%B %Y')}",
                     "created_by": None,
                 }
             )

@@ -14,6 +14,7 @@ from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from supabase import Client
+from app.core.labels import unit_from_company
 
 
 def fetch_deposit_context(supabase: Client, deposit_id: str) -> dict:
@@ -158,7 +159,7 @@ def render_deposit_receipt_pdf(ctx: dict) -> bytes:
     c.setFillColorRGB(0.3, 0.34, 0.32)
     c.drawString(20 * mm, y, f"CNIC: {tenant.get('cnic') or ''}")
     y -= 5 * mm
-    c.drawString(20 * mm, y, f"{building.get('name') or ''} — Room {room.get('room_number') or ''}")
+    c.drawString(20 * mm, y, f"{building.get('name') or ''} — {unit_from_company(company)['singular']} {room.get('room_number') or ''}")
     c.setFillColorRGB(*INK)
 
     y -= 14 * mm

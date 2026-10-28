@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Field, Input, AmountInput } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { api, Building, Tenant, Account } from "@/lib/api";
+import { useLabels } from "@/lib/labels";
 
 // Room and Owner aren't fully typed in lib/api.ts (the shared Room type
 // predates per-room ownership overrides), and buildings' own owner_id
@@ -45,6 +46,7 @@ function formatPkr(n: number) {
 }
 
 export default function NewJournalEntryPage() {
+  const { L } = useLabels();
   const router = useRouter();
 
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -197,7 +199,7 @@ export default function NewJournalEntryPage() {
         <p className="text-sm text-ink/55 mt-1 max-w-3xl">
           For manual adjustments — corrections, write-offs, or anything else that
           doesn&apos;t come from an invoice, payment, expense, salary, or deposit action.
-          Tag each line with building / apartment / owner so it shows up correctly in P&amp;L
+          {" "}{L("Tag each line with building / apartment / owner so it shows up correctly in P&L")}{" "}
           and owner reports.
         </p>
       </div>
@@ -211,7 +213,7 @@ export default function NewJournalEntryPage() {
             <Field label="Reference / memo" hint="A short, clear summary — this is what shows in the journal list.">
               <Input
                 required
-                placeholder="e.g. Correction — overstated water charge for Apartment 204, July 2026"
+                placeholder={L("e.g. Correction — overstated water charge for Apartment 204, July 2026")}
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
               />
@@ -251,7 +253,7 @@ export default function NewJournalEntryPage() {
                     Owner
                   </th>
                   <th className="text-left text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 px-2 whitespace-nowrap min-w-[110px]">
-                    Apartment
+                    {L("Apartment")}
                   </th>
                   <th className="text-left text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 px-2 whitespace-nowrap min-w-[150px]">
                     Building
@@ -311,9 +313,9 @@ export default function NewJournalEntryPage() {
                           value={line.room_id}
                           onChange={(v) => handleRoomChange(i, v)}
                           options={roomOptionsFor(line.building_id)}
-                          placeholder="Search apartment…"
+                          placeholder={L("Search apartment…")}
                           disabled={!line.building_id}
-                          emptyLabel="No apartments match"
+                          emptyLabel={L("No apartments match")}
                         />
                       </td>
                       <td className="py-2 px-2 align-middle">

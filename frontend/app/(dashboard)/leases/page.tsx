@@ -12,6 +12,7 @@ import { RenewLeaseModal } from "@/components/ui/RenewLeaseModal";
 import { HistoryPanel } from "@/components/ui/HistoryPanel";
 import { Field, Input, Select } from "@/components/ui/Field";
 import { ChevronRight, ChevronDown, RefreshCw, FileText, Pencil, Printer, Banknote, SlidersHorizontal, Users, Undo2 } from "lucide-react";
+import { useLabels } from "@/lib/labels";
 
 type LeaseCharge = {
   id: string;
@@ -56,6 +57,7 @@ function pageNumbers(current: number, total: number): (number | "…")[] {
 
 
 export default function LeasesPage() {
+  const { L } = useLabels();
   const [leases, setLeases] = useState<Lease[] | null>(null);
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
   const [rooms, setRooms] = useState<Room[] | null>(null);
@@ -567,7 +569,7 @@ export default function LeasesPage() {
         <div>
           <h1 className="text-2xl font-display font-semibold">Leases</h1>
           <p className="text-sm text-ink/55 mt-1">
-            One-year agreements linking a tenant to an apartment, with their rent
+            {L("One-year agreements linking a tenant to an apartment, with their rent")}{" "}
             structure and security deposit.
           </p>
         </div>
@@ -588,7 +590,7 @@ export default function LeasesPage() {
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by tenant, building, or apartment…"
+            placeholder={L("Search by tenant, building, or apartment…")}
             className="max-w-xs"
           />
           <div className="relative" ref={colsMenuRef}>
@@ -652,7 +654,7 @@ export default function LeasesPage() {
                     Tenant
                   </th>
                   <th className="text-left text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 pr-4 whitespace-nowrap">
-                    Building / Apartment
+                    {L("Building / Apartment")}
                   </th>
                   {showStartCol && (
                     <th className="text-left text-xs uppercase tracking-wider text-ink/50 font-medium pb-2.5 pr-4 whitespace-nowrap">

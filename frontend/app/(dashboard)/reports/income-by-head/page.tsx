@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { PrintHeader } from "@/components/ui/PrintHeader";
 import { api, Building, Company } from "@/lib/api";
+import { useLabels } from "@/lib/labels";
 
 type IncomeByHeadRow = {
   sr: number;
@@ -58,6 +59,7 @@ function firstOfMonth(d: Date) {
 }
 
 export default function IncomeByHeadPage() {
+  const { L } = useLabels();
   const today = new Date();
   const [dateFrom, setDateFrom] = useState(firstOfMonth(today));
   const [dateTo, setDateTo] = useState(today.toISOString().slice(0, 10));
@@ -217,7 +219,7 @@ export default function IncomeByHeadPage() {
           columns={[
             { header: "Sr", accessor: (r) => r.sr },
             { header: "Tenant", accessor: (r) => <span className="font-medium">{r.tenant_name}</span> },
-            { header: "Room / Apartment", accessor: (r) => r.room_label },
+            { header: L("Apartment"), accessor: (r) => r.room_label },
             ...columns.map((c) => ({
               header: c,
               accessor: (r: IncomeByHeadRow) =>

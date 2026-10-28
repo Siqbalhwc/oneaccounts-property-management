@@ -1,3 +1,4 @@
+from app.core.labels import unit_from_company
 """
 Renders the Receipts by Head report as a landscape, letterhead-branded PDF.
 Uses reportlab's Platypus layer (SimpleDocTemplate + Table + Paragraph)
@@ -156,7 +157,7 @@ def render_income_by_head_pdf(
     )
 
     header_row = (
-        [Paragraph("Sr", styles["th"]), Paragraph("Tenant", styles["th"]), Paragraph("Room / Apartment", styles["th"])]
+        [Paragraph("Sr", styles["th"]), Paragraph("Tenant", styles["th"]), Paragraph(unit_from_company(company)["singular"], styles["th"])]
         + [Paragraph(c, styles["th_r"]) for c in columns]
         + [Paragraph("Total", styles["th_r"])]
     )

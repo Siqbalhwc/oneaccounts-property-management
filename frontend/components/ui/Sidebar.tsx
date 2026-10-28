@@ -29,6 +29,7 @@ import {
   IconImplementation,
   IconChevron,
 } from "@/components/ui/LedgerIcons";
+import { useLabels } from "@/lib/labels";
 
 type NavItem = { href: string; label: string; icon: (p: { size?: number; className?: string }) => JSX.Element };
 type NavSection = {
@@ -111,6 +112,7 @@ export function Sidebar({
   access?: AccessInfo | null;
 }) {
   const pathname = usePathname();
+  const { L } = useLabels();
 
   // Platform/Onboarding are conditional, so they're appended dynamically
   // rather than living in the static list above.
@@ -263,7 +265,7 @@ export function Sidebar({
                           }`}
                         >
                           <ItemIcon size={13} className="opacity-80 shrink-0" />
-                          <span className="truncate">{item.label}</span>
+                          <span className="truncate">{L(item.label)}</span>
                           {active && (
                             <span className="absolute left-4 top-1/2 -translate-y-1/2 w-1 h-1 rounded-full bg-brass" />
                           )}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Menu } from "lucide-react";
 import { supabase } from "@/lib/supabaseClient";
@@ -10,6 +10,9 @@ import { NotificationBell } from "@/components/ui/NotificationBell";
 import { Company, api } from "@/lib/api";
 import { ThemeProvider } from "@/lib/theme";
 import { AccessContext, AccessInfo } from "@/lib/access";
+import { DEFAULT_LABELS, LabelsContext, UnitLabels } from "@/lib/labels";
+
+const LABELS_CACHE_KEY = "oa_unit_labels";
 
 type ProfileInfo = {
   full_name: string;
@@ -34,9 +37,39 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [checking, setChecking] = useState(true);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [access, setAccess] = useState<AccessInfo | null>(null);
+  const [labels, setLabels] = useState<UnitLabels>(DEFAULT_LABELS);
   const [companyBlocked, setCompanyBlocked] = useState(false);
   const [blockedReason, setBlockedReason] = useState<"pending" | "suspended" | null>(null);
   const [blockedMessage, setBlockedMessage] = useState<string | null>(null);
+
+  // "Name of unit" (Apartment / Shop / Flat ...). Never blocks the page: if the
+  // call fails the default word is simply kept. The last good answer is cached
+  // in this browser so the right word shows instantly on the next page load.
+  const loadLabels = useCallback(async () => {
+    try {
+      const fresh = await api.get<UnitLabels>("/company/labels");
+      setLabels(fresh);
+      try {
+        window.localStorage.setItem(LABELS_CACHE_KEY, JSON.stringify(fresh));
+      } catch {
+        // storage unavailable (private mode) -- the word just loads from the server each time
+      }
+    } catch {
+      // keep whatever word is already showing
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const cached = window.localStorage.getItem(LABELS_CACHE_KEY);
+      if (cached) {
+        const parsed = JSON.parse(cached) as UnitLabels;
+        if (parsed && typeof parsed.unit === "string" && typeof parsed.units === "string") setLabels(parsed);
+      }
+    } catch {
+      // ignore a bad cache entry
+    }
+  }, []);
 
   useEffect(() => {
     async function checkSessionAndLoadProfile() {
@@ -103,6 +136,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       // which keeps everything visible -- the server is what enforces the
       // rules, this only decides which menu items to show.
       api.get<AccessInfo>("/access/me").then(setAccess).catch(() => setAccess(null));
+      loadLabels();
     }
 
     checkSessionAndLoadProfile();
@@ -111,9 +145,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       if (!session) router.replace("/login");
     });
     return () => listener.subscription.unsubscribe();
-  }, [router]);
+  }, [router, loadLabels]);
 
   async function handleSignOut() {
+    try {
+      window.localStorage.removeItem(LABELS_CACHE_KEY);
+    } catch {
+      // ignore
+    }
     await supabase.auth.signOut();
     router.replace("/login");
   }
@@ -168,6 +207,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   return (
     <ThemeProvider initialTheme={profile?.theme_preference}>
     <AccessContext.Provider value={access}>
+    <LabelsContext.Provider value={{ labels, reload: loadLabels }}>
     <div className="flex items-start gap-4 p-4 min-h-screen">
       <Sidebar
         access={access}
@@ -235,6 +275,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </main>
       </div>
     </div>
+    </LabelsContext.Provider>
     </AccessContext.Provider>
     </ThemeProvider>
   );

@@ -5,6 +5,7 @@ import { Card, DataTable } from "@/components/ui/Card";
 import { Field, Input, Select } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
 import { api, Building, downloadFile, uploadFileWithFields } from "@/lib/api";
+import { useLabels } from "@/lib/labels";
 
 type PreviewRow = {
   row: number;
@@ -87,6 +88,7 @@ function Tag({ kind, children }: { kind: keyof typeof TAG; children: React.React
 }
 
 export default function UtilityBillsPage() {
+  const { L } = useLabels();
   const [month, setMonth] = useState(currentMonth());
   const [buildingFilter, setBuildingFilter] = useState("");
   const [buildings, setBuildings] = useState<Building[]>([]);
@@ -309,7 +311,7 @@ export default function UtilityBillsPage() {
             <li>Invoice is draft or sent: the invoice is recalculated with your figure.</li>
             <li>Invoice not generated yet: the bill is stored and used when you generate it.</li>
             <li>Payment already recorded: the invoice is not touched and the row is reported.</li>
-            <li>Room not found or no active lease: the row is skipped and the lease stays as it is.</li>
+            <li>{L("Apartment not found or no active lease: the row is skipped and the lease stays as it is.")}</li>
             <li>Uploading the same month again replaces the earlier figure. A bill of 0 removes that charge for the month.</li>
           </ul>
         </Card>
@@ -350,7 +352,7 @@ export default function UtilityBillsPage() {
             columns={[
               { header: "Row", accessor: (r) => r.row },
               { header: "Building", accessor: (r) => r.building },
-              { header: "Room", accessor: (r) => r.room },
+              { header: L("Apartment"), accessor: (r) => r.room },
               { header: "Tenant", accessor: (r) => r.tenant || "—" },
               { header: "Utility", accessor: (r) => r.utility },
               { header: "Lease amount", align: "right", accessor: (r) => <span className="figures">{fmt(r.lease_amount)}</span> },
@@ -388,7 +390,7 @@ export default function UtilityBillsPage() {
           <Input
             value={billSearch}
             onChange={(e) => setBillSearch(e.target.value)}
-            placeholder="Search by building, apartment, tenant or utility…"
+            placeholder={L("Search by building, apartment, tenant or utility…")}
             className="max-w-sm"
           />
         </div>
@@ -400,7 +402,7 @@ export default function UtilityBillsPage() {
           }
           columns={[
             { header: "Building", accessor: (b) => b.building },
-            { header: "Room", accessor: (b) => b.room },
+            { header: L("Apartment"), accessor: (b) => b.room },
             { header: "Tenant", accessor: (b) => b.tenant || "—" },
             { header: "Utility", accessor: (b) => b.utility },
             { header: "Bill", align: "right", accessor: (b) => <span className="figures">{fmt(b.amount)}</span> },

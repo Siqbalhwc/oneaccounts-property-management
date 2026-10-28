@@ -14,6 +14,7 @@ from typing import Optional
 
 from supabase import Client
 
+from app.core.labels import get_unit
 from app.services.ledger import get_account_for_charge_label, get_account_id, post_journal_entry, reverse_journal_entry
 from app.services.utility_bills import apply_utility_overrides, fetch_bills
 
@@ -205,7 +206,7 @@ def post_invoice_journal(supabase: Client, company_id: str, invoice: dict, lease
     post_journal_entry(
         supabase, company_id=company_id, entry_date=str(entry_date), source_type="invoice",
         source_id=invoice["id"],
-        description=f"Rent invoice — {tenant_name}, Room {room_label} — {invoice_month.strftime('%B %Y')}",
+        description=f"Rent invoice — {tenant_name}, {get_unit(supabase, company_id)['singular']} {room_label} — {invoice_month.strftime('%B %Y')}",
         lines=journal_lines,
     )
     return total

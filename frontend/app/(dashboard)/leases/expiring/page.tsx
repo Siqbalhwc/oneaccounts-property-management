@@ -7,6 +7,7 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input, Select } from "@/components/ui/Field";
 import { RenewLeaseModal } from "@/components/ui/RenewLeaseModal";
+import { useLabels } from "@/lib/labels";
 
 function pkr(n: number) {
   return `Rs ${Number(n || 0).toLocaleString("en-PK")}`;
@@ -37,6 +38,7 @@ function whenLabel(days: number) {
 }
 
 export default function ExpiringLeasesPage() {
+  const { L } = useLabels();
   const [windowKey, setWindowKey] = useState<WindowKey>("next_month");
   const [rows, setRows] = useState<ExpiringLease[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -85,7 +87,7 @@ export default function ExpiringLeasesPage() {
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by tenant, building, or apartment…"
+            placeholder={L("Search by tenant, building, or apartment…")}
             className="max-w-xs"
           />
           <Select
@@ -118,7 +120,7 @@ export default function ExpiringLeasesPage() {
               <thead>
                 <tr className="text-left text-xs uppercase tracking-wider text-ink/45 border-b border-border">
                   <th className="py-2 pr-4 font-medium">Tenant</th>
-                  <th className="py-2 pr-4 font-medium">Property / Room</th>
+                  <th className="py-2 pr-4 font-medium">{L("Property / Apartment")}</th>
                   <th className="py-2 pr-4 font-medium whitespace-nowrap">End date</th>
                   <th className="py-2 pr-4 font-medium">Status</th>
                   <th className="py-2 pr-4 font-medium text-right whitespace-nowrap">Monthly rent</th>

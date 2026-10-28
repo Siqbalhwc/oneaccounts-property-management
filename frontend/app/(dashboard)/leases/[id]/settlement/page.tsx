@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Field, Input, Select, AmountInput } from "@/components/ui/Field";
 import { api, Lease, Tenant, Room, Building, Account, fetchPdfBlob } from "@/lib/api";
+import { useLabels } from "@/lib/labels";
 
 type Preview = {
   outstanding_prior_amount: number;
@@ -29,6 +30,7 @@ function formatPkr(n: number) {
 }
 
 export default function LeaseSettlementPage() {
+  const { L } = useLabels();
   const params = useParams();
   const router = useRouter();
   const leaseId = params.id as string;
@@ -184,7 +186,7 @@ export default function LeaseSettlementPage() {
         </button>
         <h1 className="text-2xl font-display font-semibold">Close lease — settlement</h1>
         <p className="text-sm text-ink/55 mt-1">
-          {tenant?.full_name ?? "—"} — {building?.name ?? "—"}, Apartment {room?.room_number ?? "—"}
+          {tenant?.full_name ?? "—"} — {building?.name ?? "—"}, {L("Apartment")} {room?.room_number ?? "—"}
         </p>
       </div>
 

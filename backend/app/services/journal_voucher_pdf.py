@@ -1,3 +1,4 @@
+from app.core.labels import unit_from_company
 """
 Generic printable voucher for a single journal entry -- the fallback
 "source document" for any ledger line whose source type doesn't have its
@@ -205,7 +206,7 @@ def render_voucher_pdf(ctx: dict) -> bytes:
         if l.get("building"):
             tag_bits.append(l["building"]["name"])
         if l.get("room"):
-            tag_bits.append(f"Apt {l['room']['room_number']}")
+            tag_bits.append(f"{unit_from_company(company)['singular']} {l['room']['room_number']}")
         if l.get("owner"):
             tag_bits.append(l["owner"]["name"])
         if l.get("tenant"):

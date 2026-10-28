@@ -9,6 +9,7 @@ import { api, Building, Account } from "@/lib/api";
 import { useAccess } from "@/lib/access";
 import { usePropertySearch } from "@/lib/usePropertySearch";
 import { ChevronRight, ChevronDown, Pencil, ScrollText, SplitSquareHorizontal, SlidersHorizontal } from "lucide-react";
+import { useLabels } from "@/lib/labels";
 
 type ExpenseCategory = { id: string; name: string; account_id?: string };
 // Augmented locally since lib/api.ts's Room/Building types don't declare
@@ -38,6 +39,7 @@ function formatPkr(n: number) {
 }
 
 export default function ExpensesPage() {
+  const { L } = useLabels();
   // Access Control ON => every expense must reference a building room.
   const strictRoom = !!useAccess()?.access_control_enabled;
   const [expenses, setExpenses] = useState<Expense[] | null>(null);
@@ -382,7 +384,7 @@ export default function ExpensesPage() {
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by vendor, category, building or apartment…"
+            placeholder={L("Search by vendor, category, building or apartment…")}
             className="max-w-sm"
           />
           <div className="relative" ref={colsMenuRef}>
@@ -663,7 +665,7 @@ export default function ExpensesPage() {
           {isOwnerChargeable(form.category_id) || strictRoom ? (
             <>
               <Field
-                label="Room"
+                label={L("Apartment")}
                 hint={
                   isOwnerChargeable(form.category_id)
                     ? "Required for an owner-chargeable category, so the correct owner can be found."

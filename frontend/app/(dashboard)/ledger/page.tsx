@@ -9,6 +9,7 @@ import { Field, Input, Select } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { PrintHeader } from "@/components/ui/PrintHeader";
 import { api, fetchPdfBlob, Building, Company } from "@/lib/api";
+import { useLabels } from "@/lib/labels";
 
 type Account = { id: string; code: string; name: string; account_type?: string };
 type Owner = { id: string; name: string };
@@ -35,6 +36,7 @@ function formatPkr(n: number) {
 }
 
 function LedgerPageInner() {
+  const { L } = useLabels();
   const router = useRouter();
   const searchParams = useSearchParams();
   const accountId = searchParams.get("account_id") ?? "";
@@ -232,9 +234,9 @@ function LedgerPageInner() {
               ))}
             </Select>
           </Field>
-          <Field label="Apartment">
+          <Field label={L("Apartment")}>
             <Select value={roomId} onChange={(e) => handleRoomChange(e.target.value)} disabled={!buildingId}>
-              <option value="">{buildingId ? "All apartments" : "Select a building first"}</option>
+              <option value="">{buildingId ? L("All apartments") : "Select a building first"}</option>
               {roomsForBuilding.map((r) => (
                 <option key={r.id} value={r.id}>
                   {r.room_number}

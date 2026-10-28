@@ -17,6 +17,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from supabase import Client
 
+from app.core.labels import unit_from_company
 from app.services.ledger import get_tenant_account_balance_as_of
 
 
@@ -313,7 +314,7 @@ def render_invoice_pdf(ctx: dict) -> bytes:
     c.setFillColorRGB(0.3, 0.34, 0.32)
     c.drawString(20 * mm, y, f"CNIC: {tenant.get('cnic') or ''}")
     y -= 5 * mm
-    c.drawString(20 * mm, y, f"{building.get('name') or ''} — Room {room.get('room_number') or ''}")
+    c.drawString(20 * mm, y, f"{building.get('name') or ''} — {unit_from_company(company)['singular']} {room.get('room_number') or ''}")
     c.setFillColorRGB(*INK)
 
     y -= 14 * mm

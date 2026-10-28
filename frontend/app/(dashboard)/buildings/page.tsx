@@ -9,6 +9,7 @@ import { ConfirmModal } from "@/components/ui/ConfirmModal";
 import { HistoryPanel } from "@/components/ui/HistoryPanel";
 import { Field, Input, Select } from "@/components/ui/Field";
 import { SearchableSelect, ComboOption } from "@/components/ui/SearchableSelect";
+import { useLabels } from "@/lib/labels";
 
 const NEW_FLOOR_VALUE = "__new__";
 const NEW_TYPE_VALUE = "__new_type__";
@@ -21,6 +22,7 @@ type RoomWithOwner = Room & { owner_id?: string | null };
 type OwnerRecord = { id: string; name: string; phone?: string };
 
 export default function BuildingsPage() {
+  const { L } = useLabels();
   const [buildings, setBuildings] = useState<Building[] | null>(null);
   const [rooms, setRooms] = useState<RoomWithOwner[] | null>(null);
   const [floors, setFloors] = useState<Floor[] | null>(null);
@@ -371,7 +373,7 @@ export default function BuildingsPage() {
           tabs, which grew unreadable past ~10 buildings. */}
       <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-display font-semibold">Buildings & apartments</h1>
+          <h1 className="text-2xl font-display font-semibold">{L("Buildings & apartments")}</h1>
           <p className="text-sm text-ink/55 mt-1">
             Every unit, its current status, and its maintenance history.
           </p>
@@ -408,7 +410,7 @@ export default function BuildingsPage() {
             <div className="flex flex-col sm:flex-row gap-3">
               <div className="w-full sm:w-56">
                 <Input
-                  placeholder="Search apartments…"
+                  placeholder={L("Search apartments…")}
                   value={roomSearch}
                   onChange={(e) => setRoomSearch(e.target.value)}
                   className="w-full"
@@ -448,7 +450,7 @@ export default function BuildingsPage() {
                 </>
               )}
               <Button variant="secondary" onClick={openAddRoomModal}>
-                Add apartment
+                {L("Add apartment")}
               </Button>
               <Button onClick={openAddBuildingModal}>Add building</Button>
             </div>
@@ -458,8 +460,8 @@ export default function BuildingsPage() {
             {roomsForSelected.length === 0 && (
               <p className="col-span-full text-sm text-ink/45 py-8 text-center border border-dashed border-border rounded-card">
                 {roomSearch || roomStatusFilter
-                  ? "No apartments match this search/filter."
-                  : 'No apartments yet for this building — click "Add apartment" above.'}
+                  ? L("No apartments match this search/filter.")
+                  : L('No apartments yet for this building — click "Add apartment" above.')}
               </p>
             )}
             {roomsForSelected.map((room) => (
@@ -588,14 +590,14 @@ export default function BuildingsPage() {
       <Modal
         open={roomModalOpen}
         onClose={() => setRoomModalOpen(false)}
-        title={editingRoomId ? "Edit apartment" : "Add apartment"}
+        title={L(editingRoomId ? "Edit apartment" : "Add apartment")}
         size="full"
       >
         <form onSubmit={handleSaveRoom} className="space-y-6">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-10 gap-y-6">
             {/* ---- Left column: room info ---- */}
             <div className="space-y-4">
-              <p className="text-xs uppercase tracking-wider text-ink/45 font-medium">Apartment info</p>
+              <p className="text-xs uppercase tracking-wider text-ink/45 font-medium">{L("Apartment info")}</p>
 
               {!editingRoomId && (
                 <Field label="Floor">
@@ -631,12 +633,12 @@ export default function BuildingsPage() {
               )}
 
               <Field
-                label="Apartment number"
+                label={L("Apartment number")}
                 hint={
                   isDuplicateRoomNumber(roomForm.room_number, editingRoomId ?? undefined)
                     ? undefined
                     : !editingRoomId
-                    ? "Suggested automatically based on this floor's existing apartments — edit freely."
+                    ? L("Suggested automatically based on this floor's existing apartments — edit freely.")
                     : undefined
                 }
               >
@@ -649,12 +651,12 @@ export default function BuildingsPage() {
                 />
                 {isDuplicateRoomNumber(roomForm.room_number, editingRoomId ?? undefined) && (
                   <p className="text-xs text-stamp-red mt-1">
-                    An apartment with this number already exists in this building.
+                    {L("An apartment with this number already exists in this building.")}
                   </p>
                 )}
               </Field>
 
-              <Field label="Apartment type" hint="Pick an existing type to keep naming consistent, or add a new one.">
+              <Field label={L("Apartment type")} hint="Pick an existing type to keep naming consistent, or add a new one.">
                 <Select
                   value={roomForm.room_type_select}
                   onChange={(e) => setRoomForm({ ...roomForm, room_type_select: e.target.value })}
@@ -669,10 +671,10 @@ export default function BuildingsPage() {
               </Field>
 
               {roomForm.room_type_select === NEW_TYPE_VALUE && (
-                <Field label="New apartment type name">
+                <Field label={L("New apartment type name")}>
                   <Input
                     required
-                    placeholder="e.g. 2-bed apartment, studio, shop"
+                    placeholder={L("e.g. 2-bed apartment, studio, shop")}
                     value={roomForm.room_type_custom}
                     onChange={(e) => setRoomForm({ ...roomForm, room_type_custom: e.target.value })}
                   />
@@ -709,7 +711,7 @@ export default function BuildingsPage() {
 
               <Field
                 label="Owner"
-                hint="Leave as 'Inherit from building' unless this specific apartment belongs to a different owner than the rest of the building — e.g. one apartment sold separately."
+                hint={L("Leave as 'Inherit from building' unless this specific apartment belongs to a different owner than the rest of the building — e.g. one apartment sold separately.")}
               >
                 <Select
                   value={roomForm.owner_id}
@@ -763,7 +765,7 @@ export default function BuildingsPage() {
                     </span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-ink/50">Apartment number</span>
+                    <span className="text-ink/50">{L("Apartment number")}</span>
                     <span className="font-medium">{roomForm.room_number || "—"}</span>
                   </div>
                   <div className="flex justify-between">
@@ -812,7 +814,7 @@ export default function BuildingsPage() {
                     if (room) setArchiveRoomTarget(room);
                   }}
                 >
-                  Archive apartment
+                  {L("Archive apartment")}
                 </Button>
               )}
             </div>
@@ -824,7 +826,7 @@ export default function BuildingsPage() {
                 type="submit"
                 disabled={roomSaving || isDuplicateRoomNumber(roomForm.room_number, editingRoomId ?? undefined)}
               >
-                {roomSaving ? "Saving…" : editingRoomId ? "Save changes" : "Add apartment"}
+                {roomSaving ? "Saving…" : editingRoomId ? "Save changes" : L("Add apartment")}
               </Button>
             </div>
           </div>
@@ -842,7 +844,7 @@ export default function BuildingsPage() {
         onClose={() => setArchiveBuildingTarget(null)}
         onConfirm={handleArchiveBuilding}
         title="Archive building?"
-        message={`"${archiveBuildingTarget?.name}" and its apartments will be hidden from lists, but all history stays intact.`}
+        message={`"${archiveBuildingTarget?.name}" and its ${L("apartments")} will be hidden from lists, but all history stays intact.`}
         confirmLabel="Archive"
         confirming={archivingBuilding}
       />
@@ -851,8 +853,8 @@ export default function BuildingsPage() {
         open={!!archiveRoomTarget}
         onClose={() => setArchiveRoomTarget(null)}
         onConfirm={handleArchiveRoom}
-        title="Archive apartment?"
-        message={`Apartment "${archiveRoomTarget?.room_number}" will be hidden from lists, but its history stays intact.`}
+        title={L("Archive apartment?")}
+        message={`${L("Apartment")} "${archiveRoomTarget?.room_number}" will be hidden from lists, but its history stays intact.`}
         confirmLabel="Archive"
         confirming={archivingRoom}
       />

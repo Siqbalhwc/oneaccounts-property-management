@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { Field, Input, AmountInput, Select } from "@/components/ui/Field";
 import { SearchableSelect, ComboOption } from "@/components/ui/SearchableSelect";
 import { StampBadge } from "@/components/ui/StampBadge";
+import { useLabels } from "@/lib/labels";
 
 type Owner = { id: string; name: string; phone?: string };
 
@@ -95,6 +96,7 @@ function UnitStatus({ status }: { status: Unit["status"] }) {
 }
 
 export default function PayOwnerPage() {
+  const { L } = useLabels();
   const router = useRouter();
   const params = useParams();
   const ownerId = String(params.id);
@@ -310,13 +312,13 @@ export default function PayOwnerPage() {
 
       {/* ---------- Room overview ---------- */}
       <Card>
-        <h2 className="font-display text-lg font-semibold mb-1">Room-wise status</h2>
+        <h2 className="font-display text-lg font-semibold mb-1">{L("Apartment-wise status")}</h2>
         <p className="text-xs text-ink/50 mb-3">Every room this owner receives rent for, and what is still payable.</p>
         <div className="overflow-x-auto">
           <table className="w-full text-sm min-w-[720px]">
             <thead>
               <tr className="text-left text-xs uppercase tracking-wider text-ink/45 border-b border-border">
-                <th className="py-2 pr-3">Building / Room</th>
+                <th className="py-2 pr-3">{L("Building / Apartment")}</th>
                 <th className="py-2 pr-3 text-right">Rent billed</th>
                 <th className="py-2 pr-3 text-right">Paid to owner</th>
                 <th className="py-2 pr-3 text-right">Expenses open</th>
@@ -388,7 +390,7 @@ export default function PayOwnerPage() {
                 <thead>
                   <tr className="text-left text-xs uppercase tracking-wider text-ink/45 border-b border-border">
                     <th className="py-2 pr-2 w-8"></th>
-                    <th className="py-2 pr-3">Room</th>
+                    <th className="py-2 pr-3">{L("Apartment")}</th>
                     <th className="py-2 pr-3">Month</th>
                     <th className="py-2 pr-3">Tenant</th>
                     <th className="py-2 pr-3">Tenant invoice</th>
@@ -481,7 +483,7 @@ export default function PayOwnerPage() {
                     <th className="py-2 pr-2 w-8"></th>
                     <th className="py-2 pr-3">Date</th>
                     <th className="py-2 pr-3">Description</th>
-                    <th className="py-2 pr-3">Room</th>
+                    <th className="py-2 pr-3">{L("Apartment")}</th>
                     <th className="py-2 pr-3 text-right">Amount</th>
                     <th className="py-2">Status</th>
                   </tr>

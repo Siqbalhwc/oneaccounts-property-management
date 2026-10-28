@@ -804,7 +804,7 @@ def income_by_head_pdf(
 
     try:
         report = _compute_income_by_head(supabase, date_from, date_to, building_id)
-        company = supabase.table("companies").select("name, address, phone, logo_url").eq("id", company_id).single().execute().data
+        company = supabase.table("companies").select("*").eq("id", company_id).single().execute().data
         building_name = None
         if building_id:
             b = supabase.table("buildings").select("name").eq("id", building_id).single().execute()

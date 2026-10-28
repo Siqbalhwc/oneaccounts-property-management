@@ -7,6 +7,7 @@ import { Card } from "@/components/ui/Card";
 import { Field, Input, Select, AmountInput } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
+import { useLabels } from "@/lib/labels";
 
 type Charge = { label: string; amount: string; recurrence: "recurring" | "one_time"; account_id: string; show_on_invoice: boolean };
 type ChargeMapping = { label: string; account_id: string };
@@ -37,6 +38,7 @@ function formatPkr(n: number) {
 }
 
 export default function NewLeasePage() {
+  const { L } = useLabels();
   const router = useRouter();
   const [step, setStep] = useState(0);
   const [submitting, setSubmitting] = useState(false);
@@ -295,7 +297,7 @@ export default function NewLeasePage() {
             <span
               className={`text-xs ${i === step ? "text-ink font-medium" : "text-ink/45"}`}
             >
-              {label}
+              {L(label)}
             </span>
             {i < STEPS.length - 1 && <div className="flex-1 h-px bg-border" />}
           </div>
@@ -307,7 +309,7 @@ export default function NewLeasePage() {
           <div className="space-y-4">
             <Field
               label="Tenant"
-              hint={ownerLives ? "The owner of the chosen apartment is the tenant." : "Only tenants without a currently-active lease are shown."}
+              hint={ownerLives ? L("The owner of the chosen apartment is the tenant.") : "Only tenants without a currently-active lease are shown."}
             >
               {ownerLives ? (
                 <p className="text-sm text-ink/70 border border-border rounded-card px-3 py-2">
@@ -315,7 +317,7 @@ export default function NewLeasePage() {
                     ? "Preparing the owner as tenant…"
                     : tenantId
                     ? `${tenants.find((t) => t.id === tenantId)?.full_name ?? "Owner"} — owner lives here`
-                    : "Choose the apartment below — its owner becomes the tenant."}
+                    : L("Choose the apartment below — its owner becomes the tenant.")}
                 </p>
               ) : (
                 <Select value={tenantId} onChange={(e) => setTenantId(e.target.value)}>
@@ -357,9 +359,9 @@ export default function NewLeasePage() {
               </Select>
             </Field>
 
-            <Field label="Apartment" hint="Only vacant apartments are shown.">
+            <Field label={L("Apartment")} hint={L("Only vacant apartments are shown.")}>
               <Select value={roomId} onChange={(e) => setRoomId(e.target.value)} disabled={!buildingId}>
-                <option value="">Select an apartment…</option>
+                <option value="">{L("Select an apartment…")}</option>
                 {vacantRooms.map((r) => (
                   <option key={r.id} value={r.id}>
                     {r.room_number} {r.room_type ? `(${r.room_type})` : ""}
@@ -378,7 +380,7 @@ export default function NewLeasePage() {
                   setTenantId("");
                 }}
               />
-              Owner lives here — use the apartment's owner as the tenant (no rent; add service charges next)
+              {L("Owner lives here — use the apartment's owner as the tenant (no rent; add service charges next)")}
             </label>
 
             <div className="grid grid-cols-2 gap-4">
@@ -531,7 +533,7 @@ export default function NewLeasePage() {
               </p>
             </div>
             <div>
-              <p className="text-xs uppercase tracking-wider text-ink/45 mb-1">Apartment</p>
+              <p className="text-xs uppercase tracking-wider text-ink/45 mb-1">{L("Apartment")}</p>
               <p className="text-sm">
                 {rooms.find((r) => r.id === roomId)?.room_number ?? "—"} &middot;{" "}
                 {startDate} to {endDate}

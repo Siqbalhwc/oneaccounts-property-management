@@ -10,6 +10,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Field, Input, Select } from "@/components/ui/Field";
 import { WhatsAppIcon } from "@/components/ui/WhatsAppIcon";
 import { Banknote, Printer, Receipt } from "lucide-react";
+import { useLabels } from "@/lib/labels";
 
 function formatPkr(n: number) {
   return `Rs ${n.toLocaleString("en-PK")}`;
@@ -30,6 +31,7 @@ function sleep(ms: number) {
 }
 
 export default function InvoicesPage() {
+  const { L } = useLabels();
   const router = useRouter();
   const [invoices, setInvoices] = useState<Invoice[] | null>(null);
   const [buildings, setBuildings] = useState<Building[] | null>(null);
@@ -288,7 +290,7 @@ export default function InvoicesPage() {
             { header: "Invoice #", accessor: (i) => <span className="figures text-xs">{i.invoice_number ?? "—"}</span> },
             { header: "Month", accessor: (i) => i.invoice_month },
             { header: "Tenant", accessor: (i) => tenantName(i.lease_id) },
-            { header: "Property / Apartment", accessor: (i) => propertyAndRoom(i.lease_id) },
+            { header: L("Property / Apartment"), accessor: (i) => propertyAndRoom(i.lease_id) },
             {
               header: "Amount",
               accessor: (i) => <span className="figures">{formatPkr(i.total_amount)}</span>,
