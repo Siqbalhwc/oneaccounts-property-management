@@ -31,6 +31,19 @@ type PortalRequest = {
   invoice: { invoice_month: string; total_amount: number; status: string } | null;
 };
 type LedgerCheck = { matches: boolean; admin_closing: number; portal_closing: number; admin_lines: number; portal_lines: number };
+type ClaimRow = {
+  id: string;
+  tenant_name: string | null;
+  amount: number;
+  payment_method: "cash" | "bank_transfer";
+  paid_to: string | null;
+  payment_date: string;
+  reference: string | null;
+  note: string | null;
+  status: string;
+  invoices: { id: string; invoice_month: string; total: number; balance_now: number }[];
+};
+type CashAccount = { id: string; code: string; name: string };
 type BulkResult = { created: number; existing: number; skipped: { tenant_id: string; name: string | null; reason: string }[] };
 
 function statusText(a: AccountRow) {
@@ -57,6 +70,12 @@ export default function TenantPortalAdminPage() {
   const [requests, setRequests] = useState<PortalRequest[]>([]);
   const [replies, setReplies] = useState<Record<string, string>>({});
   const [check, setCheck] = useState<{ name: string | null; result: LedgerCheck } | null>(null);
+  const [claims, setClaims] = useState<ClaimRow[]>([]);
+  const [cashAccounts, setCashAccounts] = useState<CashAccount[]>([]);
+  const [claimAcct, setClaimAcct] = useState<Record<string, string>>({});
+  const [claimAmt, setClaimAmt] = useState<Record<string, string>>({});
+  const [claimWhy, setClaimWhy] = useState<Record<string, string>>({});
+  const [claimBusy, setClaimBusy] = useState<string | null>(null);
 
   const load = useCallback(() => {
     api.get<Overview>("/tenant-portal/overview").then((o) => { setOverview(o); setPerms(o.permissions); }).catch((e: any) => setError(e.message));
@@ -64,7 +83,26 @@ export default function TenantPortalAdminPage() {
       .then((r) => { setAccounts(r.accounts); setMissing(r.missing); })
       .catch((e: any) => setError(e.message));
     api.get<{ requests: PortalRequest[] }>("/tenant-portal/requests?status=open").then((r) => setRequests(r.requests)).catch(() => setRequests([]));
+    api.get<{ claims: ClaimRow[]; accounts: CashAccount[] }>("/tenant-portal/payment-claims?status=pending")
+      .then((r) => { setClaims(r.claims); setCashAccounts(r.accounts); })
+      .catch(() => { setClaims([]); setCashAccounts([]); });
   }, []);
+
+  async function approveClaim(c: ClaimRow) {
+    const account_id = claimAcct[c.id] ?? "";
+    if (!account_id) { setError("Choose the Bank or Cash account the money was received in."); return; }
+    setClaimBusy(c.id); setError(null); setNotice(null);
+    try {
+      await api.post(`/tenant-portal/payment-claims/${c.id}/approve`, { account_id, amount: claimAmt[c.id] ? Number(claimAmt[c.id]) : null });
+      setNotice(`Approved. A receipt for ${c.tenant_name} was posted to your books.`);
+      load();
+    } catch (e: any) { setError(e.message); load(); } finally { setClaimBusy(null); }
+  }
+  async function rejectClaim(c: ClaimRow) {
+    setClaimBusy(c.id); setError(null); setNotice(null);
+    try { await api.post(`/tenant-portal/payment-claims/${c.id}/reject`, { reason: claimWhy[c.id] ?? "" }); load(); }
+    catch (e: any) { setError(e.message); } finally { setClaimBusy(null); }
+  }
   useEffect(load, [load]);
 
   async function resolveRequest(id: string, status: "resolved" | "declined") {
@@ -149,6 +187,48 @@ export default function TenantPortalAdminPage() {
           <div className="mt-3"><Button onClick={savePerms} loading={saving}>Save defaults</Button></div>
         </Card>
       </div>
+
+      <Card title={`Payments waiting for your approval (${claims.length})`}>
+        {claims.length === 0 ? (
+          <p className="text-sm text-ink/55">Nothing waiting. When a tenant says they have paid, it appears here. Check your bank statement or cash book, then approve (posts a normal receipt and updates both ledgers) or reject.</p>
+        ) : (
+          <div className="space-y-3">
+            {claims.map((c) => (
+              <div key={c.id} className="border border-border rounded-card p-3 space-y-3">
+                <div className="flex flex-wrap justify-between gap-2 text-sm">
+                  <span className="font-medium">{c.tenant_name}</span>
+                  <span className="text-ink/55">{new Date(c.payment_date).toLocaleDateString("en-GB")} · {c.payment_method === "cash" ? "Cash" : "Bank transfer"}</span>
+                </div>
+                <div className="text-sm space-y-0.5">
+                  <p><span className="text-ink/50">Says paid:</span> <span className="font-medium figures">Rs {Number(c.amount).toLocaleString("en-PK")}</span></p>
+                  {c.paid_to && <p><span className="text-ink/50">{c.payment_method === "cash" ? "Handed to:" : "Into account:"}</span> {c.paid_to}</p>}
+                  {c.reference && <p><span className="text-ink/50">Reference:</span> {c.reference}</p>}
+                  {c.note && <p><span className="text-ink/50">Note:</span> {c.note}</p>}
+                  <p><span className="text-ink/50">For:</span> {c.invoices.map((i) => `${i.invoice_month.slice(0, 7)} (owes Rs ${i.balance_now.toLocaleString("en-PK")})`).join(", ") || "—"}</p>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-[1fr_9rem_auto_auto] sm:items-end">
+                  <div>
+                    <label className="text-xs text-ink/55 block mb-1">Money landed in</label>
+                    <Select value={claimAcct[c.id] ?? ""} onChange={(e) => setClaimAcct({ ...claimAcct, [c.id]: e.target.value })}>
+                      <option value="">Choose Bank / Cash account…</option>
+                      {cashAccounts.map((a) => <option key={a.id} value={a.id}>{a.code} — {a.name}</option>)}
+                    </Select>
+                  </div>
+                  <div>
+                    <label className="text-xs text-ink/55 block mb-1">Amount received</label>
+                    <input className="w-full px-3 py-2 text-sm border border-border rounded-card bg-paper-card" type="number" step="0.01" placeholder={String(c.amount)} value={claimAmt[c.id] ?? ""} onChange={(e) => setClaimAmt({ ...claimAmt, [c.id]: e.target.value })} />
+                  </div>
+                  <Button onClick={() => approveClaim(c)} loading={claimBusy === c.id}>Approve and post receipt</Button>
+                </div>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input className="flex-1 px-3 py-2 text-sm border border-border rounded-card bg-paper-card" placeholder="Reason, if rejecting (the tenant will see this)" maxLength={300} value={claimWhy[c.id] ?? ""} onChange={(e) => setClaimWhy({ ...claimWhy, [c.id]: e.target.value })} />
+                  <Button variant="secondary" onClick={() => rejectClaim(c)} loading={claimBusy === c.id}>Reject</Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
 
       <Card title={`Change requests from tenants (${requests.length})`}>
         {requests.length === 0 ? (

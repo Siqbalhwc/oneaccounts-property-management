@@ -12,11 +12,7 @@ function Home({ code, me }: { code: string; me: PortalMe }) {
   const [s, setS] = useState<Summary | null>(null);
   useEffect(() => { portalRequest<Summary>(code, "/portal/summary").then(setS).catch(() => setS(null)); }, [code]);
 
-  const soon = [
-    { key: "submit_payment", title: "I have paid", text: "Tell your property office about a cash or bank payment." },
-    { key: "submit_repair", title: "Repair request", text: "Report a problem for maintenance." },
-    { key: "download_receipts", title: "My receipts", text: "Download receipts for your payments." },
-  ].filter((t) => me.permissions[t.key]);
+  const soon = [{ key: "submit_repair", title: "Repair request", text: "Report a problem for maintenance." }].filter((t) => me.permissions[t.key]);
 
   return (
     <>
@@ -42,6 +38,18 @@ function Home({ code, me }: { code: string; me: PortalMe }) {
             </p>
           </Link>
         )}
+        {me.permissions.submit_payment && (
+          <Link href={`/portal/${code}/pay`} className="card p-5 block hover:border-brass-dark">
+            <h2 className="font-display text-lg font-semibold">I have paid</h2>
+            <p className="text-sm text-ink/60 mt-1">Tell your property office about a cash or bank payment.</p>
+          </Link>
+        )}
+        {me.permissions.download_receipts && (
+          <Link href={`/portal/${code}/receipts`} className="card p-5 block hover:border-brass-dark">
+            <h2 className="font-display text-lg font-semibold">My receipts</h2>
+            <p className="text-sm text-ink/60 mt-1">Download receipts for your payments.</p>
+          </Link>
+        )}
         {soon.map((t) => (
           <div key={t.key} className="card p-5 opacity-80">
             <h2 className="font-display text-lg font-semibold">{t.title}</h2>
@@ -50,7 +58,7 @@ function Home({ code, me }: { code: string; me: PortalMe }) {
           </div>
         ))}
       </div>
-      {!me.permissions.view_ledger && !me.permissions.view_invoices && soon.length === 0 && (
+      {!me.permissions.view_ledger && !me.permissions.view_invoices && !me.permissions.submit_payment && !me.permissions.download_receipts && soon.length === 0 && (
         <p className="text-sm text-ink/60">Your property office hasn't enabled any portal features for your account yet.</p>
       )}
     </>

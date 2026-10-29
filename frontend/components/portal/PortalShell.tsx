@@ -7,7 +7,7 @@ import { PortalAuthError, PortalMe, portalRequest, portalToken } from "@/lib/por
 
 /** Common frame for every signed-in tenant page: signs the tenant in (or sends them to the sign-in
  *  page), shows the header and navigation, and hands the tenant's details to the page. */
-export function PortalShell({ code, active, children }: { code: string; active: "home" | "invoices" | "ledger"; children: (me: PortalMe) => React.ReactNode }) {
+export function PortalShell({ code, active, children }: { code: string; active: "home" | "invoices" | "ledger" | "pay" | "receipts"; children: (me: PortalMe) => React.ReactNode }) {
   const router = useRouter();
   const [me, setMe] = useState<PortalMe | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -31,6 +31,8 @@ export function PortalShell({ code, active, children }: { code: string; active: 
     { key: "home", label: "Home", href: `/portal/${code}`, show: true },
     { key: "invoices", label: "Invoices", href: `/portal/${code}/invoices`, show: !!me.permissions.view_invoices },
     { key: "ledger", label: "Ledger", href: `/portal/${code}/ledger`, show: !!me.permissions.view_ledger },
+    { key: "pay", label: "I have paid", href: `/portal/${code}/pay`, show: !!me.permissions.submit_payment },
+    { key: "receipts", label: "Receipts", href: `/portal/${code}/receipts`, show: !!me.permissions.download_receipts },
   ].filter((t) => t.show);
 
   return (

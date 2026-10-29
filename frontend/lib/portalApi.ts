@@ -55,6 +55,7 @@ export type PortalMe = {
 
 export type PortalInvoice = {
   id: string;
+  lease_id: string;
   invoice_month: string;
   due_date: string | null;
   total: number;
@@ -102,3 +103,20 @@ export async function downloadPortalPdf(code: string, path: string, filename: st
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
+
+export type PortalClaim = {
+  id: string;
+  amount: number;
+  payment_method: "cash" | "bank_transfer";
+  paid_to: string | null;
+  payment_date: string;
+  reference: string | null;
+  status: "pending" | "approved" | "rejected" | "cancelled";
+  reject_reason: string | null;
+  approved_amount: number | null;
+  receipt_group_id: string | null;
+  invoice_months: string[];
+  created_at: string;
+};
+
+export type PortalReceipt = { receipt_id: string; date: string; amount: number; method: string; invoice_months: string[] };

@@ -108,7 +108,7 @@ def _tenant_invoices(c, ctx: dict, limit: int, offset: int) -> list[dict]:
         balance = 0.0 if status == "paid" else max(round(total - paid_amt, 2), 0.0)
         rq = requests.get(r["id"])
         out.append({
-            "id": r["id"], "invoice_month": r["invoice_month"], "due_date": r.get("due_date"),
+            "id": r["id"], "lease_id": r["lease_id"], "invoice_month": r["invoice_month"], "due_date": r.get("due_date"),
             "total": total, "paid": paid_amt, "balance": balance, "status": status,
             "items": items.get(r["id"], []),
             "room": rooms.get(room_of_lease.get(r["lease_id"]) or "", None),

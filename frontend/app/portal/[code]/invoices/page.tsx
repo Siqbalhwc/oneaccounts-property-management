@@ -91,6 +91,7 @@ function InvoiceCard({ code, me, inv, onChanged }: { code: string; me: PortalMe;
 
           <div className="flex flex-wrap gap-2">
             <button onClick={pdf} className="px-4 py-2 rounded-card border border-border text-sm hover:bg-paper">Download PDF</button>
+            {inv.status !== "paid" && !!me.permissions.submit_payment && <a href={`/portal/${code}/pay?invoice=${inv.id}`} className="px-4 py-2 rounded-card bg-ink text-paper text-sm">I have paid</a>}
             {canAsk && !asking && <button onClick={() => setAsking(true)} className="px-4 py-2 rounded-card border border-border text-sm hover:bg-paper">Request a change</button>}
           </div>
           {canAsk && !asking && <p className="text-xs text-ink/45">Your invoice stands as shown unless your property office changes it.</p>}
