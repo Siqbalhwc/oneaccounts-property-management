@@ -124,7 +124,22 @@ export default function JournalEntriesPage() {
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-display font-semibold">Journal entries</h1>
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+            <h1 className="text-2xl font-display font-semibold">Journal entries</h1>
+            <span className="text-sm text-ink/55 no-print">
+              {dateFrom || dateTo ? `Showing ${dateFrom || "the start"} to ${dateTo || "today"}.` : "Showing all dates."}{" "}
+              <button
+                type="button"
+                className="text-accent hover:underline"
+                onClick={() => {
+                  setDateFrom("");
+                  setDateTo("");
+                }}
+              >
+                Show all dates
+              </button>
+            </span>
+          </div>
           <p className="text-sm text-ink/55 mt-1">Every line posted to the ledger.</p>
         </div>
         <div className="flex items-center gap-4">
@@ -152,20 +167,6 @@ export default function JournalEntriesPage() {
         placeholder={L("Search by building or apartment (e.g. Sunrise 101)…")}
         className="max-w-sm no-print"
       />
-
-      <p className="text-xs text-ink/50 -mt-3 no-print">
-        {dateFrom || dateTo ? `Showing ${dateFrom || "the start"} to ${dateTo || "today"}.` : "Showing all dates."}{" "}
-        <button
-          type="button"
-          className="text-accent hover:underline"
-          onClick={() => {
-            setDateFrom("");
-            setDateTo("");
-          }}
-        >
-          Show all dates
-        </button>
-      </p>
 
       {showFilters && (
         <Card>

@@ -35,6 +35,22 @@ def _register_failure(c, acct: dict) -> None:
     c.table(svc.ACCOUNTS).update(upd).eq("company_id", acct["company_id"]).eq("id", acct["id"]).execute()
 
 
+@router.get("/branding/{code}")
+def branding(code: str):
+    """Just enough for the sign-in page to show the landlord's logo and name BEFORE anyone signs in.
+    Deliberately minimal (name + public logo URL) and empty for an unknown, switched-off or suspended company."""
+    empty = {"company_name": None, "logo_url": None}
+    c = get_service_client()
+    code = (code or "").strip().lower()
+    rows = c.table(svc.SETTINGS).select("company_id").eq("portal_code", code).execute().data if code else []
+    if not rows or not svc.plugin_enabled(rows[0]["company_id"], c):
+        return empty
+    comp = c.table("companies").select("name, logo_url, status").eq("id", rows[0]["company_id"]).execute().data
+    if not comp or comp[0].get("status", "active") != "active":
+        return empty
+    return {"company_name": comp[0].get("name"), "logo_url": comp[0].get("logo_url")}
+
+
 @router.post("/login")
 def login(body: LoginBody):
     c = get_service_client()

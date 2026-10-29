@@ -2,9 +2,10 @@ import { IconPhone, IconMail, IconVideo } from "@/components/ui/icons";
 
 // Centralized here so a future number/email/link change is a one-line edit,
 // not a find-and-replace across every auth page.
-const WHATSAPP_DIGITS = "923716853677"; // 0371 6853677, normalized for wa.me
-const CONTACT_EMAIL = "siqbalhwc@gmail.com";
-const WEBSITE_URL = "https://www.oneaccountsbysiqbal.com";
+export const WHATSAPP_DIGITS = "923716853677"; // 0371 6853677, normalized for wa.me
+export const WHATSAPP_DISPLAY = "0371 6853677";
+export const CONTACT_EMAIL = "siqbalhwc@gmail.com";
+export const WEBSITE_URL = "https://www.oneaccountsbysiqbal.com";
 const YOUTUBE_URL = "https://www.youtube.com/@OneAccountsbySiqbal";
 
 /**

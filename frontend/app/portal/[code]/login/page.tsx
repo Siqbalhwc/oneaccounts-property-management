@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { portalRequest, portalToken } from "@/lib/portalApi";
+import { VendorContact } from "@/components/portal/VendorContact";
 
 export default function PortalLoginPage() {
   const { code } = useParams<{ code: string }>();
@@ -12,6 +13,13 @@ export default function PortalLoginPage() {
   const [show, setShow] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [brand, setBrand] = useState<{ company_name: string | null; logo_url: string | null } | null>(null);
+
+  // The landlord's logo and name, so tenants recognise where they are. If this fails the page still works.
+  useEffect(() => {
+    portalRequest<{ company_name: string | null; logo_url: string | null }>(code, `/portal/branding/${encodeURIComponent(code)}`, {}, false)
+      .then(setBrand).catch(() => setBrand(null));
+  }, [code]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -30,8 +38,15 @@ export default function PortalLoginPage() {
   }
 
   return (
-    <main className="min-h-screen w-full flex items-center justify-center bg-paper px-4 py-8">
+    <main className="min-h-screen w-full flex flex-col items-center justify-center bg-paper px-4 py-8">
       <form onSubmit={submit} className="card w-full max-w-md p-6 sm:p-8 space-y-5 border-t-[3px] border-t-brass">
+        {(brand?.logo_url || brand?.company_name) && (
+          <div className="flex flex-col items-center text-center gap-2 pb-1">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            {brand.logo_url && <img src={brand.logo_url} alt={brand.company_name ?? "Company logo"} className="max-h-20 max-w-[14rem] object-contain" />}
+            {brand.company_name && <p className="font-display text-lg font-semibold">{brand.company_name}</p>}
+          </div>
+        )}
         <div>
           <p className="text-[11px] tracking-[0.1em] text-brass-dark font-medium">TENANT PORTAL</p>
           <h1 className="font-display text-2xl font-semibold text-ink mt-1">Sign in</h1>
@@ -55,6 +70,7 @@ export default function PortalLoginPage() {
           {loading ? "Signing in…" : "Sign in"}
         </button>
       </form>
+      <VendorContact />
     </main>
   );
 }

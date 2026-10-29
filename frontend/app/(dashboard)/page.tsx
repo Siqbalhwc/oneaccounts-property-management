@@ -448,7 +448,11 @@ export default function DashboardHome() {
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-display font-semibold">Dashboard</h1>
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+            <h1 className="text-2xl font-display font-semibold">Dashboard</h1>
+            <span className="text-sm text-ink/55">Showing {periodLabel}</span>
+            {!validRange && <span className="text-sm text-stamp-red">— the From date must be on or before the To date.</span>}
+          </div>
           <p className="text-sm text-ink/55 mt-1">
             A snapshot of collections, dues, and profit across all buildings.
           </p>
@@ -474,11 +478,6 @@ export default function DashboardHome() {
           )}
         </div>
       </div>
-
-      <p className="text-xs text-ink/50 -mt-3">
-        Showing {periodLabel}
-        {!validRange && <span className="text-stamp-red"> — the From date must be on or before the To date.</span>}
-      </p>
 
       {error && (
         <Card className="border-stamp-red/40">

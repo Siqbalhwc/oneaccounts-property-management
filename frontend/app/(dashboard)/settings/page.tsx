@@ -7,6 +7,9 @@ import { Field, Input, Select } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { useLabels } from "@/lib/labels";
+import { CollapsibleCard } from "@/components/ui/CollapsibleCard";
+import { PortalSettingsCard } from "@/components/portal/PortalSettingsCard";
+import { usePlugins } from "@/lib/plugins";
 
 type TeamMember = { id: string; full_name: string; role: string; phone?: string };
 
@@ -441,7 +444,7 @@ function UnitNameCard({ canEdit }: { canEdit: boolean }) {
   }
 
   return (
-    <Card title="Name of unit">
+    <CollapsibleCard title="Name of unit" hint="Apartment, Shop, Flat… used on every screen and report">
       <div className="space-y-4">
         <Field
           label="What do you call what you rent out?"
@@ -471,7 +474,7 @@ function UnitNameCard({ canEdit }: { canEdit: boolean }) {
           <p className="text-xs text-ink/45">Only an owner or admin can change this.</p>
         )}
       </div>
-    </Card>
+    </CollapsibleCard>
   );
 }
 
@@ -613,10 +616,11 @@ export default function SettingsPage() {
 
   const canInvite = profile.role === "owner" || profile.role === "admin";
   const canManageData = profile.role === "owner" || profile.role === "admin";
+  const portalOn = usePlugins().includes("tenant_portal");
 
   return (
-    <div className="max-w-2xl space-y-6">
-      <div>
+    <div className="w-full max-w-5xl space-y-3">
+      <div className="pb-2">
         <h1 className="text-2xl font-display font-semibold">Settings</h1>
         <p className="text-sm text-ink/55 mt-1">
           Your company's name and logo appear on invoices and throughout the app.
@@ -629,7 +633,7 @@ export default function SettingsPage() {
         </div>
       )}
 
-      <Card title="Company profile">
+      <CollapsibleCard title="Company profile" hint="Name, address, phone and logo shown on invoices">
         <div className="flex items-center gap-4 mb-5">
           <div className="w-16 h-16 rounded-card border border-border bg-paper flex items-center justify-center overflow-hidden shrink-0">
             {company.logo_url ? (
@@ -681,11 +685,11 @@ export default function SettingsPage() {
             {savingCompany ? "Saving…" : "Save company details"}
           </Button>
         </div>
-      </Card>
+      </CollapsibleCard>
 
       <UnitNameCard canEdit={canInvite} />
 
-      <Card title="Your profile">
+      <CollapsibleCard title="Your profile" hint="Your name and phone">
         <div className="space-y-4">
           <Field label="Full name" hint="Shown in the top-right of every page.">
             <Input
@@ -700,10 +704,11 @@ export default function SettingsPage() {
             {savingProfile ? "Saving…" : "Save my profile"}
           </Button>
         </div>
-      </Card>
+      </CollapsibleCard>
 
-      <Card
+      <CollapsibleCard
         title="Team"
+        hint="People who can sign in to your company"
         action={
           canInvite ? (
             <Button variant="secondary" onClick={() => setInviteModalOpen(true)}>
@@ -727,11 +732,14 @@ export default function SettingsPage() {
             Only an owner or admin can add new team members.
           </p>
         )}
-      </Card>
+      </CollapsibleCard>
+
+      {portalOn && canInvite && <PortalSettingsCard />}
 
       {canManageData && (
-        <Card
+        <CollapsibleCard
           title="Import & export"
+          hint="Upload Excel files to add data, and download templates"
           action={
             <Button variant="ghost" onClick={handleDownloadAllTemplates} disabled={downloadingAllTemplates}>
               {downloadingAllTemplates ? "Preparing…" : "Download all templates"}
@@ -811,7 +819,7 @@ export default function SettingsPage() {
             <ChargesImportSlot />
             <JournalImportSlot />
           </div>
-        </Card>
+        </CollapsibleCard>
       )}
 
       <Modal open={inviteModalOpen} onClose={() => setInviteModalOpen(false)} title="Add teammate">
