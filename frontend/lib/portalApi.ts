@@ -120,3 +120,15 @@ export type PortalClaim = {
 };
 
 export type PortalReceipt = { receipt_id: string; date: string; amount: number; method: string; invoice_months: string[] };
+
+export type PortalRepair = {
+  id: string;
+  category: string | null;
+  message: string;
+  status: "open" | "in_progress" | "resolved" | "declined" | "cancelled";
+  admin_reply: string | null;
+  created_at: string;
+  unit: { building: string | null; number: string } | null;
+};
+
+export type RepairOptions = { categories: string[]; units: { room_id: string; building: string | null; number: string }[] };

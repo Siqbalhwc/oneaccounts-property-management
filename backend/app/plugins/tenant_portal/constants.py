@@ -15,3 +15,5 @@ MAX_FAILED_ATTEMPTS = 5
 LOCK_MINUTES = 15
 SESSION_HOURS = 8
 MIN_PASSWORD_LENGTH = 8
+
+REPAIR_CATEGORIES = ["Plumbing", "Electrical", "Gas", "Lift", "AC / heating", "Door / lock", "Cleaning", "Other"]

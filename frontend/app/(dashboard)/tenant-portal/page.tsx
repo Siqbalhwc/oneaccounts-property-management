@@ -27,6 +27,9 @@ type PortalRequest = {
   kind: string;
   message: string;
   created_at: string;
+  status: string;
+  category: string | null;
+  room: { number: string; building: string | null } | null;
   tenant_name: string | null;
   invoice: { invoice_month: string; total_amount: number; status: string } | null;
 };
@@ -105,6 +108,10 @@ export default function TenantPortalAdminPage() {
   }
   useEffect(load, [load]);
 
+  async function startRequest(id: string) {
+    setError(null);
+    try { await api.post(`/tenant-portal/requests/${id}/progress`, { reply: replies[id] || null }); load(); } catch (e: any) { setError(e.message); }
+  }
   async function resolveRequest(id: string, status: "resolved" | "declined") {
     setError(null);
     try { await api.post(`/tenant-portal/requests/${id}/resolve`, { status, reply: replies[id] || null }); load(); } catch (e: any) { setError(e.message); }
@@ -230,9 +237,9 @@ export default function TenantPortalAdminPage() {
         )}
       </Card>
 
-      <Card title={`Change requests from tenants (${requests.length})`}>
+      <Card title={`Requests from tenants (${requests.length})`}>
         {requests.length === 0 ? (
-          <p className="text-sm text-ink/55">No open requests. When a tenant asks for an invoice change it appears here. Edit the invoice as usual, then mark the request resolved.</p>
+          <p className="text-sm text-ink/55">No open requests. Invoice-change requests and repair requests from tenants appear here. For an invoice change, edit the invoice as usual then mark it resolved. For a repair, mark it "In progress" when work starts and "Done" when finished.</p>
         ) : (
           <div className="space-y-3">
             {requests.map((r) => (
@@ -240,14 +247,19 @@ export default function TenantPortalAdminPage() {
                 <div className="flex flex-wrap justify-between gap-2 text-sm">
                   <span className="font-medium">{r.tenant_name}</span>
                   <span className="text-ink/55">
-                    {r.invoice ? `Invoice ${r.invoice.invoice_month.slice(0, 7)} · Rs ${Number(r.invoice.total_amount).toLocaleString("en-PK")}` : "General"} · {new Date(r.created_at).toLocaleDateString("en-GB")}
+                    {r.kind === "repair"
+                      ? `Repair · ${r.category ?? "Other"}${r.room ? ` · ${[r.room.building, r.room.number].filter(Boolean).join(" — ")}` : ""}`
+                      : r.invoice ? `Invoice ${r.invoice.invoice_month.slice(0, 7)} · Rs ${Number(r.invoice.total_amount).toLocaleString("en-PK")}` : "General"}
+                    {" · "}{new Date(r.created_at).toLocaleDateString("en-GB")}
+                    {r.status === "in_progress" ? " · In progress" : ""}
                   </span>
                 </div>
                 <p className="text-sm">“{r.message}”</p>
                 <div className="flex flex-col sm:flex-row gap-2">
                   <input className="flex-1 px-3 py-2 text-sm border border-border rounded-card bg-paper-card" placeholder="Reply to the tenant (optional)" maxLength={500}
                     value={replies[r.id] ?? ""} onChange={(e) => setReplies({ ...replies, [r.id]: e.target.value })} />
-                  <Button onClick={() => resolveRequest(r.id, "resolved")}>Resolved</Button>
+                  {r.kind === "repair" && r.status === "open" && <Button variant="secondary" onClick={() => startRequest(r.id)}>In progress</Button>}
+                  <Button onClick={() => resolveRequest(r.id, "resolved")}>{r.kind === "repair" ? "Done" : "Resolved"}</Button>
                   <Button variant="secondary" onClick={() => resolveRequest(r.id, "declined")}>Decline</Button>
                 </div>
               </div>

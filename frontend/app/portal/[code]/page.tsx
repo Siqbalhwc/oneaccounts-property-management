@@ -12,7 +12,6 @@ function Home({ code, me }: { code: string; me: PortalMe }) {
   const [s, setS] = useState<Summary | null>(null);
   useEffect(() => { portalRequest<Summary>(code, "/portal/summary").then(setS).catch(() => setS(null)); }, [code]);
 
-  const soon = [{ key: "submit_repair", title: "Repair request", text: "Report a problem for maintenance." }].filter((t) => me.permissions[t.key]);
 
   return (
     <>
@@ -50,15 +49,14 @@ function Home({ code, me }: { code: string; me: PortalMe }) {
             <p className="text-sm text-ink/60 mt-1">Download receipts for your payments.</p>
           </Link>
         )}
-        {soon.map((t) => (
-          <div key={t.key} className="card p-5 opacity-80">
-            <h2 className="font-display text-lg font-semibold">{t.title}</h2>
-            <p className="text-sm text-ink/60 mt-1">{t.text}</p>
-            <p className="text-xs text-ink/40 mt-3">Coming in the next update</p>
-          </div>
-        ))}
+        {me.permissions.submit_repair && (
+          <Link href={`/portal/${code}/repairs`} className="card p-5 block hover:border-brass-dark">
+            <h2 className="font-display text-lg font-semibold">Repair request</h2>
+            <p className="text-sm text-ink/60 mt-1">Report a problem for maintenance.</p>
+          </Link>
+        )}
       </div>
-      {!me.permissions.view_ledger && !me.permissions.view_invoices && !me.permissions.submit_payment && !me.permissions.download_receipts && soon.length === 0 && (
+      {!me.permissions.view_ledger && !me.permissions.view_invoices && !me.permissions.submit_payment && !me.permissions.download_receipts && !me.permissions.submit_repair && (
         <p className="text-sm text-ink/60">Your property office hasn't enabled any portal features for your account yet.</p>
       )}
     </>

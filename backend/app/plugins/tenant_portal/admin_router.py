@@ -208,15 +208,22 @@ def set_overrides(account_id: str, body: OverridesBody, company_id: str = Depend
 def list_requests(status: str = "open", company_id: str = Depends(portal_admin)):
     c = get_service_client()
     q = c.table("tenant_portal_requests").select("*").eq("company_id", company_id).order("created_at", desc=True).limit(200)
-    if status != "all":
+    if status == "open":  # "needs attention" = not yet started or being worked on
+        q = q.in_("status", ["open", "in_progress"])
+    elif status != "all":
         q = q.eq("status", status)
     rows = q.execute().data
     tenant_ids = sorted({r["tenant_id"] for r in rows})
     invoice_ids = sorted({r["invoice_id"] for r in rows if r.get("invoice_id")})
     tenants = {t["id"]: t["full_name"] for t in (c.table("tenants").select("id, full_name").eq("company_id", company_id).in_("id", tenant_ids).execute().data if tenant_ids else [])}
     invoices = {i["id"]: i for i in (c.table("invoices").select("id, invoice_month, total_amount, status").eq("company_id", company_id).in_("id", invoice_ids).execute().data if invoice_ids else [])}
+    room_ids = sorted({r["room_id"] for r in rows if r.get("room_id")})
+    rooms = {
+        rm["id"]: {"number": rm["room_number"], "building": (rm.get("building") or {}).get("name")}
+        for rm in (c.table("rooms").select("id, room_number, building:buildings(name)").eq("company_id", company_id).in_("id", room_ids).execute().data if room_ids else [])
+    }
     return {"requests": [
-        {**r, "tenant_name": tenants.get(r["tenant_id"]), "invoice": invoices.get(r.get("invoice_id"))} for r in rows
+        {**r, "tenant_name": tenants.get(r["tenant_id"]), "invoice": invoices.get(r.get("invoice_id")), "room": rooms.get(r.get("room_id"))} for r in rows
     ]}
 
 
@@ -233,11 +240,28 @@ def resolve_request(request_id: str, body: ResolveBody, company_id: str = Depend
     res = (
         get_service_client().table("tenant_portal_requests")
         .update({"status": body.status, "admin_reply": reply, "resolved_at": svc.now_iso(), "updated_at": svc.now_iso()})
-        .eq("company_id", company_id).eq("id", request_id).eq("status", "open").execute().data
+        .eq("company_id", company_id).eq("id", request_id).in_("status", ["open", "in_progress"]).execute().data
     )
     if not res:
         raise HTTPException(status_code=409, detail="This request was already handled (or no longer exists).")
     return {"status": body.status}
+
+
+class ProgressBody(BaseModel):
+    reply: Optional[str] = None
+
+
+@router.post("/requests/{request_id}/progress")
+def start_request(request_id: str, body: ProgressBody, company_id: str = Depends(portal_admin)):
+    """Marks a request 'In progress' (e.g. a repair someone is now working on), with an optional note the tenant can read."""
+    reply = (body.reply or "").strip()[:500] or None
+    upd = {"status": "in_progress", "updated_at": svc.now_iso()}
+    if reply:
+        upd["admin_reply"] = reply
+    res = get_service_client().table("tenant_portal_requests").update(upd).eq("company_id", company_id).eq("id", request_id).eq("status", "open").execute().data
+    if not res:
+        raise HTTPException(status_code=409, detail="This request is no longer waiting to be started.")
+    return {"status": "in_progress"}
 
 
 # ------------------------------------------------------------------ ledger check
