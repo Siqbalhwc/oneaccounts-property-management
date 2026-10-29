@@ -7,6 +7,7 @@ PERMISSION_LABELS = {
     "submit_payment": "Send a payment (cash/bank) for approval",
     "submit_repair": "Send repair / maintenance requests",
     "download_receipts": "Download receipts",
+    "request_invoice_change": "Ask the office to change an invoice",
 }
 DEFAULT_PERMISSIONS = {k: True for k in PERMISSION_LABELS}
 

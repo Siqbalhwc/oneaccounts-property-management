@@ -201,3 +201,75 @@ def set_overrides(account_id: str, body: OverridesBody, company_id: str = Depend
     clean = {k: v for k, v in body.overrides.items() if v is not None}
     get_service_client().table(svc.ACCOUNTS).update({"permission_overrides": clean, "updated_at": svc.now_iso()}).eq("company_id", company_id).eq("id", account_id).execute()
     return {"permission_overrides": clean}
+
+
+# ------------------------------------------------------------------ change requests
+@router.get("/requests")
+def list_requests(status: str = "open", company_id: str = Depends(portal_admin)):
+    c = get_service_client()
+    q = c.table("tenant_portal_requests").select("*").eq("company_id", company_id).order("created_at", desc=True).limit(200)
+    if status != "all":
+        q = q.eq("status", status)
+    rows = q.execute().data
+    tenant_ids = sorted({r["tenant_id"] for r in rows})
+    invoice_ids = sorted({r["invoice_id"] for r in rows if r.get("invoice_id")})
+    tenants = {t["id"]: t["full_name"] for t in (c.table("tenants").select("id, full_name").eq("company_id", company_id).in_("id", tenant_ids).execute().data if tenant_ids else [])}
+    invoices = {i["id"]: i for i in (c.table("invoices").select("id, invoice_month, total_amount, status").eq("company_id", company_id).in_("id", invoice_ids).execute().data if invoice_ids else [])}
+    return {"requests": [
+        {**r, "tenant_name": tenants.get(r["tenant_id"]), "invoice": invoices.get(r.get("invoice_id"))} for r in rows
+    ]}
+
+
+class ResolveBody(BaseModel):
+    status: str
+    reply: Optional[str] = None
+
+
+@router.post("/requests/{request_id}/resolve")
+def resolve_request(request_id: str, body: ResolveBody, company_id: str = Depends(portal_admin)):
+    if body.status not in ("resolved", "declined"):
+        raise HTTPException(status_code=400, detail="Status must be resolved or declined.")
+    reply = (body.reply or "").strip()[:500] or None
+    res = (
+        get_service_client().table("tenant_portal_requests")
+        .update({"status": body.status, "admin_reply": reply, "resolved_at": svc.now_iso(), "updated_at": svc.now_iso()})
+        .eq("company_id", company_id).eq("id", request_id).eq("status", "open").execute().data
+    )
+    if not res:
+        raise HTTPException(status_code=409, detail="This request was already handled (or no longer exists).")
+    return {"status": body.status}
+
+
+# ------------------------------------------------------------------ ledger check
+@router.get("/accounts/{account_id}/ledger-check")
+def ledger_check(
+    account_id: str,
+    company_id: str = Depends(portal_admin),
+    supabase: Client = Depends(get_supabase),
+):
+    """Runs YOUR admin ledger (the general_ledger function, as the logged-in staff user) and the
+    tenant portal ledger for the same tenant, and compares them line by line and by closing balance."""
+    from app.services.ledger import get_account_id
+
+    acct = _account(company_id, account_id)
+    tenant_id = acct["tenant_id"]
+    ar_id = get_account_id(supabase, company_id, "1100")
+    admin_rows = supabase.rpc("general_ledger", {
+        "p_account_id": ar_id, "p_date_from": None, "p_date_to": None, "p_owner_id": None,
+        "p_tenant_id": tenant_id, "p_building_id": None, "p_room_id": None,
+    }).execute().data or []
+    portal_rows = get_service_client().rpc("portal_tenant_ledger", {
+        "p_company_id": company_id, "p_tenant_id": tenant_id, "p_account_id": ar_id, "p_date_from": None, "p_date_to": None,
+    }).execute().data or []
+    admin_closing = round(float(admin_rows[-1]["running_balance"]), 2) if admin_rows else 0.0
+    portal_closing = round(float(portal_rows[-1]["running_balance"]), 2) if portal_rows else 0.0
+    same_lines = len(admin_rows) == len(portal_rows) and all(
+        a["entry_date"] == p["entry_date"] and round(float(a["amount"]), 2) == round(float(p["amount"]), 2)
+        and a["direction"] == p["direction"] and round(float(a["running_balance"]), 2) == round(float(p["running_balance"]), 2)
+        for a, p in zip(admin_rows, portal_rows)
+    )
+    return {
+        "matches": same_lines and admin_closing == portal_closing,
+        "admin_closing": admin_closing, "portal_closing": portal_closing,
+        "admin_lines": len(admin_rows), "portal_lines": len(portal_rows),
+    }

@@ -1,71 +1,63 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
-import { PortalAuthError, PortalMe, portalRequest, portalToken } from "@/lib/portalApi";
+import { useParams } from "next/navigation";
+import { PortalShell } from "@/components/portal/PortalShell";
+import { PortalMe, formatDate, formatMoney, portalRequest } from "@/lib/portalApi";
 
-const TILES: { key: string; title: string; text: string }[] = [
-  { key: "view_invoices", title: "My invoices", text: "Your monthly invoices will appear here." },
-  { key: "view_ledger", title: "My ledger", text: "Your statement of invoices and payments." },
-  { key: "submit_payment", title: "I have paid", text: "Tell your property office about a cash or bank payment." },
-  { key: "submit_repair", title: "Repair request", text: "Report a problem for maintenance." },
-  { key: "download_receipts", title: "My receipts", text: "Download receipts for your payments." },
-];
+type Summary = { balance: number | null; unpaid_count: number | null; overdue_count: number | null; next_due: { due_date: string; balance: number } | null };
+
+function Home({ code, me }: { code: string; me: PortalMe }) {
+  const [s, setS] = useState<Summary | null>(null);
+  useEffect(() => { portalRequest<Summary>(code, "/portal/summary").then(setS).catch(() => setS(null)); }, [code]);
+
+  const soon = [
+    { key: "submit_payment", title: "I have paid", text: "Tell your property office about a cash or bank payment." },
+    { key: "submit_repair", title: "Repair request", text: "Report a problem for maintenance." },
+    { key: "download_receipts", title: "My receipts", text: "Download receipts for your payments." },
+  ].filter((t) => me.permissions[t.key]);
+
+  return (
+    <>
+      <div>
+        <h1 className="font-display text-2xl font-semibold">Welcome, {me.tenant_name}</h1>
+        <p className="text-sm text-ink/55 mt-1">Signed in with CNIC <span className="figures">{me.masked_username}</span></p>
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {me.permissions.view_ledger && (
+          <Link href={`/portal/${code}/ledger`} className="card p-5 block hover:border-brass-dark">
+            <p className="text-xs uppercase tracking-wider text-ink/45">Balance</p>
+            <p className="font-display text-2xl font-semibold mt-1 figures">{s?.balance == null ? "—" : s.balance < 0 ? `${formatMoney(-s.balance)} advance` : formatMoney(s.balance)}</p>
+            <p className="text-sm text-ink/55 mt-1">Open your ledger</p>
+          </Link>
+        )}
+        {me.permissions.view_invoices && (
+          <Link href={`/portal/${code}/invoices`} className="card p-5 block hover:border-brass-dark">
+            <p className="text-xs uppercase tracking-wider text-ink/45">Invoices to pay</p>
+            <p className="font-display text-2xl font-semibold mt-1">{s?.unpaid_count ?? "—"}</p>
+            <p className="text-sm text-ink/55 mt-1">
+              {s?.overdue_count ? `${s.overdue_count} overdue. ` : ""}
+              {s?.next_due ? `Next due ${formatDate(s.next_due.due_date)}` : "View your invoices"}
+            </p>
+          </Link>
+        )}
+        {soon.map((t) => (
+          <div key={t.key} className="card p-5 opacity-80">
+            <h2 className="font-display text-lg font-semibold">{t.title}</h2>
+            <p className="text-sm text-ink/60 mt-1">{t.text}</p>
+            <p className="text-xs text-ink/40 mt-3">Coming in the next update</p>
+          </div>
+        ))}
+      </div>
+      {!me.permissions.view_ledger && !me.permissions.view_invoices && soon.length === 0 && (
+        <p className="text-sm text-ink/60">Your property office hasn't enabled any portal features for your account yet.</p>
+      )}
+    </>
+  );
+}
 
 export default function PortalHomePage() {
   const { code } = useParams<{ code: string }>();
-  const router = useRouter();
-  const [me, setMe] = useState<PortalMe | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    portalRequest<PortalMe>(code, "/portal/me")
-      .then((m) => (m.must_change_password ? router.replace(`/portal/${code}/change-password`) : setMe(m)))
-      .catch((e) => (e instanceof PortalAuthError ? router.replace(`/portal/${code}/login`) : setError(e.message)));
-  }, [code, router]);
-
-  async function signOut() {
-    try { await portalRequest(code, "/portal/logout", { method: "POST" }); } catch { /* already signed out */ }
-    portalToken.clear(code);
-    router.replace(`/portal/${code}/login`);
-  }
-
-  if (error) return <main className="min-h-screen flex items-center justify-center px-4"><p className="text-sm text-stamp-red">{error}</p></main>;
-  if (!me) return <main className="min-h-screen flex items-center justify-center"><p className="text-sm text-ink/50">Loading…</p></main>;
-
-  const allowed = TILES.filter((t) => me.permissions[t.key]);
-  return (
-    <div className="min-h-screen w-full bg-paper">
-      <header className="w-full bg-paper-card border-b border-border">
-        <div className="w-full max-w-6xl mx-auto px-4 sm:px-6 py-3 flex items-center gap-3">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          {me.logo_url && <img src={me.logo_url} alt="" className="h-9 w-9 object-contain rounded" />}
-          <div className="min-w-0 flex-1">
-            <p className="text-[11px] tracking-[0.1em] text-brass-dark font-medium truncate">{me.company_name.toUpperCase()}</p>
-            <p className="text-sm font-medium truncate">{me.tenant_name}</p>
-          </div>
-          <button onClick={signOut} className="text-sm px-3 py-2 border border-border rounded-card hover:bg-paper">Sign out</button>
-        </div>
-      </header>
-      <main className="w-full max-w-6xl mx-auto px-4 sm:px-6 py-6 space-y-6">
-        <div>
-          <h1 className="font-display text-2xl font-semibold">Welcome, {me.tenant_name}</h1>
-          <p className="text-sm text-ink/55 mt-1">Signed in with CNIC <span className="figures">{me.masked_username}</span></p>
-        </div>
-        {allowed.length === 0 ? (
-          <p className="text-sm text-ink/60">Your property office hasn't enabled any portal features for your account yet.</p>
-        ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {allowed.map((t) => (
-              <div key={t.key} className="card p-5">
-                <h2 className="font-display text-lg font-semibold">{t.title}</h2>
-                <p className="text-sm text-ink/60 mt-1">{t.text}</p>
-                <p className="text-xs text-ink/40 mt-3">Coming in the next update</p>
-              </div>
-            ))}
-          </div>
-        )}
-      </main>
-    </div>
-  );
+  return <PortalShell code={code} active="home">{(me) => <Home code={code} me={me} />}</PortalShell>;
 }

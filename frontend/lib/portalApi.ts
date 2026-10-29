@@ -47,6 +47,58 @@ export type PortalMe = {
   company_name: string;
   logo_url: string | null;
   unit_type: string;
+  unit: string;
+  units: string;
   must_change_password: boolean;
   permissions: Record<string, boolean>;
 };
+
+export type PortalInvoice = {
+  id: string;
+  invoice_month: string;
+  due_date: string | null;
+  total: number;
+  paid: number;
+  balance: number;
+  status: "paid" | "partial" | "overdue" | "due";
+  items: { label: string; amount: number }[];
+  room: { number: string; building: string | null } | null;
+  request: { status: "open" | "resolved" | "declined"; message: string; reply: string | null; created_at: string } | null;
+  can_request_change: boolean;
+};
+
+export type PortalLedgerRow = { date: string; description: string | null; debit: number; credit: number; balance: number; is_opening: boolean };
+
+export function formatMoney(n: number): string {
+  const v = Math.abs(n).toLocaleString("en-PK", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  return `${n < 0 ? "-" : ""}Rs ${v}`;
+}
+
+export function formatDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const [y, m, d] = iso.slice(0, 10).split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" });
+}
+
+export function formatMonth(iso: string): string {
+  const [y, m] = iso.slice(0, 10).split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
+}
+
+/** Downloads a PDF that needs the portal token (so a plain link can't be used). */
+export async function downloadPortalPdf(code: string, path: string, filename: string): Promise<void> {
+  const token = portalToken.get(code);
+  if (!token) throw new PortalAuthError("Please sign in.");
+  const res = await fetch(`${API_BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) {
+    if (res.status === 401) { portalToken.clear(code); throw new PortalAuthError("Please sign in again."); }
+    let message = "Couldn't download this file right now.";
+    try { const p = await res.json(); if (typeof p.detail === "string") message = p.detail; } catch { /* not JSON */ }
+    throw new Error(message);
+  }
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}

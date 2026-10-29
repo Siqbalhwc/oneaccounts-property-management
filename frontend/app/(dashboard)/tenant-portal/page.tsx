@@ -22,6 +22,15 @@ type AccountRow = {
   tenant_archived: boolean;
 };
 type Missing = { tenant_id: string; tenant_name: string | null; reason: string };
+type PortalRequest = {
+  id: string;
+  kind: string;
+  message: string;
+  created_at: string;
+  tenant_name: string | null;
+  invoice: { invoice_month: string; total_amount: number; status: string } | null;
+};
+type LedgerCheck = { matches: boolean; admin_closing: number; portal_closing: number; admin_lines: number; portal_lines: number };
 type BulkResult = { created: number; existing: number; skipped: { tenant_id: string; name: string | null; reason: string }[] };
 
 function statusText(a: AccountRow) {
@@ -45,14 +54,27 @@ export default function TenantPortalAdminPage() {
   const [overrideFor, setOverrideFor] = useState<AccountRow | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [copied, setCopied] = useState(false);
+  const [requests, setRequests] = useState<PortalRequest[]>([]);
+  const [replies, setReplies] = useState<Record<string, string>>({});
+  const [check, setCheck] = useState<{ name: string | null; result: LedgerCheck } | null>(null);
 
   const load = useCallback(() => {
     api.get<Overview>("/tenant-portal/overview").then((o) => { setOverview(o); setPerms(o.permissions); }).catch((e: any) => setError(e.message));
     api.get<{ accounts: AccountRow[]; missing: Missing[] }>("/tenant-portal/accounts")
       .then((r) => { setAccounts(r.accounts); setMissing(r.missing); })
       .catch((e: any) => setError(e.message));
+    api.get<{ requests: PortalRequest[] }>("/tenant-portal/requests?status=open").then((r) => setRequests(r.requests)).catch(() => setRequests([]));
   }, []);
   useEffect(load, [load]);
+
+  async function resolveRequest(id: string, status: "resolved" | "declined") {
+    setError(null);
+    try { await api.post(`/tenant-portal/requests/${id}/resolve`, { status, reply: replies[id] || null }); load(); } catch (e: any) { setError(e.message); }
+  }
+  async function checkLedger(a: AccountRow) {
+    setError(null); setCheck(null);
+    try { setCheck({ name: a.tenant_name, result: await api.get<LedgerCheck>(`/tenant-portal/accounts/${a.account_id}/ledger-check`) }); } catch (e: any) { setError(e.message); }
+  }
 
   const link = overview && typeof window !== "undefined" ? `${window.location.origin}/portal/${overview.portal_code}/login` : "";
 
@@ -128,6 +150,32 @@ export default function TenantPortalAdminPage() {
         </Card>
       </div>
 
+      <Card title={`Change requests from tenants (${requests.length})`}>
+        {requests.length === 0 ? (
+          <p className="text-sm text-ink/55">No open requests. When a tenant asks for an invoice change it appears here. Edit the invoice as usual, then mark the request resolved.</p>
+        ) : (
+          <div className="space-y-3">
+            {requests.map((r) => (
+              <div key={r.id} className="border border-border rounded-card p-3 space-y-2">
+                <div className="flex flex-wrap justify-between gap-2 text-sm">
+                  <span className="font-medium">{r.tenant_name}</span>
+                  <span className="text-ink/55">
+                    {r.invoice ? `Invoice ${r.invoice.invoice_month.slice(0, 7)} · Rs ${Number(r.invoice.total_amount).toLocaleString("en-PK")}` : "General"} · {new Date(r.created_at).toLocaleDateString("en-GB")}
+                  </span>
+                </div>
+                <p className="text-sm">“{r.message}”</p>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input className="flex-1 px-3 py-2 text-sm border border-border rounded-card bg-paper-card" placeholder="Reply to the tenant (optional)" maxLength={500}
+                    value={replies[r.id] ?? ""} onChange={(e) => setReplies({ ...replies, [r.id]: e.target.value })} />
+                  <Button onClick={() => resolveRequest(r.id, "resolved")}>Resolved</Button>
+                  <Button variant="secondary" onClick={() => resolveRequest(r.id, "declined")}>Decline</Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
       <Card
         title={`Portal accounts (${accounts.length})`}
         action={<Button variant="secondary" onClick={bulkCreate} loading={bulkBusy}>Create accounts for existing tenants</Button>}
@@ -136,6 +184,11 @@ export default function TenantPortalAdminPage() {
           <div className="text-sm bg-paper border border-border rounded-card px-3 py-2 mb-4">
             Created {bulk.created}, already had an account {bulk.existing}, skipped {bulk.skipped.length}.
             {bulk.skipped.length > 0 && <ul className="mt-1 list-disc pl-5 text-ink/60">{bulk.skipped.slice(0, 20).map((s) => <li key={s.tenant_id}>{s.name}: {s.reason}</li>)}</ul>}
+          </div>
+        )}
+        {check && (
+          <div className={`text-sm border rounded-card px-3 py-2 mb-4 ${check.result.matches ? "border-green-300 bg-green-50" : "border-red-300 bg-red-50"}`}>
+            {check.result.matches ? "Ledgers match" : "LEDGERS DIFFER"} for {check.name}: your ledger {check.result.admin_lines} lines, closing Rs {check.result.admin_closing.toLocaleString("en-PK")}; tenant portal {check.result.portal_lines} lines, closing Rs {check.result.portal_closing.toLocaleString("en-PK")}.
           </div>
         )}
         <div className="overflow-x-auto">
@@ -158,6 +211,7 @@ export default function TenantPortalAdminPage() {
                     {a.status === "active" && <Button variant="ghost" onClick={() => setStatus(a, "disabled")}>Disable</Button>}
                     {a.status === "disabled" && <Button variant="ghost" onClick={() => setStatus(a, "active")}>Enable</Button>}
                     {a.status !== "archived" && <Button variant="ghost" onClick={() => openOverrides(a)}>Permissions</Button>}
+                    {a.status !== "archived" && <Button variant="ghost" onClick={() => checkLedger(a)}>Check ledger</Button>}
                   </div>
                 ),
               },

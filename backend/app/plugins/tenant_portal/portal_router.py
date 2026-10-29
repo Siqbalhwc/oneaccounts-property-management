@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from app.core.deps import get_service_client
+from app.core.labels import resolve_unit
 
 from . import service as svc
 from .constants import LOCK_MINUTES, MAX_FAILED_ATTEMPTS, MIN_PASSWORD_LENGTH, SESSION_HOURS
@@ -107,7 +108,9 @@ def require_permission(key: str):
 @router.get("/me")
 def me(ctx: dict = Depends(_auth)):
     a, t, co = ctx["account"], ctx["tenant"], ctx["company"]
+    unit = resolve_unit(co.get("unit_type"))
     return {
+        "unit": unit["singular"], "units": unit["plural"],
         "tenant_name": t.get("full_name"), "masked_username": mask_username(a["username"]),
         "company_name": co.get("name"), "logo_url": co.get("logo_url"), "unit_type": co.get("unit_type"),
         "must_change_password": a["must_change_password"], "permissions": ctx["permissions"],
