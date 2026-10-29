@@ -7,6 +7,7 @@ from supabase import Client
 
 from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
 from app.services.income_allocation import allocate_payment_to_line_items
+from app.services.invoice_receipt_comparison import build_comparison
 from app.services.ledger import get_account_id, get_tenant_account_balance_as_of
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
@@ -33,6 +34,19 @@ def monthly_pnl(
         row["total_salaries"] = float(row["total_salaries"])
         row["net_profit"] = row["total_income"] - row["total_expenses"] - row["total_salaries"]
     return data
+
+
+@router.get("/invoice-receipt-comparison")
+def invoice_receipt_comparison(
+    end_month: Optional[date] = Query(None, description="Last month shown (any date in it). Defaults to the current month."),
+    months: int = Query(6, ge=1, le=12),
+    building_id: Optional[str] = Query(None),
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+):
+    """Invoices billed vs receipts received, per apartment/shop and tenant,
+    for the latest N months (default 6). Receipts come from the journal."""
+    return build_comparison(supabase, company_id, end_month or date.today(), months, building_id)
 
 
 @router.get("/collection-vs-expense")

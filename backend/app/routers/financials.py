@@ -2,12 +2,13 @@ import logging
 from datetime import date, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase import Client
 
 from app.core.deps import get_current_company_id, get_supabase
 from app.services.invoice_batch import IN_CHUNK, chunked
 from app.services.ledger import get_account_id
+from app.services.ledger_summary import build_summary
 from app.services.room_search import resolve_property_term
 
 router = APIRouter(prefix="/financials", tags=["Financial Reports"])
@@ -163,6 +164,26 @@ def _apply_expense_split_to_building_pnl(
             )
 
     return adjusted
+
+
+@router.get("/dashboard-summary")
+def dashboard_summary(
+    date_from: date = Query(...),
+    date_to: date = Query(...),
+    trend_months: int = Query(6, ge=1, le=24),
+    supabase: Client = Depends(get_supabase),
+    company_id: str = Depends(get_current_company_id),
+):
+    """
+    Collected / expenses / salaries / net profit for any date range, plus the
+    previous comparable period and a 6-month trend -- all computed from the
+    journal (see services/ledger_summary.py), so the dashboard cards agree
+    with the Journal, Trial Balance and Profit & Loss no matter which screen
+    an entry came from.
+    """
+    if date_to < date_from:
+        raise HTTPException(status_code=400, detail="The 'to' date can't be before the 'from' date.")
+    return build_summary(supabase, company_id, date_from, date_to, trend_months)
 
 
 @router.get("/journal")

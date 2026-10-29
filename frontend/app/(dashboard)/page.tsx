@@ -34,11 +34,12 @@ import { api, Building, Room, Lease, Tenant, Invoice } from "@/lib/api";
 import { Card, DataTable } from "@/components/ui/Card";
 import { StampBadge } from "@/components/ui/StampBadge";
 import { ProgressRing } from "@/components/ui/ProgressRing";
-import { Select } from "@/components/ui/Field";
+import { Input, Select } from "@/components/ui/Field";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useCountUp } from "@/components/ui/useCountUp";
 import { KpiTile } from "@/components/ui/KpiTile";
 import { useLabels } from "@/lib/labels";
+import { firstOfMonthYmd, todayYmd, ymd } from "@/lib/dates";
 
 type Payment = {
   id: string;
@@ -57,7 +58,18 @@ type Expense = {
   created_at?: string;
 };
 type ExpenseCategory = { id: string; name: string };
-type SalaryPayment = { id: string; salary_month: string; amount_paid: number };
+type Totals = { collected: number; expenses: number; salaries: number; net_profit: number };
+// Produced by GET /financials/dashboard-summary -- computed from the journal
+// (the single source of truth), so it includes every entry however it was posted.
+type Summary = {
+  date_from: string;
+  date_to: string;
+  current: Totals;
+  previous: Totals;
+  previous_period: { date_from: string; date_to: string };
+  trend: (Totals & { month: string })[];
+};
+const ZERO_TOTALS: Totals = { collected: 0, expenses: 0, salaries: 0, net_profit: 0 };
 
 function pkr(n: number) {
   return `Rs ${Number(n || 0).toLocaleString("en-PK")}`;
@@ -68,6 +80,10 @@ function monthKey(d: Date) {
 function monthLabel(key: string) {
   const [y, m] = key.split("-").map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+function dayLabel(iso: string) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 }
 function pctChange(curr: number, prev: number): string | null {
   if (prev === 0) return null;
@@ -107,7 +123,7 @@ export default function DashboardHome() {
   const [payments, setPayments] = useState<Payment[] | null>(null);
   const [expenses, setExpenses] = useState<Expense[] | null>(null);
   const [expenseCategories, setExpenseCategories] = useState<ExpenseCategory[] | null>(null);
-  const [salaryPayments, setSalaryPayments] = useState<SalaryPayment[] | null>(null);
+  const [summary, setSummary] = useState<Summary | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const now = new Date();
@@ -115,7 +131,28 @@ export default function DashboardHome() {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     return monthKey(d);
   });
-  const [selectedMonth, setSelectedMonth] = useState(monthOptions[0]);
+  // The period every figure on this page follows. Default: this month from
+  // the 1st up to today. Pick an earlier month for that whole month, or
+  // "Custom range" for any From/To dates.
+  const currentMonthKey = monthOptions[0];
+  const [periodChoice, setPeriodChoice] = useState<string>(currentMonthKey);
+  const [customFrom, setCustomFrom] = useState(firstOfMonthYmd());
+  const [customTo, setCustomTo] = useState(todayYmd());
+  const { rangeFrom, rangeTo } = useMemo(() => {
+    if (periodChoice === "custom") return { rangeFrom: customFrom, rangeTo: customTo };
+    const [y, m] = periodChoice.split("-").map(Number);
+    return {
+      rangeFrom: `${periodChoice}-01`,
+      rangeTo: periodChoice === currentMonthKey ? todayYmd() : ymd(new Date(y, m, 0)),
+    };
+  }, [periodChoice, customFrom, customTo, currentMonthKey]);
+  const validRange = !!rangeFrom && !!rangeTo && rangeFrom <= rangeTo;
+  const periodLabel =
+    periodChoice === "custom"
+      ? `${dayLabel(rangeFrom)} – ${dayLabel(rangeTo)}`
+      : periodChoice === currentMonthKey
+      ? `${monthLabel(periodChoice)} (1st to today)`
+      : monthLabel(periodChoice);
   const [sendingReminderId, setSendingReminderId] = useState<string | null>(null);
   const [reminderError, setReminderError] = useState<string | null>(null);
 
@@ -125,6 +162,9 @@ export default function DashboardHome() {
   // history on every load. Computed once, from the same monthOptions the UI
   // itself is bounded by.
   const windowStartDate = `${monthOptions[monthOptions.length - 1]}-01`;
+  // Invoices and payments are also needed for the selected range itself, which
+  // may start before that 12-month window when a custom range is chosen.
+  const rangeWindowStart = rangeFrom && rangeFrom < windowStartDate ? `${rangeFrom.slice(0, 7)}-01` : windowStartDate;
 
   // Each dataset is fetched and rendered independently -- previously this
   // page used Promise.all(), which meant EVERY card stayed blank/zeroed
@@ -162,7 +202,7 @@ export default function DashboardHome() {
   // page calling GET /invoices with no params is completely unaffected.
   useEffect(() => {
     Promise.all([
-      api.get<Invoice[]>(`/invoices?date_from=${windowStartDate}`),
+      api.get<Invoice[]>(`/invoices?date_from=${rangeWindowStart}`),
       api.get<Invoice[]>(`/invoices?exclude_paid=true`),
     ])
       .then(([windowInvoices, unpaidInvoices]) => {
@@ -172,7 +212,7 @@ export default function DashboardHome() {
       })
       .catch((err) => setError(err.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [rangeWindowStart]);
 
   // Tops up `leases` with whichever specific leases the loaded invoices
   // reference (for awaitingPayment / topBuildings below) -- same lookups
@@ -195,11 +235,11 @@ export default function DashboardHome() {
 
   useEffect(() => {
     api
-      .get<Payment[]>(`/payments?date_from=${windowStartDate}`)
+      .get<Payment[]>(`/payments?date_from=${rangeWindowStart}`)
       .then(setPayments)
       .catch((err) => setError(err.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [rangeWindowStart]);
 
   useEffect(() => {
     api
@@ -209,49 +249,36 @@ export default function DashboardHome() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Collected / expenses / salaries / net profit for the selected period --
+  // one request, computed from the journal (see services/ledger_summary.py).
   useEffect(() => {
+    if (!validRange) return;
+    let cancelled = false;
+    setSummary(null);
     api
-      .get<SalaryPayment[]>(`/salary_payments?date_from=${windowStartDate}`)
-      .then(setSalaryPayments)
-      .catch((err) => setError(err.message));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+      .get<Summary>(`/financials/dashboard-summary?date_from=${rangeFrom}&date_to=${rangeTo}`)
+      .then((res) => {
+        if (!cancelled) setSummary(res);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [rangeFrom, rangeTo, validRange]);
 
-  // ---------- Monthly metrics (driven by the month dropdown) ----------
-  function metricsFor(monthKeyStr: string) {
-    const collected = (payments ?? [])
-      .filter((p) => p.payment_date?.startsWith(monthKeyStr))
-      .reduce((s, p) => s + Number(p.amount || 0), 0);
-    const expensesTotal = (expenses ?? [])
-      .filter((e) => e.expense_date?.startsWith(monthKeyStr))
-      .reduce((s, e) => s + Number(e.amount || 0), 0);
-    const salariesTotal = (salaryPayments ?? [])
-      .filter((s) => s.salary_month?.startsWith(monthKeyStr))
-      .reduce((s, sp) => s + Number(sp.amount_paid || 0), 0);
-    const netProfit = collected - expensesTotal - salariesTotal;
-    return { collected, expensesTotal, salariesTotal, netProfit };
-  }
-
-  const current = metricsFor(selectedMonth);
-  const prevMonthDate = (() => {
-    const [y, m] = selectedMonth.split("-").map(Number);
-    return new Date(y, m - 2, 1);
-  })();
-  const previous = metricsFor(monthKey(prevMonthDate));
+  // ---------- Period metrics (driven by the period selector) ----------
+  const current = summary?.current ?? ZERO_TOTALS;
+  const previous = summary?.previous ?? ZERO_TOTALS;
 
   // ---------- KPI loading state + count-up values ----------
-  // Each KPI only depends on the specific datasets that feed it, so each
-  // card can resolve (and animate in) independently rather than all four
-  // waiting on the slowest of the three underlying fetches.
-  const collectedLoading = payments === null;
-  const expensesLoading = expenses === null;
-  const salariesLoading = salaryPayments === null;
-  const netProfitLoading = payments === null || expenses === null || salaryPayments === null;
-
-  const collectedAnimated = useCountUp(collectedLoading ? 0 : current.collected);
-  const expensesAnimated = useCountUp(expensesLoading ? 0 : current.expensesTotal);
-  const salariesAnimated = useCountUp(salariesLoading ? 0 : current.salariesTotal);
-  const netProfitAnimated = useCountUp(netProfitLoading ? 0 : current.netProfit);
+  // All four cards come from the same single request, so they resolve together.
+  const summaryLoading = summary === null;
+  const collectedAnimated = useCountUp(summaryLoading ? 0 : current.collected);
+  const expensesAnimated = useCountUp(summaryLoading ? 0 : current.expenses);
+  const salariesAnimated = useCountUp(summaryLoading ? 0 : current.salaries);
+  const netProfitAnimated = useCountUp(summaryLoading ? 0 : current.net_profit);
 
   // ---------- Portfolio overview ----------
   const totalRooms = rooms?.length ?? 0;
@@ -268,21 +295,22 @@ export default function DashboardHome() {
     { name: "Reserved", value: reserved, color: DONUT_COLORS.reserved },
   ].filter((d) => d.value > 0);
 
-  // ---------- Income vs expenses trend (last 6 months) ----------
-  const trend = Array.from({ length: 6 }, (_, i) => {
-    const d = new Date(now.getFullYear(), now.getMonth() - (5 - i), 1);
-    const key = monthKey(d);
-    const m = metricsFor(key);
+  // ---------- Income vs expenses trend (last 6 months, from the ledger) ----------
+  // "Expenses" here includes salaries, so Income minus Expenses is the profit.
+  const trend = (summary?.trend ?? []).map((t) => {
+    const [y, m] = t.month.split("-").map(Number);
     return {
-      label: d.toLocaleDateString("en-US", { month: "short" }),
-      Income: m.collected,
-      Expenses: m.expensesTotal,
+      label: new Date(y, m - 1, 1).toLocaleDateString("en-US", { month: "short" }),
+      Income: t.collected,
+      Expenses: t.expenses + t.salaries,
     };
   });
 
-  // ---------- Rent collection summary (selected month) ----------
+  // ---------- Rent collection summary (selected period) ----------
+  // Invoices billed for any month from the period's first month up to its end date.
+  const invoiceMonthFrom = `${rangeFrom.slice(0, 7)}-01`;
   const invoicesThisMonth = (invoices ?? []).filter(
-    (i) => i.invoice_month?.startsWith(selectedMonth) && i.status !== "cancelled"
+    (i) => i.invoice_month >= invoiceMonthFrom && i.invoice_month <= rangeTo && i.status !== "cancelled"
   );
   const totalRent = invoicesThisMonth.reduce((s, i) => s + Number(i.total_amount || 0), 0);
   const outstanding = invoicesThisMonth
@@ -344,7 +372,7 @@ export default function DashboardHome() {
     });
     const collectedByBuilding = new Map<string, number>();
     (payments ?? [])
-      .filter((p) => p.payment_date?.startsWith(selectedMonth))
+      .filter((p) => p.payment_date >= rangeFrom && p.payment_date <= rangeTo)
       .forEach((p) => {
         if (!p.invoice_id) return;
         const buildingId = invoiceToBuilding.get(p.invoice_id);
@@ -357,7 +385,7 @@ export default function DashboardHome() {
       .filter((b) => b.amount > 0)
       .slice(0, 4);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [invoices, payments, buildings, selectedMonth, leasesById, roomsById]);
+  }, [invoices, payments, buildings, rangeFrom, rangeTo, leasesById, roomsById]);
   const maxBuildingAmount = Math.max(1, ...topBuildings.map((b) => b.amount));
 
   // ---------- Recent activity feed (from real data, not fabricated) ----------
@@ -425,18 +453,32 @@ export default function DashboardHome() {
             A snapshot of collections, dues, and profit across all buildings.
           </p>
         </div>
-        <Select
-          value={selectedMonth}
-          onChange={(e) => setSelectedMonth(e.target.value)}
-          className="sm:w-48"
-        >
-          {monthOptions.map((k) => (
-            <option key={k} value={k}>
-              {monthLabel(k)}
-            </option>
-          ))}
-        </Select>
+        <div className="flex flex-col sm:flex-row sm:items-end gap-2">
+          <Select
+            value={periodChoice}
+            onChange={(e) => setPeriodChoice(e.target.value)}
+            className="sm:w-52"
+          >
+            {monthOptions.map((k) => (
+              <option key={k} value={k}>
+                {k === currentMonthKey ? `${monthLabel(k)} (to date)` : monthLabel(k)}
+              </option>
+            ))}
+            <option value="custom">Custom range…</option>
+          </Select>
+          {periodChoice === "custom" && (
+            <>
+              <Input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} className="sm:w-40" aria-label="From date" />
+              <Input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)} className="sm:w-40" aria-label="To date" />
+            </>
+          )}
+        </div>
       </div>
+
+      <p className="text-xs text-ink/50 -mt-3">
+        Showing {periodLabel}
+        {!validRange && <span className="text-stamp-red"> — the From date must be on or before the To date.</span>}
+      </p>
 
       {error && (
         <Card className="border-stamp-red/40">
@@ -446,49 +488,50 @@ export default function DashboardHome() {
         </Card>
       )}
 
-      {/* KPI cards */}
+      {/* KPI cards -- all four follow the period selected above */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <KpiTile
-          href="/invoices"
+          href="/reports"
           icon={<Wallet size={18} />}
           iconClassName="bg-accent/10 text-accent"
-          label="Collected this month"
+          label="Collected"
           value={pkr(collectedAnimated)}
-          loading={collectedLoading}
-          deltaText={pctChange(current.collected, previous.collected) && `${pctChange(current.collected, previous.collected)} from last month`}
+          loading={summaryLoading}
+          deltaText={pctChange(current.collected, previous.collected) && `${pctChange(current.collected, previous.collected)} vs previous period`}
           deltaTone={current.collected >= previous.collected ? "up" : "down"}
         />
 
         <KpiTile
-          href="/expenses"
+          href="/profit-and-loss"
           icon={<Receipt size={18} />}
           iconClassName="bg-stamp-red/10 text-stamp-red"
-          label="Expenses this month"
+          label="Expenses"
           value={pkr(expensesAnimated)}
-          loading={expensesLoading}
-          deltaText={pctChange(current.expensesTotal, previous.expensesTotal) && `${pctChange(current.expensesTotal, previous.expensesTotal)} from last month`}
-          deltaTone={current.expensesTotal <= previous.expensesTotal ? "up" : "down"}
+          loading={summaryLoading}
+          deltaText={pctChange(current.expenses, previous.expenses) && `${pctChange(current.expenses, previous.expenses)} vs previous period`}
+          deltaTone={current.expenses <= previous.expenses ? "up" : "down"}
         />
 
         <KpiTile
-          href="/reports"
+          href="/profit-and-loss"
           icon={<Users size={18} />}
           iconClassName="bg-brass/15 text-brass-dark"
-          label="Salaries this month"
+          label="Salaries"
           value={pkr(salariesAnimated)}
-          loading={salariesLoading}
-          deltaTone="neutral"
+          loading={summaryLoading}
+          deltaText={pctChange(current.salaries, previous.salaries) && `${pctChange(current.salaries, previous.salaries)} vs previous period`}
+          deltaTone={current.salaries <= previous.salaries ? "up" : "down"}
         />
 
         <KpiTile
-          href="/reports"
+          href="/profit-and-loss"
           icon={<TrendingUp size={18} />}
           iconClassName="bg-accent/10 text-accent"
           label="Net profit"
           value={pkr(netProfitAnimated)}
-          loading={netProfitLoading}
-          deltaText={pctChange(current.netProfit, previous.netProfit) && `${pctChange(current.netProfit, previous.netProfit)} from last month`}
-          deltaTone={current.netProfit >= previous.netProfit ? "up" : "down"}
+          loading={summaryLoading}
+          deltaText={pctChange(current.net_profit, previous.net_profit) && `${pctChange(current.net_profit, previous.net_profit)} vs previous period`}
+          deltaTone={current.net_profit >= previous.net_profit ? "up" : "down"}
         />
       </div>
 
@@ -554,7 +597,7 @@ export default function DashboardHome() {
 
         {/* Income vs expenses trend */}
         <Card title="Income vs expenses (last 6 months)">
-          {payments === null || expenses === null ? (
+          {summaryLoading ? (
             <div className="flex items-end gap-3" style={{ height: 180, paddingTop: 8 }}>
               {[62, 78, 48, 88, 68, 95].map((h, i) => (
                 <Skeleton key={i} className="flex-1" style={{ height: `${h}%` }} />
@@ -665,8 +708,8 @@ export default function DashboardHome() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Rent collection summary */}
-        <Card title={`Rent collection — ${monthLabel(selectedMonth)}`}>
-          {invoices === null || payments === null ? (
+        <Card title={`Rent collection — ${periodChoice === "custom" ? "selected range" : monthLabel(periodChoice)}`}>
+          {invoices === null || payments === null || summaryLoading ? (
             <div className="flex flex-col items-center gap-4">
               <Skeleton className="w-[88px] h-[88px] rounded-full" />
               <div className="grid grid-cols-2 gap-x-4 gap-y-3 w-full">

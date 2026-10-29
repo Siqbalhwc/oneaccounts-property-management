@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
 import { Field, Input, Select } from "@/components/ui/Field";
 import { api, Building, Company } from "@/lib/api";
+import { firstOfMonthYmd, todayYmd } from "@/lib/dates";
 
 type PnlRow = {
   group_key: string;
@@ -23,11 +24,8 @@ function formatPkr(n: number) {
   return Number(n || 0).toLocaleString("en-PK", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-const firstOfMonth = () => {
-  const d = new Date();
-  return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0, 10);
-};
-const today = () => new Date().toISOString().slice(0, 10);
+const firstOfMonth = () => firstOfMonthYmd();
+const today = () => todayYmd();
 
 type View = "total" | "building" | "owner";
 

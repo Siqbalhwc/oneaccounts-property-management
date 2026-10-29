@@ -10,6 +10,7 @@ import { Modal } from "@/components/ui/Modal";
 import { PrintHeader } from "@/components/ui/PrintHeader";
 import { api, Tenant, Lease, Room, Building, Invoice, Company, fetchPdfBlob, downloadFile } from "@/lib/api";
 import { useLabels } from "@/lib/labels";
+import { firstOfMonthYmd, monthKeyOf, todayYmd } from "@/lib/dates";
 
 type SecurityDeposit = {
   id: string;
@@ -130,8 +131,40 @@ function monthOf(dateStr: string) {
   return dateStr?.slice(0, 7); // "YYYY-MM"
 }
 
+// ---- Invoices vs Receipts (latest 6 months) ----
+type ComparisonRow = {
+  key: string;
+  lease_id: string | null;
+  tenant_id: string | null;
+  tenant_name: string;
+  building_id: string | null;
+  building_name: string;
+  room_number: string;
+  invoiced: Record<string, number>;
+  received: Record<string, number>;
+};
+type Comparison = {
+  months: string[];
+  rows: ComparisonRow[];
+  totals: { invoiced: Record<string, number>; received: Record<string, number> };
+};
+type ComparisonView = "both" | "invoices" | "receipts";
+
+// ---- Expenses (from the ledger, so journal-posted expenses are included) ----
+type LedgerTotals = { collected: number; expenses: number; salaries: number; net_profit: number };
+type ExpenseSummary = {
+  current: LedgerTotals;
+  trend: (LedgerTotals & { month: string })[];
+  expense_breakdown: { account_id: string; code: string; name: string; amount: number }[];
+};
+
+function pkrPlain(n: number) {
+  return Math.abs(n) < 0.005 ? "–" : Number(n).toLocaleString("en-PK", { maximumFractionDigits: 0 });
+}
+
 const TABS = [
   "Receipts by Head",
+  "Invoices vs Receipts",
   "Security Deposits",
   "Tenant Ledger",
   "Room-wise Receivables",
@@ -158,20 +191,19 @@ export default function ReportsPage() {
   const [company, setCompany] = useState<Company | null>(null);
   const [selectedTenantId, setSelectedTenantId] = useState<string>("");
   const [selectedBuildingFilter, setSelectedBuildingFilter] = useState<string>("");
-  const [selectedMonthFilter, setSelectedMonthFilter] = useState<string>("");
+  // Reports open on the current month; "All months" is still one click away.
+  const [selectedMonthFilter, setSelectedMonthFilter] = useState<string>(monthKeyOf());
 
   const [refundModalOpen, setRefundModalOpen] = useState(false);
   const [refundTarget, setRefundTarget] = useState<SecurityDeposit | null>(null);
   const [refundSaving, setRefundSaving] = useState(false);
   const [refundError, setRefundError] = useState<string | null>(null);
-  const [refundDate, setRefundDate] = useState(new Date().toISOString().slice(0, 10));
+  const [refundDate, setRefundDate] = useState(todayYmd());
   const [deductions, setDeductions] = useState<{ reason: string; amount: string }[]>([]);
 
   const today = new Date();
-  const [ibhDateFrom, setIbhDateFrom] = useState(
-    new Date(today.getFullYear(), today.getMonth(), 1).toISOString().slice(0, 10)
-  );
-  const [ibhDateTo, setIbhDateTo] = useState(today.toISOString().slice(0, 10));
+  const [ibhDateFrom, setIbhDateFrom] = useState(firstOfMonthYmd());
+  const [ibhDateTo, setIbhDateTo] = useState(todayYmd());
   const [ibhBuildingFilter, setIbhBuildingFilter] = useState("");
   const [ibhData, setIbhData] = useState<IncomeByHeadResponse | null>(null);
   const [ibhLoading, setIbhLoading] = useState(false);
@@ -189,10 +221,8 @@ export default function ReportsPage() {
   const [roomWiseRows, setRoomWiseRows] = useState<RoomWiseRow[] | null>(null);
   const [roomWiseLoading, setRoomWiseLoading] = useState(false);
   const [roomWiseError, setRoomWiseError] = useState<string | null>(null);
-  const [roomWisePeriodStart, setRoomWisePeriodStart] = useState(
-    new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10)
-  );
-  const [roomWisePeriodEnd, setRoomWisePeriodEnd] = useState(new Date().toISOString().slice(0, 10));
+  const [roomWisePeriodStart, setRoomWisePeriodStart] = useState(firstOfMonthYmd());
+  const [roomWisePeriodEnd, setRoomWisePeriodEnd] = useState(todayYmd());
   const [roomWiseBuildingFilter, setRoomWiseBuildingFilter] = useState("");
 
   // Room-wise drill-down: click a room row -> see its current invoice +
@@ -202,6 +232,72 @@ export default function ReportsPage() {
   const [invoiceDetailLoading, setInvoiceDetailLoading] = useState(false);
   const [invoiceDetailError, setInvoiceDetailError] = useState<string | null>(null);
   const [invoicePdfLoading, setInvoicePdfLoading] = useState(false);
+
+  // Invoices vs Receipts: latest 6 months ending at the chosen month.
+  const currentMonthKey = monthKeyOf();
+  const comparisonMonthOptions = Array.from({ length: 12 }, (_, i) => {
+    const d = new Date(today.getFullYear(), today.getMonth() - i, 1);
+    return monthKeyOf(d);
+  });
+  const [cmpView, setCmpView] = useState<ComparisonView>("both");
+  const [cmpEndMonth, setCmpEndMonth] = useState(currentMonthKey);
+  const [cmpBuilding, setCmpBuilding] = useState("");
+  const [cmpData, setCmpData] = useState<Comparison | null>(null);
+  const [cmpLoading, setCmpLoading] = useState(false);
+  const [cmpError, setCmpError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (tab !== "Invoices vs Receipts") return;
+    let cancelled = false;
+    setCmpLoading(true);
+    setCmpError(null);
+    const params = new URLSearchParams({ end_month: `${cmpEndMonth}-01`, months: "6" });
+    if (cmpBuilding) params.set("building_id", cmpBuilding);
+    api
+      .get<Comparison>(`/reports/invoice-receipt-comparison?${params.toString()}`)
+      .then((res) => {
+        if (!cancelled) setCmpData(res);
+      })
+      .catch((err) => {
+        if (!cancelled) setCmpError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setCmpLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, cmpEndMonth, cmpBuilding]);
+
+  // Expenses tabs: read from the ledger (one source of truth), default to this
+  // month from the 1st to today.
+  const [expFrom, setExpFrom] = useState(firstOfMonthYmd());
+  const [expTo, setExpTo] = useState(todayYmd());
+  const [expSummary, setExpSummary] = useState<ExpenseSummary | null>(null);
+  const [expLoading, setExpLoading] = useState(false);
+  const [expError, setExpError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (tab !== "Expenses by Category" && tab !== "Expenses by Month") return;
+    if (!expFrom || !expTo || expFrom > expTo) return;
+    let cancelled = false;
+    setExpLoading(true);
+    setExpError(null);
+    api
+      .get<ExpenseSummary>(`/financials/dashboard-summary?date_from=${expFrom}&date_to=${expTo}&trend_months=12`)
+      .then((res) => {
+        if (!cancelled) setExpSummary(res);
+      })
+      .catch((err) => {
+        if (!cancelled) setExpError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setExpLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, expFrom, expTo]);
 
   function loadDeposits() {
     api.get<SecurityDeposit[]>("/security-deposits").then(setDeposits);
@@ -389,7 +485,7 @@ export default function ReportsPage() {
   function openRefundModal(deposit: SecurityDeposit) {
     setRefundTarget(deposit);
     setRefundError(null);
-    setRefundDate(new Date().toISOString().slice(0, 10));
+    setRefundDate(todayYmd());
     setDeductions([]);
     setRefundModalOpen(true);
   }
@@ -440,30 +536,15 @@ export default function ReportsPage() {
   const totalPaid = tenantPayments.reduce((s, p) => s + Number(p.amount || 0), 0);
   const balanceDue = totalBilled - totalPaid;
 
-  // --- Expenses by category ---
-  const categoryTotals = (categories ?? []).map((c) => ({
-    name: c.name,
-    total: (expenses ?? []).filter((e) => e.category_id === c.id).reduce((s, e) => s + Number(e.amount || 0), 0),
-    count: (expenses ?? []).filter((e) => e.category_id === c.id).length,
-  }));
-  const grandTotalExpenses = categoryTotals.reduce((s, c) => s + c.total, 0);
-
-  // --- Expenses by month ---
-  const expenseMonths = Array.from(
-    new Set((expenses ?? []).map((e) => monthOf(e.expense_date)))
-  ).sort((a, b) => b.localeCompare(a));
-  const monthlyExpenseTotals = expenseMonths.map((m) => ({
-    month: m,
-    total: (expenses ?? [])
-      .filter((e) => monthOf(e.expense_date) === m)
-      .reduce((s, e) => s + Number(e.amount || 0), 0),
-    count: (expenses ?? []).filter((e) => monthOf(e.expense_date) === m).length,
-  }));
+  // --- Expenses (ledger-based; see the Expenses tabs below) ---
+  const ledgerExpenseRows = expSummary?.expense_breakdown ?? [];
+  const ledgerExpenseTotal = ledgerExpenseRows.reduce((sum, r) => sum + r.amount, 0);
+  const ledgerMonthRows = [...(expSummary?.trend ?? [])].reverse();
 
   // --- Collection vs bills ---
   const buildingsForFilter = buildings ?? [];
   const availableMonths = Array.from(
-    new Set((collectionVsExpense ?? []).map((r) => monthOf(r.month)))
+    new Set([currentMonthKey, ...(collectionVsExpense ?? []).map((r) => monthOf(r.month))])
   ).sort((a, b) => b.localeCompare(a));
   const filteredCollectionVsExpense = (collectionVsExpense ?? []).filter((r) => {
     if (selectedBuildingFilter && r.building_id !== selectedBuildingFilter) return false;
@@ -694,6 +775,74 @@ export default function ReportsPage() {
                 </table>
               </div>
             )}
+          </Card>
+        </div>
+      )}
+
+      {tab === "Invoices vs Receipts" && (
+        <div className="space-y-4">
+          <Card className="no-print">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <Field label="Show">
+                <Select value={cmpView} onChange={(e) => setCmpView(e.target.value as ComparisonView)}>
+                  <option value="both">Invoices and receipts</option>
+                  <option value="invoices">Invoices only</option>
+                  <option value="receipts">Receipts only</option>
+                </Select>
+              </Field>
+              <Field label="Latest 6 months ending">
+                <Select value={cmpEndMonth} onChange={(e) => setCmpEndMonth(e.target.value)}>
+                  {comparisonMonthOptions.map((m) => (
+                    <option key={m} value={m}>
+                      {monthLabel(m)}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="Building">
+                <Select value={cmpBuilding} onChange={(e) => setCmpBuilding(e.target.value)}>
+                  <option value="">All buildings</option>
+                  {(buildings ?? []).map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
+          </Card>
+
+          {cmpError && (
+            <Card className="border-stamp-red/40">
+              <p className="text-sm text-stamp-red">Couldn&apos;t load this report — {cmpError}.</p>
+            </Card>
+          )}
+
+          <Card
+            title={
+              cmpView === "invoices"
+                ? "Invoices billed per month"
+                : cmpView === "receipts"
+                ? "Receipts received per month"
+                : "Invoices billed vs receipts received, per month"
+            }
+          >
+            {cmpLoading && !cmpData ? (
+              <p className="text-sm text-ink/45 py-8 text-center">Loading…</p>
+            ) : !cmpData || cmpData.rows.length === 0 ? (
+              <p className="text-sm text-ink/45 py-8 text-center">No invoices or receipts in these 6 months.</p>
+            ) : (
+              <ComparisonTable
+                data={cmpData}
+                view={cmpView}
+                unitHeader={L("Building / Apartment")}
+              />
+            )}
+            <p className="text-xs text-ink/40 mt-3">
+              Invoices are counted in the month they were billed for. Receipts are counted in the month the money was
+              received (taken from the ledger, same as the dashboard&apos;s Collected figure), whichever month they paid
+              for. Amounts in Rs.
+            </p>
           </Card>
         </div>
       )}
@@ -935,39 +1084,86 @@ export default function ReportsPage() {
       )}
 
       {tab === "Expenses by Category" && (
-        <Card>
-          <DataTable
-            keyField="name"
-            rows={categoryTotals}
-            emptyMessage="No expenses logged yet."
-            columns={[
-              { header: "Category", accessor: (c) => c.name },
-              { header: "# of entries", accessor: (c) => c.count, align: "right" },
-              { header: "Total", accessor: (c) => <span className="figures font-medium">{formatPkr(c.total)}</span>, align: "right" },
-            ]}
-          />
-          {categoryTotals.length > 0 && (
-            <div className="flex justify-between items-center mt-4 pt-4 border-t border-border">
-              <span className="text-sm font-semibold">Grand total</span>
-              <span className="figures font-display font-semibold text-lg">{formatPkr(grandTotalExpenses)}</span>
+        <div className="space-y-4">
+          <Card className="no-print">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <Field label="From">
+                <Input type="date" value={expFrom} onChange={(e) => setExpFrom(e.target.value)} />
+              </Field>
+              <Field label="To">
+                <Input type="date" value={expTo} onChange={(e) => setExpTo(e.target.value)} />
+              </Field>
             </div>
+          </Card>
+          {expError && (
+            <Card className="border-stamp-red/40">
+              <p className="text-sm text-stamp-red">Couldn&apos;t load this report — {expError}.</p>
+            </Card>
           )}
-        </Card>
+          <Card title={`Expenses by account — ${expFrom} to ${expTo}`}>
+            <DataTable
+              keyField="account_id"
+              rows={ledgerExpenseRows}
+              emptyMessage={expLoading ? "Loading…" : "No expenses posted in this period."}
+              columns={[
+                { header: "Account", accessor: (r) => `${r.code} · ${r.name}` },
+                { header: "Total", accessor: (r) => <span className="figures font-medium">{formatPkr(r.amount)}</span>, align: "right" },
+              ]}
+            />
+            {ledgerExpenseRows.length > 0 && (
+              <div className="flex justify-between items-center mt-4 pt-4 border-t border-border">
+                <span className="text-sm font-semibold">Grand total</span>
+                <span className="figures font-display font-semibold text-lg">{formatPkr(ledgerExpenseTotal)}</span>
+              </div>
+            )}
+            <p className="text-xs text-ink/40 mt-3">
+              Read from the ledger, so it includes every expense however it was posted — bills, salaries, journal
+              vouchers and discounts.
+            </p>
+          </Card>
+        </div>
       )}
 
       {tab === "Expenses by Month" && (
-        <Card>
-          <DataTable
-            keyField="month"
-            rows={monthlyExpenseTotals}
-            emptyMessage="No expenses logged yet."
-            columns={[
-              { header: "Month", accessor: (r) => r.month },
-              { header: "# of entries", accessor: (r) => r.count, align: "right" },
-              { header: "Total", accessor: (r) => <span className="figures font-medium">{formatPkr(r.total)}</span>, align: "right" },
-            ]}
-          />
-        </Card>
+        <div className="space-y-4">
+          <Card className="no-print">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <Field label="Latest 12 months ending">
+                <Input
+                  type="date"
+                  value={expTo}
+                  onChange={(e) => {
+                    setExpTo(e.target.value);
+                    if (expFrom > e.target.value) setExpFrom(e.target.value);
+                  }}
+                />
+              </Field>
+            </div>
+          </Card>
+          {expError && (
+            <Card className="border-stamp-red/40">
+              <p className="text-sm text-stamp-red">Couldn&apos;t load this report — {expError}.</p>
+            </Card>
+          )}
+          <Card>
+            <DataTable
+              keyField="month"
+              rows={ledgerMonthRows}
+              emptyMessage={expLoading ? "Loading…" : "No expenses posted yet."}
+              columns={[
+                { header: "Month", accessor: (r) => monthLabel(r.month) },
+                { header: "Expenses", accessor: (r) => <span className="figures">{formatPkr(r.expenses)}</span>, align: "right" },
+                { header: "Salaries", accessor: (r) => <span className="figures">{formatPkr(r.salaries)}</span>, align: "right" },
+                {
+                  header: "Total",
+                  accessor: (r) => <span className="figures font-medium">{formatPkr(r.expenses + r.salaries)}</span>,
+                  align: "right",
+                },
+              ]}
+            />
+            <p className="text-xs text-ink/40 mt-3">Read from the ledger — every expense however it was posted.</p>
+          </Card>
+        </div>
       )}
 
       {tab === "Collection vs Bills" && (
@@ -1359,5 +1555,121 @@ export default function ReportsPage() {
         </div>
       </Modal>
     </div>
+  );
+}
+
+function ComparisonTable({
+  data,
+  view,
+  unitHeader,
+}: {
+  data: Comparison;
+  view: ComparisonView;
+  unitHeader: string;
+}) {
+  const showInv = view !== "receipts";
+  const showRec = view !== "invoices";
+  const sum = (m: Record<string, number>) => data.months.reduce((t, k) => t + (m[k] ?? 0), 0);
+  const cellsPerMonth = (showInv ? 1 : 0) + (showRec ? 1 : 0);
+  const numCell = "px-3 py-2 text-right figures whitespace-nowrap";
+  const left = "px-3 py-2 text-left whitespace-nowrap";
+
+  return (
+    <div className="overflow-x-auto -mx-1">
+      <table className="w-full text-sm border-collapse min-w-[720px]">
+        <thead>
+          <tr className="border-b border-border text-xs uppercase tracking-wider text-ink/50">
+            <th rowSpan={cellsPerMonth > 1 ? 2 : 1} className={`${left} font-medium align-bottom`}>{unitHeader}</th>
+            <th rowSpan={cellsPerMonth > 1 ? 2 : 1} className={`${left} font-medium align-bottom`}>Tenant</th>
+            {data.months.map((m) => (
+              <th key={m} colSpan={cellsPerMonth} className="px-3 py-2 text-center font-medium whitespace-nowrap">
+                {monthLabel(m)}
+              </th>
+            ))}
+            <th colSpan={cellsPerMonth} className="px-3 py-2 text-center font-medium whitespace-nowrap border-l border-border">
+              6-month total
+            </th>
+          </tr>
+          {cellsPerMonth > 1 && (
+            <tr className="border-b border-border text-[10px] uppercase tracking-wider text-ink/40">
+              {[...data.months, "total"].map((m) => (
+                <FragmentHeads key={m} showInv={showInv} showRec={showRec} divider={m === "total"} />
+              ))}
+            </tr>
+          )}
+        </thead>
+        <tbody>
+          {data.rows.map((r) => (
+            <tr key={r.key} className="border-b border-border/60 hover:bg-brass/[0.05]">
+              <td className={`${left} font-medium`}>
+                {r.building_name} — {r.room_number}
+              </td>
+              <td className={left}>{r.tenant_name}</td>
+              {data.months.map((m) => (
+                <MonthCells key={m} inv={showInv ? r.invoiced[m] : null} rec={showRec ? r.received[m] : null} numCell={numCell} />
+              ))}
+              <MonthCells
+                inv={showInv ? sum(r.invoiced) : null}
+                rec={showRec ? sum(r.received) : null}
+                numCell={`${numCell} font-medium`}
+                divider
+              />
+            </tr>
+          ))}
+        </tbody>
+        <tfoot>
+          <tr className="border-t-2 border-border font-semibold bg-paper-card/60">
+            <td className={left} colSpan={2}>
+              Total
+            </td>
+            {data.months.map((m) => (
+              <MonthCells
+                key={m}
+                inv={showInv ? data.totals.invoiced[m] : null}
+                rec={showRec ? data.totals.received[m] : null}
+                numCell={numCell}
+              />
+            ))}
+            <MonthCells
+              inv={showInv ? sum(data.totals.invoiced) : null}
+              rec={showRec ? sum(data.totals.received) : null}
+              numCell={numCell}
+              divider
+            />
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  );
+}
+
+function FragmentHeads({ showInv, showRec, divider }: { showInv: boolean; showRec: boolean; divider?: boolean }) {
+  return (
+    <>
+      {showInv && <th className={`px-3 py-1 text-right font-medium ${divider ? "border-l border-border" : ""}`}>Invoiced</th>}
+      {showRec && (
+        <th className={`px-3 py-1 text-right font-medium ${divider && !showInv ? "border-l border-border" : ""}`}>Received</th>
+      )}
+    </>
+  );
+}
+
+function MonthCells({
+  inv,
+  rec,
+  numCell,
+  divider,
+}: {
+  inv: number | null;
+  rec: number | null;
+  numCell: string;
+  divider?: boolean;
+}) {
+  const first = divider ? "border-l border-border " : "";
+  return (
+    <>
+      {inv !== null && <td className={`${first}${numCell}`}>{pkrPlain(inv)}</td>}
+      {rec !== null && <td className={`${inv === null ? first : ""}${numCell} ${inv !== null && rec < inv - 0.005 ? "text-stamp-amber" : ""}`}>{pkrPlain(rec)}</td>}
+    </>
   );
 }

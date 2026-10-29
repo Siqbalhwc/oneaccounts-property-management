@@ -9,6 +9,7 @@ import { Modal } from "@/components/ui/Modal";
 import { PrintHeader } from "@/components/ui/PrintHeader";
 import { api, Building, Company } from "@/lib/api";
 import { useLabels } from "@/lib/labels";
+import { firstOfMonthYmd, todayYmd } from "@/lib/dates";
 
 type IncomeByHeadRow = {
   sr: number;
@@ -54,15 +55,11 @@ function formatPkr(n: number) {
   return `Rs ${Number(n || 0).toLocaleString("en-PK")}`;
 }
 
-function firstOfMonth(d: Date) {
-  return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0, 10);
-}
 
 export default function IncomeByHeadPage() {
   const { L } = useLabels();
-  const today = new Date();
-  const [dateFrom, setDateFrom] = useState(firstOfMonth(today));
-  const [dateTo, setDateTo] = useState(today.toISOString().slice(0, 10));
+  const [dateFrom, setDateFrom] = useState(firstOfMonthYmd());
+  const [dateTo, setDateTo] = useState(todayYmd());
   const [buildingFilter, setBuildingFilter] = useState("");
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [company, setCompany] = useState<Company | null>(null);

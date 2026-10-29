@@ -10,6 +10,7 @@ import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { PrintHeader } from "@/components/ui/PrintHeader";
 import { api, fetchPdfBlob, Building, Company } from "@/lib/api";
 import { useLabels } from "@/lib/labels";
+import { firstOfMonthYmd, todayYmd } from "@/lib/dates";
 
 type Account = { id: string; code: string; name: string; account_type?: string };
 type Owner = { id: string; name: string };
@@ -56,8 +57,11 @@ function LedgerPageInner() {
   const [openingId, setOpeningId] = useState<string | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
 
-  const [dateFrom, setDateFrom] = useState(searchParams.get("date_from") ?? "");
-  const [dateTo, setDateTo] = useState(searchParams.get("date_to") ?? "");
+  // Opens on this month (1st to today) unless the link that brought you here
+  // already carries its own dates (e.g. a Trial Balance drill-down "as of" date).
+  const urlHasDates = !!(searchParams.get("date_from") || searchParams.get("date_to"));
+  const [dateFrom, setDateFrom] = useState(urlHasDates ? searchParams.get("date_from") ?? "" : firstOfMonthYmd());
+  const [dateTo, setDateTo] = useState(urlHasDates ? searchParams.get("date_to") ?? "" : todayYmd());
 
   function load() {
     if (!accountId) {

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Card, DataTable } from "@/components/ui/Card";
 import { Field, Input, Select } from "@/components/ui/Field";
 import { api, Building } from "@/lib/api";
+import { todayYmd } from "@/lib/dates";
 
 type TrialBalanceRow = {
   account_id: string;
@@ -35,7 +36,7 @@ export default function TrialBalancePage() {
   const [buildings, setBuildings] = useState<Building[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const [asOfDate, setAsOfDate] = useState(new Date().toISOString().slice(0, 10));
+  const [asOfDate, setAsOfDate] = useState(todayYmd());
   const [buildingFilter, setBuildingFilter] = useState("");
 
   function load() {

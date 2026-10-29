@@ -9,6 +9,7 @@ import { StampBadge } from "@/components/ui/StampBadge";
 import { Field, Input, Select } from "@/components/ui/Field";
 import { api, Building } from "@/lib/api";
 import { useLabels } from "@/lib/labels";
+import { firstOfMonthYmd, todayYmd } from "@/lib/dates";
 
 type JournalLine = {
   line_id: string;
@@ -76,8 +77,9 @@ export default function JournalEntriesPage() {
       .catch((err: any) => setManualError(err.message));
   }
 
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
+  // Opens on this month, 1st to today; change or clear the dates to see more.
+  const [dateFrom, setDateFrom] = useState(firstOfMonthYmd());
+  const [dateTo, setDateTo] = useState(todayYmd());
   const [buildingFilter, setBuildingFilter] = useState("");
   const [ownerFilter, setOwnerFilter] = useState("");
   const [tenantFilter, setTenantFilter] = useState("");
@@ -150,6 +152,20 @@ export default function JournalEntriesPage() {
         placeholder={L("Search by building or apartment (e.g. Sunrise 101)…")}
         className="max-w-sm no-print"
       />
+
+      <p className="text-xs text-ink/50 -mt-3 no-print">
+        {dateFrom || dateTo ? `Showing ${dateFrom || "the start"} to ${dateTo || "today"}.` : "Showing all dates."}{" "}
+        <button
+          type="button"
+          className="text-accent hover:underline"
+          onClick={() => {
+            setDateFrom("");
+            setDateTo("");
+          }}
+        >
+          Show all dates
+        </button>
+      </p>
 
       {showFilters && (
         <Card>
