@@ -12,13 +12,20 @@ Computes, then (on confirm) posts, everything involved in ending a lease:
   - an optional discount against what the tenant owes, posted to
     whichever account the user picks
 
+Balances that were loaded through the books rather than through invoices
+(an opening receivable, an opening security deposit, a receipt taken against
+an opening balance) are read from the tenant's ledger, so the figures here
+agree with the Receivable ledger and the room-wise report. Invoice-based
+logic below is unchanged; the ledger only adds what invoices cannot see.
+
 All the arithmetic lives here, server-side, on purpose -- the settlement
 page just displays whatever this returns and sends back the user's
 choices (move-out date, discount, deduction lines). Nothing is
 recalculated in the browser.
 """
 
-from datetime import date
+import logging
+from datetime import date, timedelta
 from typing import Optional, TypedDict
 
 from fastapi import HTTPException
@@ -32,10 +39,19 @@ from app.services.invoicing import (
 )
 from app.services.ledger import (
     get_account_id,
+    get_tenant_account_balance_as_of,
     post_journal_entry,
     resolve_room_owner,
     reverse_journal_entry,
 )
+from app.services.utility_bills import apply_utility_overrides, fetch_bills
+
+logger = logging.getLogger("app.lease_settlement")
+
+# Far-future "as of" date: the settlement looks at everything the books hold
+# for the tenant, exactly like the invoice-based side looks at every invoice.
+LEDGER_AS_OF = "2100-01-01"
+IN_CHUNK = 100
 
 
 class DeductionInput(TypedDict, total=False):
@@ -83,6 +99,99 @@ def _deposit_paid(supabase: Client, deposit_id: Optional[str]) -> float:
         .data
     )
     return sum(float(p["amount"]) for p in payments)
+
+
+def _covers_month(lease_start: date, lease_end: date, month_start: date) -> bool:
+    """True when the lease is in force for at least one day of the month."""
+    next_month = date(
+        month_start.year + (1 if month_start.month == 12 else 0),
+        1 if month_start.month == 12 else month_start.month + 1,
+        1,
+    )
+    return max(lease_start, month_start) <= min(lease_end, next_month - timedelta(days=1))
+
+
+def _tenant_ledger_position(supabase: Client, company_id: str, lease_id: str, tenant_id: str) -> dict:
+    """
+    What the books hold for this tenant that the invoice-based figures cannot
+    see. Read-only. Always filtered by company and tenant.
+
+      receivable_other  Receivable (1100) balance in the ledger, minus what the
+                        invoices table says is still unpaid (invoiced minus
+                        paid, across all of the tenant's non-cancelled
+                        invoices). That difference is the opening balance,
+                        receipts against it and any other entry made through
+                        the books. Zero when everything went through invoices.
+      deposit_ledger    Security Deposits Held (2100) balance for the tenant.
+
+    The ledger is tenant-wide, not lease-wide (a manually posted opening
+    balance carries a tenant tag but no lease tag). If the tenant has another
+    ACTIVE lease, closing this one must not sweep up that lease's balances, so
+    in that case nothing is added and a note explains why.
+    """
+    other_active = (
+        supabase.table("leases")
+        .select("id")
+        .eq("company_id", company_id)
+        .eq("tenant_id", tenant_id)
+        .eq("status", "active")
+        .neq("id", lease_id)
+        .execute()
+        .data
+    )
+    if other_active:
+        return {
+            "applied": False,
+            "note": (
+                "This tenant has another active lease, so balances entered through the books "
+                "(opening receivable, opening security) are not included here. Close the settlement "
+                "after reviewing the tenant's ledger."
+            ),
+            "receivable_other": 0.0,
+            "deposit_ledger": 0.0,
+        }
+
+    ar_id = get_account_id(supabase, company_id, "1100")
+    dep_id = get_account_id(supabase, company_id, "2100")
+    ar_ledger = get_tenant_account_balance_as_of(supabase, company_id, ar_id, tenant_id, LEDGER_AS_OF)
+    dep_ledger = 0.0 - get_tenant_account_balance_as_of(supabase, company_id, dep_id, tenant_id, LEDGER_AS_OF)
+
+    lease_ids = [
+        r["id"]
+        for r in supabase.table("leases").select("id").eq("company_id", company_id).eq("tenant_id", tenant_id).execute().data
+    ]
+    invoiced = 0.0
+    invoice_ids: list[str] = []
+    for i in range(0, len(lease_ids), IN_CHUNK):
+        rows = (
+            supabase.table("invoices")
+            .select("id, total_amount")
+            .eq("company_id", company_id)
+            .in_("lease_id", lease_ids[i : i + IN_CHUNK])
+            .neq("status", "cancelled")
+            .execute()
+            .data
+        )
+        for r in rows:
+            invoiced += float(r["total_amount"])
+            invoice_ids.append(r["id"])
+    paid = 0.0
+    for i in range(0, len(invoice_ids), IN_CHUNK):
+        rows = (
+            supabase.table("payments")
+            .select("amount")
+            .in_("invoice_id", invoice_ids[i : i + IN_CHUNK])
+            .execute()
+            .data
+        )
+        paid += sum(float(r["amount"]) for r in rows)
+
+    return {
+        "applied": True,
+        "note": None,
+        "receivable_other": round(ar_ledger - (invoiced - paid), 2),
+        "deposit_ledger": round(dep_ledger, 2) + 0.0,
+    }
 
 
 def compute_settlement_preview(supabase: Client, company_id: str, lease_id: str, move_out_date: date) -> dict:
@@ -150,6 +259,9 @@ def compute_settlement_preview(supabase: Client, company_id: str, lease_id: str,
                        1 if latest_invoiced_month.month == 12 else latest_invoiced_month.month + 1, 1)
         while cursor < move_out_month:
             gap_charges = compute_prorated_charges(charges, lease_start, move_out_date, cursor, is_first_invoice=False)
+            gap_bills = fetch_bills(supabase, [lease_id], cursor).get(lease_id, [])
+            if gap_bills and (gap_charges or _covers_month(lease_start, move_out_date, cursor)):
+                gap_charges = apply_utility_overrides(gap_charges, gap_bills)
             gap_total = round(sum(c["amount"] for c in gap_charges), 2)
             if gap_total > 0:
                 outstanding_prior += gap_total
@@ -165,16 +277,31 @@ def compute_settlement_preview(supabase: Client, company_id: str, lease_id: str,
     final_period_charges = compute_prorated_charges(
         charges, lease_start, move_out_date, move_out_month, is_first_invoice=is_first_invoice_ever
     )
+    # Imported utility bills (electricity, gas, water) for the move-out month
+    # replace or add to the lease's own lines, exactly as on every other
+    # invoice path -- the bill is the bill, never prorated.
+    final_bills = fetch_bills(supabase, [lease_id], move_out_month).get(lease_id, [])
+    if final_bills and (final_period_charges or _covers_month(lease_start, move_out_date, move_out_month)):
+        final_period_charges = apply_utility_overrides(final_period_charges, final_bills)
     final_period_total = round(sum(c["amount"] for c in final_period_charges), 2)
 
     already_billed_this_month = float(move_out_month_invoice["total_amount"]) if move_out_month_invoice else 0.0
     already_paid_this_month = round(_invoice_balance(supabase, move_out_month_invoice) * -1 + already_billed_this_month, 2) if move_out_month_invoice else 0.0
     # ^ amount actually paid so far toward the move-out month's invoice, if one exists
 
-    total_owed_by_tenant = round(outstanding_prior + final_period_total - already_paid_this_month, 2)
+    ledger = _tenant_ledger_position(supabase, company_id, lease_id, lease["tenant_id"])
+    ledger_other_receivable = ledger["receivable_other"]
+
+    total_owed_by_tenant = round(
+        outstanding_prior + final_period_total - already_paid_this_month + ledger_other_receivable, 2
+    )
 
     deposit_agreed = float(deposit["amount_received"]) if deposit else 0.0
-    deposit_paid = _deposit_paid(supabase, deposit["id"] if deposit else None)
+    deposit_paid_in_records = _deposit_paid(supabase, deposit["id"] if deposit else None)
+    # When the ledger applies, "actually paid" is what the books hold in
+    # Security Deposits Held for this tenant -- it includes payments recorded
+    # through the deposit screen AND any opening deposit entered by journal.
+    deposit_paid = max(ledger["deposit_ledger"], 0.0) if ledger["applied"] else deposit_paid_in_records
 
     return {
         "lease": lease,
@@ -193,6 +320,11 @@ def compute_settlement_preview(supabase: Client, company_id: str, lease_id: str,
         "total_owed_by_tenant": total_owed_by_tenant,
         "deposit_agreed": deposit_agreed,
         "deposit_paid": deposit_paid,
+        "deposit_paid_in_records": deposit_paid_in_records,
+        "deposit_from_ledger_extra": round(max(deposit_paid - deposit_paid_in_records, 0.0), 2),
+        "ledger_applied": ledger["applied"],
+        "ledger_note": ledger["note"],
+        "ledger_other_receivable": ledger_other_receivable,
         "net_before_discount_and_deductions": round(deposit_paid - total_owed_by_tenant, 2),
     }
 
@@ -217,9 +349,13 @@ def _apply_final_period_invoice(
             .eq("source_type", "invoice")
             .eq("source_id", move_out_month_invoice["id"])
             .eq("status", "posted")
+            .is_("reversal_of", "null")
             .execute()
             .data
         )
+        # Only ORIGINAL entries are reversed (a reversal entry already cancels
+        # its original; reversing it again would put the cancelled amount back
+        # into the ledger) -- the same rule invoicing.py follows.
         for entry in live_entries:
             reverse_journal_entry(supabase, company_id, entry["id"], reason="Lease closed — final period recalculated")
 
@@ -378,6 +514,27 @@ def finalize_settlement(
     deposit_id = deposit["id"] if deposit else None
     deposit_paid = preview["deposit_paid"]
 
+    # A deposit that exists only in the books (entered by journal) with no
+    # deposit record: create the record so deductions and the refund have
+    # something to attach to. Its amount is exactly what the ledger holds.
+    if deposit_id is None and deposit_paid > 0.01:
+        created = (
+            supabase.table("security_deposits")
+            .insert(
+                {
+                    "company_id": company_id,
+                    "lease_id": lease_id,
+                    "amount_received": deposit_paid,
+                    "date_received": str(lease["start_date"]),
+                    "status": "held",
+                    "is_received": True,
+                }
+            )
+            .execute()
+            .data[0]
+        )
+        deposit_id = created["id"]
+
     deductions_total = 0.0
     if deposit_id and deductions:
         rows = []
@@ -496,6 +653,21 @@ def finalize_settlement(
         "show_full_detail_on_pdf": show_full_detail_on_pdf,
         "reason": reason,
         "created_by": created_by,
+        "ledger_adjustments": {
+            "applied": preview["ledger_applied"],
+            "other_receivable": preview["ledger_other_receivable"],
+            "deposit_paid_in_records": preview["deposit_paid_in_records"],
+            "deposit_from_ledger_extra": preview["deposit_from_ledger_extra"],
+        },
     }
-    saved = supabase.table("lease_settlements").insert(settlement_row).execute().data[0]
+    try:
+        saved = supabase.table("lease_settlements").insert(settlement_row).execute().data[0]
+    except Exception:
+        # The ledger_adjustments column comes from migration 021. If it has not
+        # been run yet, still save the settlement (the books are already posted
+        # at this point) -- the printed statement just won't itemize the
+        # opening-balance line until the migration is run.
+        logger.exception("lease_settlements insert with ledger_adjustments failed; retrying without it")
+        settlement_row.pop("ledger_adjustments", None)
+        saved = supabase.table("lease_settlements").insert(settlement_row).execute().data[0]
     return saved

@@ -158,6 +158,16 @@ def render_settlement_pdf(ctx: dict) -> bytes:
         c.drawString(20 * mm, y, "Outstanding from previous months")
         c.drawRightString(width - 20 * mm, y, f"Rs {float(settlement['outstanding_prior_amount']):,.0f}")
 
+        # Balances entered through the books (opening receivable, receipts
+        # against it) are itemized separately so the statement adds up.
+        ledger_adj = settlement.get("ledger_adjustments") or {}
+        other_receivable = float(ledger_adj.get("other_receivable") or 0)
+        if abs(other_receivable) >= 0.5:
+            y -= 7 * mm
+            c.setFont("Helvetica", 10)
+            c.drawString(20 * mm, y, "Opening balance & other ledger entries")
+            c.drawRightString(width - 20 * mm, y, f"Rs {other_receivable:,.0f}")
+
         final_charges = settlement.get("final_period_charges") or []
         if final_charges:
             y -= 7 * mm

@@ -20,6 +20,11 @@ type Preview = {
   total_owed_by_tenant: number;
   deposit_agreed: number;
   deposit_paid: number;
+  deposit_paid_in_records: number;
+  deposit_from_ledger_extra: number;
+  ledger_applied: boolean;
+  ledger_note: string | null;
+  ledger_other_receivable: number;
   net_before_discount_and_deductions: number;
 };
 
@@ -223,6 +228,21 @@ export default function LeaseSettlementPage() {
                     </div>
                   ))}
 
+                  {Math.abs(preview.ledger_other_receivable) >= 0.5 && (
+                    <div className="flex justify-between pt-2">
+                      <span className="text-ink/60">
+                        Opening balance &amp; other ledger entries
+                        <span className="block text-xs text-ink/40">
+                          Entered through the books (journal), not through an invoice — includes any receipts against it.
+                        </span>
+                      </span>
+                      <span className="figures">{formatPkr(preview.ledger_other_receivable)}</span>
+                    </div>
+                  )}
+                  {preview.ledger_note && (
+                    <p className="text-xs text-stamp-red pt-1">{preview.ledger_note}</p>
+                  )}
+
                   <div className="flex justify-between pt-2">
                     <span className="text-ink/60">
                       Current bill (final period, prorated to {moveOutDate})
@@ -283,6 +303,11 @@ export default function LeaseSettlementPage() {
                     <span className="text-ink/60">Actually paid</span>
                     <span className="figures">{formatPkr(preview.deposit_paid)}</span>
                   </div>
+                  {preview.deposit_from_ledger_extra >= 0.5 && (
+                    <p className="pl-4 text-xs text-ink/45">
+                      Includes {formatPkr(preview.deposit_from_ledger_extra)} entered through the books (journal).
+                    </p>
+                  )}
                 </div>
 
                 <p className="text-xs uppercase tracking-wider text-ink/45 mb-2">Deduction lines (damages, etc.)</p>
