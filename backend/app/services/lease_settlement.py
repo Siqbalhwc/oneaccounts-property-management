@@ -44,6 +44,7 @@ from app.services.ledger import (
     resolve_room_owner,
     reverse_journal_entry,
 )
+from app.services.income_allocation import split_invoice_balance_by_head
 from app.services.utility_bills import apply_utility_overrides, fetch_bills
 
 logger = logging.getLogger("app.lease_settlement")
@@ -51,6 +52,7 @@ logger = logging.getLogger("app.lease_settlement")
 # Far-future "as of" date: the settlement looks at everything the books hold
 # for the tenant, exactly like the invoice-based side looks at every invoice.
 LEDGER_AS_OF = "2100-01-01"
+INVOICES_SETTLED_FALLBACK = "Invoices settled"
 IN_CHUNK = 100
 
 
@@ -238,7 +240,9 @@ def compute_settlement_preview(supabase: Client, company_id: str, lease_id: str,
         latest_invoiced_month = inv_month if latest_invoiced_month is None else max(latest_invoiced_month, inv_month)
         if abs(balance) > 0.01:
             outstanding_prior += balance
-            prior_month_lines.append({"invoice_month": str(inv_month), "balance": balance})
+            prior_month_lines.append(
+                {"invoice_month": str(inv_month), "balance": balance, "invoice_id": inv["id"], "invoice_total": float(inv["total_amount"])}
+            )
 
     # "First invoice ever" means no invoice existed BEFORE the move-out
     # month -- not "no invoices at all", since the move-out month may
@@ -425,6 +429,110 @@ def _apply_final_period_invoice(
     return invoice
 
 
+def _build_settlement_lines(
+    supabase: Client, preview: dict, final_invoice: Optional[dict], deductions: list,
+    rent_offset: float, refund_amount: float, refund_account: Optional[dict], lease_id: str,
+) -> list[dict]:
+    """
+    What the Receipts by Head report shows for this settlement (Part 2):
+    the amount of dues cleared out of the deposit, split by income head; each
+    settlement charge; and the refund paid. Reporting only -- the journal
+    entry is posted separately and is not affected by anything here.
+
+    Dues are cleared in the same order a receipt clears them: opening balance
+    first, then invoices oldest to newest, then months never invoiced, then
+    the corrected move-out month.
+    """
+    lines: list[dict] = []
+    remaining = round(float(rent_offset or 0), 2)
+
+    def take(label_amounts: list[dict]) -> None:
+        for la in label_amounts:
+            lines.append({"kind": "invoice_settled", "label": la["label"], "amount": la["amount"], "account_id": None})
+
+    opening = max(float(preview.get("ledger_other_receivable") or 0), 0.0)
+    if remaining > 0.005 and opening > 0.005:
+        amt = round(min(remaining, opening), 2)
+        take([{"label": "Opening balance", "amount": amt}])
+        remaining = round(remaining - amt, 2)
+
+    for prior in preview.get("outstanding_prior_detail", []):
+        if remaining <= 0.005:
+            break
+        bal = float(prior["balance"])
+        if bal <= 0.005:
+            continue
+        amt = round(min(remaining, bal), 2)
+        split = split_invoice_balance_by_head(
+            supabase, prior["invoice_id"], lease_id, round(float(prior["invoice_total"]) - bal, 2), amt
+        ) or [{"label": INVOICES_SETTLED_FALLBACK, "amount": amt}]
+        take(split)
+        remaining = round(remaining - amt, 2)
+
+    for gap in preview.get("unbilled_gap_months", []):
+        if remaining <= 0.005:
+            break
+        amt = round(min(remaining, float(gap["amount"])), 2)
+        take([{"label": "Unbilled months", "amount": amt}])
+        remaining = round(remaining - amt, 2)
+
+    if remaining > 0.005:
+        final_owed = round(float(preview["final_period_total"]) - float(preview["final_period_already_paid"]), 2)
+        amt = round(min(remaining, max(final_owed, 0.0)), 2)
+        if amt > 0.005:
+            split = (
+                split_invoice_balance_by_head(
+                    supabase, final_invoice["id"], lease_id, float(preview["final_period_already_paid"]), amt
+                )
+                if final_invoice
+                else []
+            ) or [{"label": INVOICES_SETTLED_FALLBACK, "amount": amt}]
+            take(split)
+            remaining = round(remaining - amt, 2)
+
+    if remaining > 0.005:
+        take([{"label": INVOICES_SETTLED_FALLBACK, "amount": remaining}])
+
+    for d in deductions:
+        amt = round(float(d["amount"]), 2)
+        if amt > 0:
+            lines.append({"kind": "charge", "label": d["reason"], "amount": amt, "account_id": d.get("account_id")})
+
+    if refund_amount > 0.01 and refund_account:
+        lines.append({"kind": "refund_paid", "label": "Refund paid", "amount": round(refund_amount, 2), "account_id": refund_account["id"]})
+    return lines
+
+
+def _save_settlement_lines(
+    supabase: Client, company_id: str, settlement_id: str, lease_id: str, tenant_id: str, settled_on: str, lines: list[dict]
+) -> None:
+    """Best-effort, like the other reporting sub-ledgers: a failure here must
+    never undo a lease closing that has already been posted. If it fails (or
+    migration 022 has not been run), the report rebuilds this settlement from
+    its journal entry instead."""
+    if not lines:
+        return
+    try:
+        supabase.table("settlement_allocations").insert(
+            [
+                {
+                    "company_id": company_id,
+                    "settlement_id": settlement_id,
+                    "lease_id": lease_id,
+                    "tenant_id": tenant_id,
+                    "settled_on": settled_on,
+                    "kind": l["kind"],
+                    "label": l["label"],
+                    "amount": l["amount"],
+                    "account_id": l.get("account_id"),
+                }
+                for l in lines
+            ]
+        ).execute()
+    except Exception:
+        logger.exception("settlement_allocations insert failed for settlement %s", settlement_id)
+
+
 def finalize_settlement(
     supabase: Client,
     company_id: str,
@@ -438,6 +546,7 @@ def finalize_settlement(
     refund_date: Optional[date],
     reason: Optional[str],
     created_by: Optional[str],
+    refund_account_id: Optional[str] = None,
 ) -> dict:
     """
     Re-runs the same computation compute_settlement_preview() does --
@@ -449,6 +558,30 @@ def finalize_settlement(
     """
     preview = compute_settlement_preview(supabase, company_id, lease_id, move_out_date)
     lease, tenant, room = preview["lease"], preview["tenant"], preview["room"]
+
+    # If a refund will be paid out, the user must say which cash/bank account
+    # it comes from -- checked BEFORE anything is written, so a missing or
+    # invalid choice can never leave a half-closed lease behind.
+    expected_deductions = round(sum(max(float(d["amount"]), 0.0) for d in deductions), 2)
+    expected_owed = max(round(preview["total_owed_by_tenant"] - float(discount_amount or 0), 2), 0.0)
+    expected_offset = min(expected_owed, max(preview["deposit_paid"] - expected_deductions, 0.0))
+    expected_refund = round(max(preview["deposit_paid"] - expected_deductions - expected_offset, 0.0), 2)
+    refund_account = None
+    if expected_refund > 0.005:
+        if not refund_account_id:
+            raise HTTPException(status_code=400, detail="Select which cash or bank account the refund is paid from.")
+        found = (
+            supabase.table("chart_of_accounts")
+            .select("id, code, name, is_cash_or_bank")
+            .eq("id", refund_account_id)
+            .eq("company_id", company_id)
+            .execute()
+            .data
+        )
+        if not found or not found[0].get("is_cash_or_bank"):
+            raise HTTPException(status_code=400, detail="The refund must be paid from a cash or bank account.")
+        refund_account = found[0]
+
     building_id = room["building_id"] if room else None
     owner_id = resolve_room_owner(supabase, lease["room_id"])
     tenant_id = lease["tenant_id"]
@@ -562,13 +695,14 @@ def finalize_settlement(
     # receivable, not company income.
     rent_offset = min(max(total_owed_by_tenant, 0.0), max(deposit_paid - deductions_total, 0.0))
 
+    refund_amount = max(deposit_paid - deductions_total - rent_offset, 0.0)
+
     net_amount = round(deposit_paid - deductions_total - total_owed_by_tenant, 2)
     # net_amount > 0  -> refund due to tenant
     # net_amount < 0  -> tenant still owes this amount (deposit didn't cover it)
 
     if deposit_id and (deductions_total > 0 or rent_offset > 0 or net_amount > 0):
         deposits_held_id = get_account_id(supabase, company_id, "2100")
-        bank_id = get_account_id(supabase, company_id, "1000")
         ar_id = get_account_id(supabase, company_id, "1100")
         tags = {"building_id": building_id, "room_id": lease["room_id"], "owner_id": owner_id, "tenant_id": tenant_id, "lease_id": lease_id}
 
@@ -590,9 +724,8 @@ def finalize_settlement(
         if rent_offset > 0:
             lines.append({"account_id": ar_id, "direction": "credit", "amount": round(rent_offset, 2), **tags})
 
-        refund_amount = max(deposit_paid - deductions_total - rent_offset, 0.0)
         if refund_amount > 0.01:
-            lines.append({"account_id": bank_id, "direction": "credit", "amount": round(refund_amount, 2), **tags})
+            lines.append({"account_id": refund_account["id"], "direction": "credit", "amount": round(refund_amount, 2), **tags})
 
         # Same convention the existing manual refund flow uses (see
         # security_deposits.py's refund_deposit): "refunded" only when
@@ -660,6 +793,9 @@ def finalize_settlement(
             "deposit_from_ledger_extra": preview["deposit_from_ledger_extra"],
         },
     }
+    settlement_lines = _build_settlement_lines(
+        supabase, preview, final_invoice, deductions, rent_offset, refund_amount, refund_account, lease_id
+    )
     try:
         saved = supabase.table("lease_settlements").insert(settlement_row).execute().data[0]
     except Exception:
@@ -670,4 +806,8 @@ def finalize_settlement(
         logger.exception("lease_settlements insert with ledger_adjustments failed; retrying without it")
         settlement_row.pop("ledger_adjustments", None)
         saved = supabase.table("lease_settlements").insert(settlement_row).execute().data[0]
+
+    _save_settlement_lines(
+        supabase, company_id, saved["id"], lease_id, tenant_id, str(refund_date or move_out_date), settlement_lines
+    )
     return saved

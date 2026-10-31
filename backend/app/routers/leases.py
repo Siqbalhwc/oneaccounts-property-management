@@ -94,6 +94,7 @@ class SettlementFinalize(BaseModel):
     deductions: List[SettlementDeduction] = []
     show_full_detail_on_pdf: bool = True
     refund_date: Optional[date] = None
+    refund_account_id: Optional[str] = None
     reason: Optional[str] = None
 
 
@@ -1137,6 +1138,7 @@ def close_lease_with_settlement(
         refund_date=payload.refund_date,
         reason=payload.reason,
         created_by=user["user_id"],
+        refund_account_id=payload.refund_account_id,
     )
     write_audit_log(supabase, company_id, user["user_id"], "close_lease", "leases", lease_id, None, settlement)
     return settlement

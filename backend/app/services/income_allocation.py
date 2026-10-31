@@ -197,3 +197,45 @@ def allocate_payment_to_line_items(
     if rows_to_insert:
         supabase.table("payment_allocations").insert(rows_to_insert).execute()
     return rows_to_insert
+
+
+def split_invoice_balance_by_head(
+    supabase: Client,
+    invoice_id: str,
+    lease_id: Optional[str],
+    already_settled: float,
+    amount: float,
+) -> List[dict]:
+    """
+    Read-only. Says which income heads an amount settled against an invoice
+    (for example out of the security deposit at final settlement) covers.
+
+    Uses the SAME order a payment fills an invoice in (one-time charges first,
+    then smallest to largest), after first skipping what was already settled
+    (paid) on the invoice, so the split matches how a receipt would have been
+    allocated. Returns [{"label", "amount"}, ...] adding up to `amount`
+    exactly; any rounding leftover goes on the last (largest) line.
+    """
+    amount = round(float(amount or 0), 2)
+    if amount <= 0:
+        return []
+    items = _line_items_sorted_for_allocation(supabase, invoice_id, lease_id)
+    if not items:
+        return []
+    skip = round(max(float(already_settled or 0), 0.0), 2)
+    out: Dict[str, float] = {}
+    remaining = amount
+    for it in items:
+        item_total = round(float(it["amount"]), 2)
+        covered_before = min(skip, item_total)
+        skip = round(skip - covered_before, 2)
+        open_amount = round(item_total - covered_before, 2)
+        if open_amount <= 0.005 or remaining <= 0.005:
+            continue
+        take = round(min(remaining, open_amount), 2)
+        out[it["label"]] = round(out.get(it["label"], 0.0) + take, 2)
+        remaining = round(remaining - take, 2)
+    if remaining > 0.005:
+        last = items[-1]["label"]
+        out[last] = round(out.get(last, 0.0) + remaining, 2)
+    return [{"label": k, "amount": v} for k, v in out.items()]

@@ -21,6 +21,21 @@ type IncomeByHeadRow = {
   building_id: string | null;
   heads: Record<string, number>;
   total: number;
+  is_other?: boolean;
+};
+
+type SettlementRow = {
+  sr: number;
+  lease_id: string | null;
+  tenant_id: string | null;
+  tenant_name: string;
+  room_label: string;
+  settled_on: string;
+  heads: Record<string, number>;
+  settled_total: number;
+  refund_paid: number;
+  refund_account: string | null;
+  deposit_released: number;
 };
 
 type IncomeByHeadResponse = {
@@ -28,10 +43,21 @@ type IncomeByHeadResponse = {
   rows: IncomeByHeadRow[];
   totals: Record<string, number>;
   grand_total: number;
+  settlement: {
+    columns: string[];
+    rows: SettlementRow[];
+    totals: Record<string, number>;
+    settled_total: number;
+    refund_total: number;
+    deposit_released_total: number;
+  };
   reconciliation: {
-    allocated_total: number;
-    invoice_tied_cash_receipts_total: number;
+    books_total: number;
+    report_total: number;
+    gap: number;
     matches: boolean;
+    by_source: { source: string; books: number; report: number }[];
+    unsplit_invoice_receipts: number;
     note: string;
   };
 };
@@ -51,8 +77,10 @@ type Receipt = {
 
 type DrilldownResponse = { receipts: Receipt[]; total: number };
 
+// Plain number: the page says "Amounts in Rs" once, top right, instead of
+// repeating "Rs" on every figure.
 function formatPkr(n: number) {
-  return `Rs ${Number(n || 0).toLocaleString("en-PK")}`;
+  return Number(n || 0).toLocaleString("en-PK");
 }
 
 
@@ -71,7 +99,7 @@ export default function IncomeByHeadPage() {
   const [backfillMessage, setBackfillMessage] = useState<string | null>(null);
 
   const [drilldown, setDrilldown] = useState<{
-    row: IncomeByHeadRow;
+    row: { tenant_name: string; room_label: string };
     label: string;
     data: DrilldownResponse | null;
     loading: boolean;
@@ -101,7 +129,20 @@ export default function IncomeByHeadPage() {
     setDrilldown({ row, label, data: null, loading: true });
     const params = new URLSearchParams({ label, date_from: dateFrom, date_to: dateTo });
     if (row.lease_id) params.set("lease_id", row.lease_id);
-    else if (row.tenant_id) params.set("tenant_id", row.tenant_id);
+    if (row.tenant_id) params.set("tenant_id", row.tenant_id);
+    try {
+      const result = await api.get<DrilldownResponse>(`/reports/income-by-head/drilldown?${params.toString()}`);
+      setDrilldown({ row, label, data: result, loading: false });
+    } catch (err: any) {
+      setDrilldown(null);
+      setError(err.message);
+    }
+  }
+
+  async function openSettlementCell(row: SettlementRow, label: string) {
+    if (!row.lease_id) return;
+    setDrilldown({ row, label, data: null, loading: true });
+    const params = new URLSearchParams({ label, date_from: row.settled_on, date_to: row.settled_on, part: "settlement", lease_id: row.lease_id });
     try {
       const result = await api.get<DrilldownResponse>(`/reports/income-by-head/drilldown?${params.toString()}`);
       setDrilldown({ row, label, data: result, loading: false });
@@ -140,13 +181,17 @@ export default function IncomeByHeadPage() {
         <div>
           <h1 className="text-2xl font-display font-semibold">Receipts by Head</h1>
           <p className="text-sm text-ink/55 mt-1">
-            What was actually collected (cash/bank) against each income head on tenants&apos; invoices —
-            click any amount to see the receipt(s) behind it.
+            Every cash and bank receipt for the period — by income head, security deposit and advance / opening
+            balance — plus what was settled from security deposits at final settlement. Click any amount to see
+            what is behind it.
           </p>
         </div>
-        <Button variant="ghost" onClick={() => window.print()} className="no-print">
-          <Printer size={16} className="mr-1.5 inline" /> Print
-        </Button>
+        <div className="flex flex-col items-end gap-1">
+          <Button variant="ghost" onClick={() => window.print()} className="no-print">
+            <Printer size={16} className="mr-1.5 inline" /> Print
+          </Button>
+          <span className="text-xs italic text-ink/55">Amounts in Rs</span>
+        </div>
       </div>
 
       <PrintHeader company={company} reportTitle="Receipts by Head" />
@@ -190,29 +235,44 @@ export default function IncomeByHeadPage() {
       {data && !data.reconciliation.matches && (
         <Card className="border-brass/40 no-print">
           <p className="text-sm text-ink/70">
-            <span className="font-medium text-brass-dark">Heads up:</span> allocated total (
-            {formatPkr(data.reconciliation.allocated_total)}) doesn&apos;t yet match invoice-tied cash
-            receipts for this period ({formatPkr(data.reconciliation.invoice_tied_cash_receipts_total)}).
-            This almost always means some receipts were recorded before this report existed and haven&apos;t
-            been split by head yet.
+            <span className="font-medium text-brass-dark">Heads up:</span> this report ({formatPkr(data.reconciliation.report_total)})
+            does not match the cash and bank books for the same dates ({formatPkr(data.reconciliation.books_total)}) —
+            difference {formatPkr(data.reconciliation.gap)}.
           </p>
-          <div className="mt-3 flex items-center gap-3">
-            <Button variant="secondary" onClick={runBackfill} disabled={backfilling}>
-              {backfilling ? "Backfilling…" : "Backfill historical receipts"}
-            </Button>
-            {backfillMessage && <p className="text-xs text-ink/55">{backfillMessage}</p>}
-          </div>
+          <ul className="mt-2 text-xs text-ink/60 space-y-0.5">
+            {data.reconciliation.by_source.map((b) => (
+              <li key={b.source}>
+                {b.source}: books {formatPkr(b.books)} · report {formatPkr(b.report)}
+              </li>
+            ))}
+          </ul>
+          <p className="text-xs text-ink/45 mt-2">{data.reconciliation.note}</p>
+          {data.reconciliation.unsplit_invoice_receipts !== 0 && (
+            <div className="mt-3 flex items-center gap-3">
+              <Button variant="secondary" onClick={runBackfill} disabled={backfilling}>
+                {backfilling ? "Backfilling…" : "Backfill historical receipts"}
+              </Button>
+              {backfillMessage && <p className="text-xs text-ink/55">{backfillMessage}</p>}
+            </div>
+          )}
         </Card>
       )}
 
+      {data && data.reconciliation.matches && (
+        <p className="text-xs text-stamp-green no-print">
+          Matches the cash and bank books for these dates: {formatPkr(data.reconciliation.books_total)}.
+        </p>
+      )}
+
       <Card>
+        <h2 className="text-sm font-semibold mb-1">Part 1 — Cash and bank receipts</h2>
         <p className="text-xs text-ink/45 mb-3 no-print">
           Click any amount below to see exactly which receipt(s) — and which bank/cash account(s) — made it up.
         </p>
         <DataTable
           keyField="sr"
           rows={rows}
-          emptyMessage="No receipts recorded against any invoice in this period."
+          emptyMessage="No cash or bank receipts in this period."
           columns={[
             { header: "Sr", accessor: (r) => r.sr },
             { header: "Tenant", accessor: (r) => <span className="font-medium">{r.tenant_name}</span> },
@@ -253,6 +313,76 @@ export default function IncomeByHeadPage() {
         )}
       </Card>
 
+      {data && data.settlement.rows.length > 0 && (
+        <Card>
+          <h2 className="text-sm font-semibold mb-1">Part 2 — Settled at final settlement (from security deposit, not cash)</h2>
+          <p className="text-xs text-ink/45 mb-3">
+            Dues and charges cleared out of the tenant&apos;s security deposit when the lease was closed. No cash or bank
+            money moved for these except the refund paid. Deposit released = settled + refund paid.
+          </p>
+          <DataTable
+            keyField="sr"
+            rows={data.settlement.rows}
+            emptyMessage="No final settlements in this period."
+            columns={[
+              { header: "Sr", accessor: (r) => r.sr },
+              { header: "Tenant", accessor: (r) => <span className="font-medium">{r.tenant_name}</span> },
+              { header: L("Apartment"), accessor: (r) => r.room_label },
+              { header: "Date", accessor: (r) => r.settled_on },
+              ...data.settlement.columns.map((c) => ({
+                header: c,
+                accessor: (r: SettlementRow) =>
+                  r.heads[c] ? (
+                    <button
+                      onClick={() => openSettlementCell(r, c)}
+                      className="figures underline decoration-dotted decoration-ink/30 hover:decoration-ink hover:text-brass-dark no-print-underline"
+                    >
+                      {formatPkr(r.heads[c])}
+                    </button>
+                  ) : (
+                    <span className="text-ink/30">—</span>
+                  ),
+                align: "right" as const,
+              })),
+              { header: "Settled", accessor: (r) => <span className="figures font-semibold">{formatPkr(r.settled_total)}</span>, align: "right" },
+              {
+                header: "Refund paid",
+                accessor: (r) =>
+                  r.refund_paid ? (
+                    <button
+                      onClick={() => openSettlementCell(r, "Refund paid")}
+                      className="figures underline decoration-dotted decoration-ink/30 hover:decoration-ink hover:text-brass-dark no-print-underline"
+                      title={r.refund_account ?? undefined}
+                    >
+                      {formatPkr(r.refund_paid)}
+                    </button>
+                  ) : (
+                    <span className="text-ink/30">—</span>
+                  ),
+                align: "right",
+              },
+              { header: "Deposit released", accessor: (r) => <span className="figures font-semibold">{formatPkr(r.deposit_released)}</span>, align: "right" },
+            ]}
+          />
+          <div className="flex flex-wrap justify-end gap-6 pt-3 mt-3 border-t border-border text-sm font-medium">
+            {data.settlement.columns.map((c) => (
+              <span key={c}>
+                {c}: <span className="figures">{formatPkr(data.settlement.totals[c] ?? 0)}</span>
+              </span>
+            ))}
+            <span>
+              Settled: <span className="figures">{formatPkr(data.settlement.settled_total)}</span>
+            </span>
+            <span>
+              Refund paid: <span className="figures">{formatPkr(data.settlement.refund_total)}</span>
+            </span>
+            <span>
+              Deposit released: <span className="figures">{formatPkr(data.settlement.deposit_released_total)}</span>
+            </span>
+          </div>
+        </Card>
+      )}
+
       <Modal
         open={!!drilldown}
         onClose={() => setDrilldown(null)}
@@ -260,7 +390,7 @@ export default function IncomeByHeadPage() {
       >
         <div className="space-y-3">
           <p className="text-xs text-ink/50">
-            {drilldown?.row.room_label} — every bank/cash receipt that makes up this amount.
+            {drilldown?.row.room_label} — everything that makes up this amount.
           </p>
           {drilldown?.loading && <p className="text-sm text-ink/45">Loading…</p>}
           {drilldown?.data && (

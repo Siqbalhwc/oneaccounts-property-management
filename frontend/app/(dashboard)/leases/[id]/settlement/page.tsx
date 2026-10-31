@@ -53,6 +53,7 @@ export default function LeaseSettlementPage() {
 
   const [discountAmount, setDiscountAmount] = useState("");
   const [discountAccountId, setDiscountAccountId] = useState("");
+  const [refundAccountId, setRefundAccountId] = useState("");
   const [discountReason, setDiscountReason] = useState("");
 
   const [deductions, setDeductions] = useState<DeductionLine[]>([]);
@@ -114,7 +115,11 @@ export default function LeaseSettlementPage() {
 
   const discountNeedsAccount = discountNum > 0 && !discountAccountId;
   const deductionsNeedAccount = deductions.some((d) => (parseFloat(d.amount) || 0) > 0 && !d.account_id);
-  const canSubmit = !!preview && !previewLoading && !discountNeedsAccount && !deductionsNeedAccount && !submitting;
+  const cashBankAccounts = accounts.filter((a) => a.is_cash_or_bank);
+  const refundDue = projectedNet > 0.005;
+  const refundNeedsAccount = refundDue && !refundAccountId;
+  const canSubmit =
+    !!preview && !previewLoading && !discountNeedsAccount && !deductionsNeedAccount && !refundNeedsAccount && !submitting;
 
   async function handleFinalize() {
     if (!canSubmit) return;
@@ -130,6 +135,7 @@ export default function LeaseSettlementPage() {
           .filter((d) => (parseFloat(d.amount) || 0) > 0)
           .map((d) => ({ reason: d.reason, amount: parseFloat(d.amount), account_id: d.account_id })),
         show_full_detail_on_pdf: showFullDetail,
+        refund_account_id: refundDue ? refundAccountId : undefined,
         reason: closeReason || undefined,
       });
       setDoneSettlementId(result.id);
@@ -387,6 +393,25 @@ export default function LeaseSettlementPage() {
                   {formatPkr(Math.abs(projectedNet))}
                 </p>
                 <p className="text-xs text-ink/50 mt-1">Deposit paid − deductions − discount − amount owed</p>
+                {refundDue && (
+                  <div className="mt-4">
+                    <Field label="Refund paid from (cash or bank account)">
+                      <Select value={refundAccountId} onChange={(e) => setRefundAccountId(e.target.value)}>
+                        <option value="">Select the account the refund is paid from…</option>
+                        {cashBankAccounts.map((a) => (
+                          <option key={a.id} value={a.id}>
+                            {a.code} · {a.name}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                    {cashBankAccounts.length === 0 && (
+                      <p className="text-xs text-stamp-red mt-1">
+                        No cash or bank accounts are marked in your Chart of Accounts. Mark them there first.
+                      </p>
+                    )}
+                  </div>
+                )}
               </Card>
 
               {submitError && <p className="text-sm text-stamp-red">{submitError}</p>}
