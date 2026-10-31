@@ -25,7 +25,7 @@ import it), so there is no circular import.
 """
 
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
 from supabase import Client
@@ -50,6 +50,22 @@ def label_key(label) -> str:
 
 def is_utility_label(label) -> bool:
     return label_key(label) in UTILITY_KEYS
+
+
+def lease_overlaps_month(lease_start: date, lease_end: date, month_start: date) -> bool:
+    """
+    True when the lease is in force for at least one day of the month. An
+    uploaded bill is only ever invoiced for a month the lease actually covers,
+    even when the lease has no other charge left to bill that month (for
+    example a tenant whose rent and other charges were all ended, but who still
+    pays utilities). Pure function, no database access.
+    """
+    next_month = date(
+        month_start.year + (1 if month_start.month == 12 else 0),
+        1 if month_start.month == 12 else month_start.month + 1,
+        1,
+    )
+    return max(lease_start, month_start) <= min(lease_end, next_month - timedelta(days=1))
 
 
 def apply_utility_overrides(lines: list[dict], bills: list[dict]) -> list[dict]:

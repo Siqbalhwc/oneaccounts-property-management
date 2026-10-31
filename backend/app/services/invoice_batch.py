@@ -42,7 +42,7 @@ from supabase import Client
 from app.core.labels import get_unit
 from app.services.invoicing import compute_prorated_charges, merge_current_charges
 from app.services.ledger import UnbalancedJournalEntry
-from app.services.utility_bills import apply_utility_overrides, fetch_bills
+from app.services.utility_bills import apply_utility_overrides, fetch_bills, lease_overlaps_month
 
 PAGE_SIZE = 1000        # PostgREST silently caps any read at 1000 rows
 IN_CHUNK = 100          # max ids per .in_() filter (keeps URL length safe)
@@ -230,17 +230,21 @@ def _generate_slice_bulk(
             result["skipped"].append(lid)
             continue
         charges = merge_current_charges(charges_by_lease.get(lid, []))
-        if not charges:
+        if not charges and not bills_by_lease.get(lid):
             result["skipped"].append(lid)
             continue
+        lease_start = date.fromisoformat(str(lease["start_date"]))
+        lease_end = date.fromisoformat(str(lease["end_date"]))
         prorated = compute_prorated_charges(
             charges,
-            date.fromisoformat(str(lease["start_date"])),
-            date.fromisoformat(str(lease["end_date"])),
+            lease_start,
+            lease_end,
             invoice_month,
             is_first_invoice=lid not in has_any,
         )
-        if not prorated:
+        # A lease with no charge left to bill this month is still invoiced for
+        # an uploaded utility bill, provided the lease covers the month.
+        if not prorated and not (bills_by_lease.get(lid) and lease_overlaps_month(lease_start, lease_end, invoice_month)):
             result["skipped"].append(lid)
             continue
         if bills_by_lease.get(lid):

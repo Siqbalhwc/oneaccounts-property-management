@@ -16,7 +16,7 @@ from supabase import Client
 
 from app.core.labels import get_unit
 from app.services.ledger import get_account_for_charge_label, get_account_id, post_journal_entry, reverse_journal_entry
-from app.services.utility_bills import apply_utility_overrides, fetch_bills
+from app.services.utility_bills import apply_utility_overrides, fetch_bills, lease_overlaps_month
 
 # An invoice can be recalculated only while nobody has paid against it:
 # draft = not sent yet, sent = sent to the tenant (e.g. on WhatsApp).
@@ -260,7 +260,11 @@ def _recalculate_invoice(
     lease_start = date.fromisoformat(str(lease["start_date"]))
     lease_end = date.fromisoformat(str(lease["end_date"]))
     prorated = compute_prorated_charges(charges, lease_start, lease_end, month_start, is_first_invoice)
-    if prorated:
+    # Uploaded utility bills are applied even when the lease has no other
+    # charge left to bill this month (all its charges ended), as long as the
+    # lease itself covers the month -- otherwise the bill would be saved but
+    # never reach the invoice or the ledger.
+    if prorated or lease_overlaps_month(lease_start, lease_end, month_start):
         bills = fetch_bills(supabase, [lease["id"]], month_start).get(lease["id"], [])
         if bills:
             prorated = apply_utility_overrides(prorated, bills)
