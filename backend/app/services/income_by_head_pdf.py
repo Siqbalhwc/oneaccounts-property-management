@@ -37,7 +37,7 @@ WHITE = colors.white
 
 
 def _fmt(n: float) -> str:
-    """Plain number -- the report says "Amounts in Rs" once, top right, instead
+    """Plain number -- the report says "Amounts in Rupees" once, top right, instead
     of repeating "Rs" in every cell."""
     try:
         return f"{float(n):,.0f}"
@@ -121,7 +121,7 @@ def render_income_by_head_pdf(
         subtitle_bits.append(building_name)
     title_table = Table(
         [[[Paragraph("Receipts by Head", styles["report_title"]), Paragraph(" — ".join(subtitle_bits), styles["report_meta"])],
-          Paragraph("Amounts in Rs", styles["amounts_in"])]],
+          Paragraph("Amounts in Rupees", styles["amounts_in"])]],
         colWidths=[page_w - 2 * margin - 40 * mm, 40 * mm],
     )
     title_table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0)]))
@@ -144,7 +144,7 @@ def render_income_by_head_pdf(
     tenant_w = 40 * mm
     room_w = 40 * mm
     remaining = usable_width - sr_w - tenant_w - room_w
-    n_numeric_cols = len(columns) + 1  # + Total
+    n_numeric_cols = len(columns) + 3  # + Total received, Paid against security, Net
     numeric_w = remaining / max(n_numeric_cols, 1)
     col_widths = [sr_w, tenant_w, room_w] + [numeric_w] * n_numeric_cols
 
@@ -169,7 +169,7 @@ def render_income_by_head_pdf(
     header_row = (
         [Paragraph("Sr", styles["th"]), Paragraph("Tenant", styles["th"]), Paragraph(unit_from_company(company)["singular"], styles["th"])]
         + [Paragraph(c, styles["th_r"]) for c in columns]
-        + [Paragraph("Total", styles["th_r"])]
+        + [Paragraph("Total received", styles["th_r"]), Paragraph("Paid against security", styles["th_r"]), Paragraph("Net", styles["th_r"])]
     )
 
     table_data = [header_row]
@@ -183,12 +183,19 @@ def render_income_by_head_pdf(
             amount = r["heads"].get(c, 0)
             row_cells.append(Paragraph(_fmt(amount) if amount else "—", styles["cell_r"] if amount else styles["cell_r_dim"]))
         row_cells.append(Paragraph(_fmt(r["total"]), styles["total_cell_r"]))
+        paid = r.get("paid_against_security", 0)
+        row_cells.append(Paragraph(_fmt(paid) if paid else "—", styles["cell_r"] if paid else styles["cell_r_dim"]))
+        row_cells.append(Paragraph(_fmt(r.get("net", r["total"])), styles["total_cell_r"]))
         table_data.append(row_cells)
 
     totals_row = (
         [Paragraph("", styles["cell"]), Paragraph("Total", styles["total_cell"]), Paragraph("", styles["cell"])]
         + [Paragraph(_fmt(totals.get(c, 0)), styles["total_cell_r"]) for c in columns]
-        + [Paragraph(_fmt(report["grand_total"]), styles["total_cell_r"])]
+        + [
+            Paragraph(_fmt(report["grand_total"]), styles["total_cell_r"]),
+            Paragraph(_fmt(report.get("paid_total", 0)), styles["total_cell_r"]),
+            Paragraph(_fmt(report.get("net_total", report["grand_total"])), styles["total_cell_r"]),
+        ]
     )
     table_data.append(totals_row)
 
@@ -220,11 +227,15 @@ def render_income_by_head_pdf(
     recon = report.get("reconciliation") or {}
     story.append(Spacer(1, 3 * mm))
     if recon.get("matches", True):
-        recon_text = f"Matches the cash and bank books for the period: {_fmt(recon.get('books_total', report['grand_total']))}."
+        recon_text = (
+            f"Matches the cash and bank books for the period: received {_fmt(recon.get('books_total', report['grand_total']))}, "
+            f"paid against security {_fmt(recon.get('paid_books', 0))}."
+        )
     else:
         recon_text = (
-            f"Does not yet match the cash and bank books: report {_fmt(recon.get('report_total', 0))}, "
-            f"books {_fmt(recon.get('books_total', 0))}, difference {_fmt(recon.get('gap', 0))}."
+            f"Does not yet match the cash and bank books: received {_fmt(recon.get('report_total', 0))} vs books "
+            f"{_fmt(recon.get('books_total', 0))} (difference {_fmt(recon.get('gap', 0))}); paid against security "
+            f"{_fmt(recon.get('paid_report', 0))} vs books {_fmt(recon.get('paid_books', 0))} (difference {_fmt(recon.get('paid_gap', 0))})."
         )
     story.append(Paragraph(recon_text, styles["footer"]))
 

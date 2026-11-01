@@ -54,6 +54,9 @@ export default function LeaseSettlementPage() {
   const [discountAmount, setDiscountAmount] = useState("");
   const [discountAccountId, setDiscountAccountId] = useState("");
   const [refundAccountId, setRefundAccountId] = useState("");
+  const [receivedAmount, setReceivedAmount] = useState("");
+  const [receivedTouched, setReceivedTouched] = useState(false);
+  const [receivedAccountId, setReceivedAccountId] = useState("");
   const [discountReason, setDiscountReason] = useState("");
 
   const [deductions, setDeductions] = useState<DeductionLine[]>([]);
@@ -118,8 +121,22 @@ export default function LeaseSettlementPage() {
   const cashBankAccounts = accounts.filter((a) => a.is_cash_or_bank);
   const refundDue = projectedNet > 0.005;
   const refundNeedsAccount = refundDue && !refundAccountId;
+  // Deposit (after charges) is less than what is owed: the tenant pays the rest now.
+  const shortfall = projectedNet < -0.005 ? Math.round(-projectedNet * 100) / 100 : 0;
+  const receivedNum = shortfall > 0 ? Math.min(parseFloat(receivedAmount) || 0, shortfall) : 0;
+  const receivedNeedsAccount = receivedNum > 0.005 && !receivedAccountId;
+  const stillOwedAfter = Math.max(Math.round((shortfall - receivedNum) * 100) / 100, 0);
+  useEffect(() => {
+    if (!receivedTouched) setReceivedAmount(shortfall > 0 ? String(shortfall) : "");
+  }, [shortfall, receivedTouched]);
   const canSubmit =
-    !!preview && !previewLoading && !discountNeedsAccount && !deductionsNeedAccount && !refundNeedsAccount && !submitting;
+    !!preview &&
+    !previewLoading &&
+    !discountNeedsAccount &&
+    !deductionsNeedAccount &&
+    !refundNeedsAccount &&
+    !receivedNeedsAccount &&
+    !submitting;
 
   async function handleFinalize() {
     if (!canSubmit) return;
@@ -136,6 +153,8 @@ export default function LeaseSettlementPage() {
           .map((d) => ({ reason: d.reason, amount: parseFloat(d.amount), account_id: d.account_id })),
         show_full_detail_on_pdf: showFullDetail,
         refund_account_id: refundDue ? refundAccountId : undefined,
+        received_amount: receivedNum > 0.005 ? receivedNum : undefined,
+        received_account_id: receivedNum > 0.005 ? receivedAccountId : undefined,
         reason: closeReason || undefined,
       });
       setDoneSettlementId(result.id);
@@ -393,6 +412,40 @@ export default function LeaseSettlementPage() {
                   {formatPkr(Math.abs(projectedNet))}
                 </p>
                 <p className="text-xs text-ink/50 mt-1">Deposit paid − deductions − discount − amount owed</p>
+                {shortfall > 0 && (
+                  <div className="mt-4 space-y-3">
+                    <Field label="Received from tenant now">
+                      <AmountInput
+                        value={receivedAmount}
+                        onChange={(e) => {
+                          setReceivedTouched(true);
+                          setReceivedAmount(e.target.value);
+                        }}
+                        placeholder="0"
+                      />
+                    </Field>
+                    <Field label="Received into (cash or bank account)">
+                      <Select value={receivedAccountId} onChange={(e) => setReceivedAccountId(e.target.value)}>
+                        <option value="">Select the account the money is received into…</option>
+                        {cashBankAccounts.map((a) => (
+                          <option key={a.id} value={a.id}>
+                            {a.code} · {a.name}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                    {cashBankAccounts.length === 0 && (
+                      <p className="text-xs text-stamp-red">
+                        No cash or bank accounts are marked in your Chart of Accounts. Mark them there first.
+                      </p>
+                    )}
+                    {stillOwedAfter > 0.005 && (
+                      <p className="text-xs text-stamp-red">
+                        {formatPkr(stillOwedAfter)} will remain owed by the tenant after closing.
+                      </p>
+                    )}
+                  </div>
+                )}
                 {refundDue && (
                   <div className="mt-4">
                     <Field label="Refund paid from (cash or bank account)">

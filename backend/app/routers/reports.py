@@ -12,6 +12,7 @@ from app.services.ledger import get_account_id, get_tenant_account_balance_as_of
 from app.services.receipts_report import (
     ADVANCE_LABEL,
     OTHER_LABEL,
+    PAID_LABEL,
     SECURITY_LABEL,
     build_receipts_report,
     drilldown_settlement,
@@ -753,7 +754,7 @@ def income_by_head_drilldown(
     try:
         if part == "settlement" and lease_id:
             return drilldown_settlement(supabase, label, date_from, date_to, lease_id)
-        if label in (SECURITY_LABEL, ADVANCE_LABEL, OTHER_LABEL):
+        if label in (SECURITY_LABEL, ADVANCE_LABEL, OTHER_LABEL, PAID_LABEL):
             return drilldown_special(supabase, label, date_from, date_to, lease_id, tenant_id)
         if not lease_id and not tenant_id:
             return {"receipts": [], "total": 0.0}

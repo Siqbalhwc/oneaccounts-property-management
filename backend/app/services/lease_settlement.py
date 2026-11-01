@@ -25,6 +25,7 @@ recalculated in the browser.
 """
 
 import logging
+import uuid
 from datetime import date, timedelta
 from typing import Optional, TypedDict
 
@@ -44,7 +45,7 @@ from app.services.ledger import (
     resolve_room_owner,
     reverse_journal_entry,
 )
-from app.services.income_allocation import split_invoice_balance_by_head
+from app.services.income_allocation import allocate_payment_to_line_items, split_invoice_balance_by_head
 from app.services.utility_bills import apply_utility_overrides, fetch_bills
 
 logger = logging.getLogger("app.lease_settlement")
@@ -429,9 +430,104 @@ def _apply_final_period_invoice(
     return invoice
 
 
+def _dues_segments(preview: dict, final_invoice: Optional[dict]) -> list[dict]:
+    """
+    What the tenant owed at settlement, in the order a receipt clears it:
+    opening balance first, then invoices oldest to newest, then months that
+    were never invoiced, then the corrected move-out month. Each segment:
+    {kind: opening|invoice|gap, invoice_id, invoice_total, balance, label}.
+    """
+    segments: list[dict] = []
+    opening = round(max(float(preview.get("ledger_other_receivable") or 0), 0.0), 2)
+    if opening > 0.005:
+        segments.append({"kind": "opening", "invoice_id": None, "invoice_total": 0.0, "balance": opening, "label": "Opening balance"})
+    for prior in preview.get("outstanding_prior_detail", []):
+        bal = round(float(prior["balance"]), 2)
+        if bal > 0.005:
+            segments.append(
+                {"kind": "invoice", "invoice_id": prior["invoice_id"], "invoice_total": float(prior["invoice_total"]), "balance": bal, "label": prior["invoice_month"]}
+            )
+    for gap in preview.get("unbilled_gap_months", []):
+        amt = round(float(gap["amount"]), 2)
+        if amt > 0.005:
+            segments.append({"kind": "gap", "invoice_id": None, "invoice_total": 0.0, "balance": amt, "label": "Unbilled months"})
+    if final_invoice:
+        final_owed = round(float(preview["final_period_total"]) - float(preview["final_period_already_paid"]), 2)
+        if final_owed > 0.005:
+            segments.append(
+                {"kind": "invoice", "invoice_id": final_invoice["id"], "invoice_total": float(preview["final_period_total"]), "balance": final_owed, "label": "final month"}
+            )
+    return segments
+
+
+def _record_settlement_cash(
+    supabase: Client, company_id: str, lease_id: str, tenant_id: str, amount: float,
+    account: dict, payment_date: str, preview: dict, final_invoice: Optional[dict],
+) -> None:
+    """
+    Records the money received at settlement as ordinary payments, oldest
+    dues first -- the same order Receive Payment uses. Payments only (no
+    journal entry of their own): the bank debit is already in the settlement
+    entry. Invoices fully covered become 'paid', others 'partial'. Allocation
+    by income head is written exactly as for any receipt, so Receipts by Head
+    shows it. Best-effort after the books are posted: a failure here is logged
+    and shows up as a difference in the report's cash-book check.
+    """
+    group_id = str(uuid.uuid4())
+    method = "cash" if "cash" in (account.get("name") or "").lower() else "bank_transfer"
+    remaining = round(amount, 2)
+    try:
+        for seg in _dues_segments(preview, final_invoice):
+            if remaining <= 0.005:
+                break
+            take = round(min(remaining, seg["balance"]), 2)
+            if take <= 0:
+                continue
+            note = "Received at final settlement" + (
+                " (applied to opening balance)" if seg["kind"] == "opening" else " (applied to unbilled months)" if seg["kind"] == "gap" else ""
+            )
+            row = {
+                "company_id": company_id,
+                "invoice_id": seg["invoice_id"],
+                "tenant_id": tenant_id,
+                "amount": take,
+                "discount_amount": 0,
+                "account_id": account["id"],
+                "payment_date": payment_date,
+                "payment_method": method,
+                "notes": note,
+                "receipt_group_id": group_id,
+            }
+            payment = supabase.table("payments").insert(row).execute().data[0]
+            remaining = round(remaining - take, 2)
+            if seg["invoice_id"]:
+                try:
+                    allocate_payment_to_line_items(supabase, company_id, payment["id"], seg["invoice_id"], tenant_id, lease_id, take, 0.0)
+                except Exception:
+                    logger.exception("allocation failed for settlement payment %s", payment["id"])
+                inv_rows = supabase.table("payments").select("amount, discount_amount").eq("invoice_id", seg["invoice_id"]).execute().data
+                settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in inv_rows)
+                inv = supabase.table("invoices").select("total_amount").eq("id", seg["invoice_id"]).single().execute().data
+                new_status = "paid" if inv and settled >= float(inv["total_amount"]) - 0.01 else "partial"
+                supabase.table("invoices").update({"status": new_status}).eq("id", seg["invoice_id"]).execute()
+        if remaining > 0.005:
+            # Cannot happen (received is capped at what is owed), but never
+            # lose track of money that came in: keep it as an advance.
+            supabase.table("payments").insert(
+                {
+                    "company_id": company_id, "invoice_id": None, "tenant_id": tenant_id, "amount": remaining,
+                    "discount_amount": 0, "account_id": account["id"], "payment_date": payment_date,
+                    "payment_method": method, "notes": "Received at final settlement (advance)", "receipt_group_id": group_id,
+                }
+            ).execute()
+    except Exception:
+        logger.exception("could not record settlement cash payments for lease %s", lease_id)
+
+
 def _build_settlement_lines(
     supabase: Client, preview: dict, final_invoice: Optional[dict], deductions: list,
     rent_offset: float, refund_amount: float, refund_account: Optional[dict], lease_id: str,
+    cash_received: float = 0.0,
 ) -> list[dict]:
     """
     What the Receipts by Head report shows for this settlement (Part 2):
@@ -439,59 +535,39 @@ def _build_settlement_lines(
     settlement charge; and the refund paid. Reporting only -- the journal
     entry is posted separately and is not affected by anything here.
 
-    Dues are cleared in the same order a receipt clears them: opening balance
-    first, then invoices oldest to newest, then months never invoiced, then
-    the corrected move-out month.
+    Dues are walked in the order a receipt clears them. Cash received at
+    settlement clears the oldest dues first (those heads appear in Part 1, as
+    payments); the deposit then clears the next ones (those heads appear
+    here), so no head is ever claimed twice.
     """
     lines: list[dict] = []
-    remaining = round(float(rent_offset or 0), 2)
 
     def take(label_amounts: list[dict]) -> None:
         for la in label_amounts:
             lines.append({"kind": "invoice_settled", "label": la["label"], "amount": la["amount"], "account_id": None})
 
-    opening = max(float(preview.get("ledger_other_receivable") or 0), 0.0)
-    if remaining > 0.005 and opening > 0.005:
-        amt = round(min(remaining, opening), 2)
-        take([{"label": "Opening balance", "amount": amt}])
-        remaining = round(remaining - amt, 2)
-
-    for prior in preview.get("outstanding_prior_detail", []):
-        if remaining <= 0.005:
+    cash_left = round(float(cash_received or 0), 2)
+    offset_left = round(float(rent_offset or 0), 2)
+    for seg in _dues_segments(preview, final_invoice):
+        if offset_left <= 0.005:
             break
-        bal = float(prior["balance"])
-        if bal <= 0.005:
+        bal = seg["balance"]
+        cash_part = round(min(cash_left, bal), 2)
+        cash_left = round(cash_left - cash_part, 2)
+        offset_part = round(min(offset_left, bal - cash_part), 2)
+        if offset_part <= 0.005:
             continue
-        amt = round(min(remaining, bal), 2)
-        split = split_invoice_balance_by_head(
-            supabase, prior["invoice_id"], lease_id, round(float(prior["invoice_total"]) - bal, 2), amt
-        ) or [{"label": INVOICES_SETTLED_FALLBACK, "amount": amt}]
+        if seg["kind"] == "invoice":
+            split = split_invoice_balance_by_head(
+                supabase, seg["invoice_id"], lease_id, round(seg["invoice_total"] - bal + cash_part, 2), offset_part
+            ) or [{"label": INVOICES_SETTLED_FALLBACK, "amount": offset_part}]
+        else:
+            split = [{"label": seg["label"], "amount": offset_part}]
         take(split)
-        remaining = round(remaining - amt, 2)
+        offset_left = round(offset_left - offset_part, 2)
 
-    for gap in preview.get("unbilled_gap_months", []):
-        if remaining <= 0.005:
-            break
-        amt = round(min(remaining, float(gap["amount"])), 2)
-        take([{"label": "Unbilled months", "amount": amt}])
-        remaining = round(remaining - amt, 2)
-
-    if remaining > 0.005:
-        final_owed = round(float(preview["final_period_total"]) - float(preview["final_period_already_paid"]), 2)
-        amt = round(min(remaining, max(final_owed, 0.0)), 2)
-        if amt > 0.005:
-            split = (
-                split_invoice_balance_by_head(
-                    supabase, final_invoice["id"], lease_id, float(preview["final_period_already_paid"]), amt
-                )
-                if final_invoice
-                else []
-            ) or [{"label": INVOICES_SETTLED_FALLBACK, "amount": amt}]
-            take(split)
-            remaining = round(remaining - amt, 2)
-
-    if remaining > 0.005:
-        take([{"label": INVOICES_SETTLED_FALLBACK, "amount": remaining}])
+    if offset_left > 0.005:
+        take([{"label": INVOICES_SETTLED_FALLBACK, "amount": offset_left}])
 
     for d in deductions:
         amt = round(float(d["amount"]), 2)
@@ -547,6 +623,8 @@ def finalize_settlement(
     reason: Optional[str],
     created_by: Optional[str],
     refund_account_id: Optional[str] = None,
+    received_amount: float = 0.0,
+    received_account_id: Optional[str] = None,
 ) -> dict:
     """
     Re-runs the same computation compute_settlement_preview() does --
@@ -582,6 +660,32 @@ def finalize_settlement(
             raise HTTPException(status_code=400, detail="The refund must be paid from a cash or bank account.")
         refund_account = found[0]
 
+    # Money the tenant hands over now because the deposit does not cover what
+    # is owed. It can never exceed that shortfall, and it needs a cash/bank
+    # account to land in. Also checked before anything is written.
+    expected_shortfall = round(expected_owed - expected_offset, 2)
+    received_amount = round(max(float(received_amount or 0), 0.0), 2)
+    received_account = None
+    if received_amount > 0.005:
+        if received_amount > expected_shortfall + 0.01:
+            raise HTTPException(
+                status_code=400,
+                detail=f"The amount received ({received_amount:,.0f}) can't be more than what is still owed after the deposit ({max(expected_shortfall, 0):,.0f}).",
+            )
+        if not received_account_id:
+            raise HTTPException(status_code=400, detail="Select which cash or bank account the money is received into.")
+        found_recv = (
+            supabase.table("chart_of_accounts")
+            .select("id, code, name, is_cash_or_bank")
+            .eq("id", received_account_id)
+            .eq("company_id", company_id)
+            .execute()
+            .data
+        )
+        if not found_recv or not found_recv[0].get("is_cash_or_bank"):
+            raise HTTPException(status_code=400, detail="The money must be received into a cash or bank account.")
+        received_account = found_recv[0]
+
     building_id = room["building_id"] if room else None
     owner_id = resolve_room_owner(supabase, lease["room_id"])
     tenant_id = lease["tenant_id"]
@@ -606,9 +710,11 @@ def finalize_settlement(
 
     total_owed_by_tenant = preview["total_owed_by_tenant"]
 
-    # --- Discount: reduces what the tenant owes. Dr [chosen account] / Cr
-    # Accounts Receivable -- a write-off, not cash moving. ---
-    if discount_amount and discount_amount > 0:
+    # --- Discount: reduces what the tenant owes. Written off, not cash moving.
+    # It is posted inside the ONE combined settlement entry below
+    # (Dr [chosen account] / Cr Accounts Receivable). ---
+    discount = round(float(discount_amount or 0), 2)
+    if discount > 0:
         if not discount_account_id:
             raise HTTPException(status_code=400, detail="Select which account the discount should be charged to.")
         account = (
@@ -621,23 +727,7 @@ def finalize_settlement(
         )
         if not account.data:
             raise HTTPException(status_code=404, detail="Discount account not found")
-
-        ar_id = get_account_id(supabase, company_id, "1100")
-        tags = {"building_id": building_id, "room_id": lease["room_id"], "owner_id": owner_id, "tenant_id": tenant_id, "lease_id": lease_id}
-        post_journal_entry(
-            supabase,
-            company_id=company_id,
-            entry_date=str(move_out_date),
-            source_type="manual_adjustment",
-            source_id=None,
-            description=f"Move-out discount — {tenant_name}, {get_unit(supabase, company_id)['singular']} {room_label}" + (f" ({discount_reason})" if discount_reason else ""),
-            lines=[
-                {"account_id": discount_account_id, "direction": "debit", "amount": discount_amount, **tags},
-                {"account_id": ar_id, "direction": "credit", "amount": discount_amount, **tags},
-            ],
-            created_by=created_by,
-        )
-        total_owed_by_tenant = round(total_owed_by_tenant - discount_amount, 2)
+        total_owed_by_tenant = round(total_owed_by_tenant - discount, 2)
 
     # --- Security deposit: itemized deductions (each to its own account),
     # then refund whatever's left after both deductions AND outstanding
@@ -693,39 +783,59 @@ def finalize_settlement(
     # deposit, exactly like a deduction -- credited to Accounts Receivable
     # instead of an income account, since this is clearing a real
     # receivable, not company income.
-    rent_offset = min(max(total_owed_by_tenant, 0.0), max(deposit_paid - deductions_total, 0.0))
+    rent_offset = round(min(max(total_owed_by_tenant, 0.0), max(deposit_paid - deductions_total, 0.0)), 2)
+    shortfall = round(max(total_owed_by_tenant, 0.0) - rent_offset, 2)
+    received = round(min(received_amount, max(shortfall, 0.0)), 2)
 
-    refund_amount = max(deposit_paid - deductions_total - rent_offset, 0.0)
+    refund_amount = round(max(deposit_paid - deductions_total - rent_offset, 0.0), 2)
 
-    net_amount = round(deposit_paid - deductions_total - total_owed_by_tenant, 2)
     # net_amount > 0  -> refund due to tenant
-    # net_amount < 0  -> tenant still owes this amount (deposit didn't cover it)
+    # net_amount < 0  -> tenant still owes this amount after the deposit and
+    #                    after anything received now
+    net_amount = round(deposit_paid - deductions_total - total_owed_by_tenant + received, 2)
 
-    if deposit_id and (deductions_total > 0 or rent_offset > 0 or net_amount > 0):
+    entry_date = str(refund_date or move_out_date)
+
+    # ONE journal entry for the whole settlement:
+    #   Dr [cash/bank]            money received now (deposit short of dues)
+    #   Dr Security Deposits Held the whole deposit
+    #   Dr [discount account]     discount (if any)
+    #   Cr Accounts Receivable    everything cleared (offset + received + discount)
+    #   Cr [charge accounts]      each deduction (if any)
+    #   Cr [cash/bank]            refund (only when the deposit is more than dues)
+    if deposit_paid > 0.01 or received > 0.01 or discount > 0.01:
         deposits_held_id = get_account_id(supabase, company_id, "2100")
         ar_id = get_account_id(supabase, company_id, "1100")
         tags = {"building_id": building_id, "room_id": lease["room_id"], "owner_id": owner_id, "tenant_id": tenant_id, "lease_id": lease_id}
 
-        lines = [{"account_id": deposits_held_id, "direction": "debit", "amount": deposit_paid, **tags}]
+        lines = []
+        if received > 0.01:
+            lines.append({"account_id": received_account["id"], "direction": "debit", "amount": received, **tags})
+        if deposit_paid > 0.01:
+            lines.append({"account_id": deposits_held_id, "direction": "debit", "amount": round(deposit_paid, 2), **tags})
+        if discount > 0.01:
+            lines.append({"account_id": discount_account_id, "direction": "debit", "amount": discount, **tags})
+
+        ar_credit = round(rent_offset + received + discount, 2)
+        if ar_credit > 0.01:
+            lines.append({"account_id": ar_id, "direction": "credit", "amount": ar_credit, **tags})
 
         # Group deduction amounts by account (falling back to Other Income
         # for any deduction that didn't specify one), one credit line per
         # account rather than one line per deduction.
         by_account: dict[str, float] = {}
-        for d in deductions:
-            amt = float(d["amount"])
-            if amt <= 0:
-                continue
-            acct = d.get("account_id") or get_account_id(supabase, company_id, "4100")
-            by_account[acct] = by_account.get(acct, 0.0) + amt
+        if deposit_id:
+            for d in deductions:
+                amt = float(d["amount"])
+                if amt <= 0:
+                    continue
+                acct = d.get("account_id") or get_account_id(supabase, company_id, "4100")
+                by_account[acct] = by_account.get(acct, 0.0) + amt
         for acct_id, amt in by_account.items():
             lines.append({"account_id": acct_id, "direction": "credit", "amount": round(amt, 2), **tags})
 
-        if rent_offset > 0:
-            lines.append({"account_id": ar_id, "direction": "credit", "amount": round(rent_offset, 2), **tags})
-
         if refund_amount > 0.01:
-            lines.append({"account_id": refund_account["id"], "direction": "credit", "amount": round(refund_amount, 2), **tags})
+            lines.append({"account_id": refund_account["id"], "direction": "credit", "amount": refund_amount, **tags})
 
         # Same convention the existing manual refund flow uses (see
         # security_deposits.py's refund_deposit): "refunded" only when
@@ -739,20 +849,30 @@ def finalize_settlement(
         post_journal_entry(
             supabase,
             company_id=company_id,
-            entry_date=str(refund_date or move_out_date),
+            entry_date=entry_date,
             source_type="security_deposit_refund",
             source_id=deposit_id,
             description=f"Security deposit settled at move-out — {tenant_name}",
             lines=lines,
             created_by=created_by,
         )
-        supabase.table("security_deposits").update(
-            {
-                "amount_refunded": refund_amount,
-                "date_refunded": str(refund_date or move_out_date),
-                "status": status,
-            }
-        ).eq("id", deposit_id).execute()
+        if deposit_id:
+            supabase.table("security_deposits").update(
+                {
+                    "amount_refunded": refund_amount,
+                    "date_refunded": entry_date,
+                    "status": status,
+                }
+            ).eq("id", deposit_id).execute()
+
+        # The cash part is also recorded as ordinary payments against the
+        # invoices (no second journal entry -- the bank debit is already in
+        # the entry above), so those invoices show as paid and the receipt
+        # appears in Receipts by Head by income head.
+        if received > 0.01:
+            _record_settlement_cash(
+                supabase, company_id, lease_id, tenant_id, received, received_account, entry_date, preview, final_invoice
+            )
 
     # --- Close the lease itself ---
     supabase.table("leases").update(
@@ -794,7 +914,7 @@ def finalize_settlement(
         },
     }
     settlement_lines = _build_settlement_lines(
-        supabase, preview, final_invoice, deductions, rent_offset, refund_amount, refund_account, lease_id
+        supabase, preview, final_invoice, deductions, rent_offset, refund_amount, refund_account, lease_id, received
     )
     try:
         saved = supabase.table("lease_settlements").insert(settlement_row).execute().data[0]
@@ -808,6 +928,6 @@ def finalize_settlement(
         saved = supabase.table("lease_settlements").insert(settlement_row).execute().data[0]
 
     _save_settlement_lines(
-        supabase, company_id, saved["id"], lease_id, tenant_id, str(refund_date or move_out_date), settlement_lines
+        supabase, company_id, saved["id"], lease_id, tenant_id, entry_date, settlement_lines
     )
     return saved

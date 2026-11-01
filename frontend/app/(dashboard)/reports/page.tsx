@@ -8,6 +8,7 @@ import { Select, Field, Input, AmountInput } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { PrintHeader } from "@/components/ui/PrintHeader";
+import ReceiptsByHeadReport from "@/components/reports/ReceiptsByHeadReport";
 import { api, Tenant, Lease, Room, Building, Invoice, Company, fetchPdfBlob, downloadFile } from "@/lib/api";
 import { useLabels } from "@/lib/labels";
 import { firstOfMonthYmd, monthKeyOf, todayYmd } from "@/lib/dates";
@@ -82,45 +83,10 @@ type CollectionVsExpenseRow = {
   month: string;
   amount_billed_to_tenants: number;
 };
-type IncomeByHeadRow = {
-  sr: number;
-  lease_id: string | null;
-  tenant_id: string | null;
-  tenant_name: string;
-  room_id: string | null;
-  room_label: string;
-  building_id: string | null;
-  heads: Record<string, number>;
-  total: number;
-};
-type IncomeByHeadResponse = {
-  columns: string[];
-  rows: IncomeByHeadRow[];
-  totals: Record<string, number>;
-  grand_total: number;
-  reconciliation: {
-    allocated_total: number;
-    invoice_tied_cash_receipts_total: number;
-    matches: boolean;
-    note: string;
-  };
-};
-type IncomeByHeadReceipt = {
-  payment_id: string;
-  invoice_id: string;
-  invoice_number: string | null;
-  invoice_month: string | null;
-  payment_date: string;
-  payment_method: string | null;
-  account_id: string | null;
-  account_name: string;
-  notes: string | null;
-  amount: number;
-};
-type IncomeByHeadDrilldown = { receipts: IncomeByHeadReceipt[]; total: number };
-
+// Plain number -- every report on this page says "Amounts in Rupees" once, top
+// right, instead of repeating "Rs" on each figure.
 function formatPkr(n: number) {
-  return `Rs ${Number(n || 0).toLocaleString("en-PK")}`;
+  return Number(n || 0).toLocaleString("en-PK");
 }
 function monthLabel(dateStr: string) {
   const [y, m] = (dateStr || "").split("-").map(Number);
@@ -202,22 +168,6 @@ export default function ReportsPage() {
   const [deductions, setDeductions] = useState<{ reason: string; amount: string }[]>([]);
 
   const today = new Date();
-  const [ibhDateFrom, setIbhDateFrom] = useState(firstOfMonthYmd());
-  const [ibhDateTo, setIbhDateTo] = useState(todayYmd());
-  const [ibhBuildingFilter, setIbhBuildingFilter] = useState("");
-  const [ibhData, setIbhData] = useState<IncomeByHeadResponse | null>(null);
-  const [ibhLoading, setIbhLoading] = useState(false);
-  const [ibhError, setIbhError] = useState<string | null>(null);
-  const [ibhBackfilling, setIbhBackfilling] = useState(false);
-  const [ibhBackfillMessage, setIbhBackfillMessage] = useState<string | null>(null);
-  const [ibhDownloadingPdf, setIbhDownloadingPdf] = useState(false);
-  const [ibhDrilldown, setIbhDrilldown] = useState<{
-    row: IncomeByHeadRow;
-    label: string;
-    data: IncomeByHeadDrilldown | null;
-    loading: boolean;
-  } | null>(null);
-
   const [roomWiseRows, setRoomWiseRows] = useState<RoomWiseRow[] | null>(null);
   const [roomWiseLoading, setRoomWiseLoading] = useState(false);
   const [roomWiseError, setRoomWiseError] = useState<string | null>(null);
@@ -325,74 +275,6 @@ export default function ReportsPage() {
       .get<{ billed_to_tenants: CollectionVsExpenseRow[] }>("/reports/collection-vs-expense")
       .then((res) => setCollectionVsExpense(res.billed_to_tenants ?? []));
   }, []);
-
-  function loadIncomeByHead() {
-    setIbhLoading(true);
-    setIbhError(null);
-    const params = new URLSearchParams({ date_from: ibhDateFrom, date_to: ibhDateTo });
-    if (ibhBuildingFilter) params.set("building_id", ibhBuildingFilter);
-    api
-      .get<IncomeByHeadResponse>(`/reports/income-by-head?${params.toString()}`)
-      .then(setIbhData)
-      .catch((err: any) => setIbhError(err.message))
-      .finally(() => setIbhLoading(false));
-  }
-
-  useEffect(() => {
-    loadIncomeByHead();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  async function openIncomeByHeadCell(row: IncomeByHeadRow, label: string) {
-    if (!row.heads[label]) return;
-    setIbhDrilldown({ row, label, data: null, loading: true });
-    const params = new URLSearchParams({ label, date_from: ibhDateFrom, date_to: ibhDateTo });
-    if (row.lease_id) params.set("lease_id", row.lease_id);
-    else if (row.tenant_id) params.set("tenant_id", row.tenant_id);
-    try {
-      const result = await api.get<IncomeByHeadDrilldown>(`/reports/income-by-head/drilldown?${params.toString()}`);
-      setIbhDrilldown({ row, label, data: result, loading: false });
-    } catch (err: any) {
-      setIbhDrilldown(null);
-      setIbhError(err.message);
-    }
-  }
-
-  async function runIncomeByHeadBackfill() {
-    setIbhBackfilling(true);
-    setIbhBackfillMessage(null);
-    try {
-      const result = await api.post<{
-        payments_processed: number;
-        payments_already_allocated: number;
-        payments_skipped_no_line_items: number;
-      }>("/reports/income-by-head/backfill");
-      setIbhBackfillMessage(
-        `Done — ${result.payments_processed} historical receipt(s) split by head just now (${result.payments_already_allocated} were already done).`
-      );
-      loadIncomeByHead();
-    } catch (err: any) {
-      setIbhBackfillMessage(`Couldn't backfill — ${err.message}`);
-    } finally {
-      setIbhBackfilling(false);
-    }
-  }
-
-  async function downloadIncomeByHeadPdf() {
-    setIbhDownloadingPdf(true);
-    try {
-      const params = new URLSearchParams({ date_from: ibhDateFrom, date_to: ibhDateTo });
-      if (ibhBuildingFilter) params.set("building_id", ibhBuildingFilter);
-      await downloadFile(
-        `/reports/income-by-head/pdf?${params.toString()}`,
-        `receipts-by-head_${ibhDateFrom}_to_${ibhDateTo}.pdf`
-      );
-    } catch (err: any) {
-      setIbhError(err.message || "Couldn't download the PDF.");
-    } finally {
-      setIbhDownloadingPdf(false);
-    }
-  }
 
   function loadRoomWise() {
     setRoomWiseLoading(true);
@@ -584,9 +466,12 @@ export default function ReportsPage() {
             Receipts by head, security deposits, tenant statements, and expense breakdowns.
           </p>
         </div>
-        <Button variant="secondary" onClick={() => window.print()} className="no-print">
-          <Printer size={15} /> Print this report
-        </Button>
+        <div className="flex flex-col items-end gap-1">
+          <Button variant="secondary" onClick={() => window.print()} className="no-print">
+            <Printer size={15} /> Print this report
+          </Button>
+          <span className="text-xs italic text-ink/55">Amounts in Rupees</span>
+        </div>
       </div>
 
       <div className="flex gap-2 border-b border-border overflow-x-auto scrollbar-hide no-print">
@@ -603,181 +488,7 @@ export default function ReportsPage() {
         ))}
       </div>
 
-      {tab === "Receipts by Head" && (
-        <div className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-5 gap-3 no-print">
-            <Field label="From">
-              <Input type="date" value={ibhDateFrom} onChange={(e) => setIbhDateFrom(e.target.value)} />
-            </Field>
-            <Field label="To">
-              <Input type="date" value={ibhDateTo} onChange={(e) => setIbhDateTo(e.target.value)} />
-            </Field>
-            <Field label="Building">
-              <Select value={ibhBuildingFilter} onChange={(e) => setIbhBuildingFilter(e.target.value)}>
-                <option value="">All buildings</option>
-                {(buildings ?? []).map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.name}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            <div className="flex items-end">
-              <Button variant="secondary" onClick={loadIncomeByHead} disabled={ibhLoading} className="w-full">
-                {ibhLoading ? "Loading…" : "Apply"}
-              </Button>
-            </div>
-            <div className="flex items-end">
-              <Button
-                variant="secondary"
-                onClick={downloadIncomeByHeadPdf}
-                disabled={ibhDownloadingPdf || !ibhData?.rows.length}
-                className="w-full"
-              >
-                {ibhDownloadingPdf ? "Preparing…" : "Download PDF (landscape)"}
-              </Button>
-            </div>
-          </div>
-
-          {ibhError && (
-            <Card className="border-stamp-red/40">
-              <p className="text-sm text-stamp-red">Couldn&apos;t reach the API — {ibhError}.</p>
-            </Card>
-          )}
-
-          {ibhData && !ibhData.reconciliation.matches && (
-            <Card className="border-brass/40 no-print">
-              <p className="text-sm text-ink/70">
-                <span className="font-medium text-brass-dark">Heads up:</span> allocated total (
-                {formatPkr(ibhData.reconciliation.allocated_total)}) doesn&apos;t yet match invoice-tied cash
-                receipts for this period ({formatPkr(ibhData.reconciliation.invoice_tied_cash_receipts_total)}).
-                This almost always means some receipts predate this report and haven&apos;t been split by
-                head yet.
-              </p>
-              <div className="mt-3 flex items-center gap-3">
-                <Button variant="secondary" onClick={runIncomeByHeadBackfill} disabled={ibhBackfilling}>
-                  {ibhBackfilling ? "Backfilling…" : "Backfill historical receipts"}
-                </Button>
-                {ibhBackfillMessage && <p className="text-xs text-ink/55">{ibhBackfillMessage}</p>}
-              </div>
-            </Card>
-          )}
-
-          <Card>
-            <div className="text-center mb-5">
-              <p className="font-display text-lg font-semibold">{company?.name || "One Accounts Properties"}</p>
-              <p className="text-sm text-ink/60">Receipts by Head</p>
-              <p className="text-xs text-ink/40 mt-0.5">
-                {ibhDateFrom} to {ibhDateTo}
-                {ibhBuildingFilter ? ` — ${buildings?.find((b) => b.id === ibhBuildingFilter)?.name ?? ""}` : ""}
-              </p>
-            </div>
-
-            <p className="text-xs text-ink/45 mb-3 no-print">
-              Click any amount to see exactly which receipt(s) — and which bank/cash account(s) — made it up.
-              Scroll sideways for more heads; Sr and Tenant stay in place.
-            </p>
-
-            {(!ibhData || ibhData.rows.length === 0) && (
-              <div className="py-12 text-center text-sm text-ink/45 border border-dashed border-border rounded-card">
-                No receipts recorded against any invoice in this period.
-              </div>
-            )}
-
-            {ibhData && ibhData.rows.length > 0 && (
-              <div className="overflow-x-auto scrollbar-brass border border-border rounded-card">
-                <table
-                  className="text-sm border-collapse"
-                  style={{ minWidth: `${420 + ibhData.columns.length * 108 + 120}px`, width: "100%" }}
-                >
-                  <thead>
-                    <tr className="bg-accent/5 border-b border-border">
-                      <th className="sticky left-0 z-10 bg-paper text-left text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 pl-3 pr-2 whitespace-nowrap w-12">
-                        Sr
-                      </th>
-                      <th className="sticky left-12 z-10 bg-paper text-left text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 pl-2 pr-4 whitespace-nowrap shadow-[2px_0_0_rgba(31,45,36,0.04)] min-w-[210px]">
-                        Tenant / Room
-                      </th>
-                      {ibhData.columns.map((c) => (
-                        <th
-                          key={c}
-                          className="text-right text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 px-3 whitespace-nowrap min-w-[100px]"
-                        >
-                          {c}
-                        </th>
-                      ))}
-                      <th className="text-right text-[11px] uppercase tracking-wider font-semibold text-ink/50 py-2.5 pl-3 pr-4 whitespace-nowrap min-w-[110px]">
-                        Total
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {ibhData.rows.map((r, i) => (
-                      <tr
-                        key={r.sr}
-                        className={`border-b border-border/60 last:border-0 hover:bg-accent/[0.02] ${
-                          i % 2 === 1 ? "bg-accent/[0.015]" : ""
-                        }`}
-                      >
-                        <td
-                          className={`sticky left-0 z-10 py-2.5 pl-3 pr-2 align-top text-ink/60 ${
-                            i % 2 === 1 ? "bg-[#fbfaf6]" : "bg-paper-card"
-                          }`}
-                        >
-                          {r.sr}
-                        </td>
-                        <td
-                          className={`sticky left-12 z-10 py-2.5 pl-2 pr-4 align-top shadow-[2px_0_0_rgba(31,45,36,0.04)] ${
-                            i % 2 === 1 ? "bg-[#fbfaf6]" : "bg-paper-card"
-                          }`}
-                        >
-                          <p className="font-medium leading-snug">{r.tenant_name}</p>
-                          <p className="text-xs text-ink/50 leading-snug">{r.room_label}</p>
-                        </td>
-                        {ibhData.columns.map((c) =>
-                          r.heads[c] ? (
-                            <td key={c} className="py-2.5 px-3 text-right align-top">
-                              <button
-                                onClick={() => openIncomeByHeadCell(r, c)}
-                                className="figures underline decoration-dotted decoration-ink/25 hover:decoration-ink hover:text-brass-dark"
-                              >
-                                {formatPkr(r.heads[c])}
-                              </button>
-                            </td>
-                          ) : (
-                            <td key={c} className="py-2.5 px-3 text-right align-top text-ink/25">
-                              —
-                            </td>
-                          )
-                        )}
-                        <td className="py-2.5 pl-3 pr-4 text-right align-top">
-                          <span className="figures font-semibold">{formatPkr(r.total)}</span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                  <tfoot>
-                    <tr className="border-t-2 border-ink/20 font-semibold">
-                      <td className="sticky left-0 z-10 bg-paper py-3 pl-3 pr-2"></td>
-                      <td className="sticky left-12 z-10 bg-paper py-3 pl-2 pr-4 shadow-[2px_0_0_rgba(31,45,36,0.04)]">
-                        Total
-                      </td>
-                      {ibhData.columns.map((c) => (
-                        <td key={c} className="py-3 px-3 text-right">
-                          <span className="figures">{formatPkr(ibhData.totals[c] ?? 0)}</span>
-                        </td>
-                      ))}
-                      <td className="py-3 pl-3 pr-4 text-right">
-                        <span className="figures text-accent">{formatPkr(ibhData.grand_total)}</span>
-                      </td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
-            )}
-          </Card>
-        </div>
-      )}
+      {tab === "Receipts by Head" && <ReceiptsByHeadReport embedded />}
 
       {tab === "Invoices vs Receipts" && (
         <div className="space-y-4">
@@ -1515,44 +1226,6 @@ export default function ReportsPage() {
             </div>
           </div>
         )}
-      </Modal>
-      <Modal
-        open={!!ibhDrilldown}
-        onClose={() => setIbhDrilldown(null)}
-        title={ibhDrilldown ? `${ibhDrilldown.label} — ${ibhDrilldown.row.tenant_name}` : "Receipts"}
-      >
-        <div className="space-y-3">
-          <p className="text-xs text-ink/50">
-            {ibhDrilldown?.row.room_label} — every bank/cash receipt that makes up this amount.
-          </p>
-          {ibhDrilldown?.loading && <p className="text-sm text-ink/45">Loading…</p>}
-          {ibhDrilldown?.data && (
-            <>
-              <div className="space-y-2">
-                {ibhDrilldown.data.receipts.map((r) => (
-                  <div
-                    key={r.payment_id}
-                    className="flex items-center justify-between border border-border rounded-card px-3 py-2.5"
-                  >
-                    <div>
-                      <p className="text-sm font-medium">{r.account_name}</p>
-                      <p className="text-xs text-ink/50">
-                        {r.payment_date}
-                        {r.payment_method ? ` · ${r.payment_method}` : ""}
-                        {r.invoice_number ? ` · Invoice ${r.invoice_number}` : ""}
-                      </p>
-                    </div>
-                    <span className="figures font-medium">{formatPkr(r.amount)}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="flex justify-between text-sm font-semibold pt-2 border-t border-border">
-                <span>Total</span>
-                <span className="figures">{formatPkr(ibhDrilldown.data.total)}</span>
-              </div>
-            </>
-          )}
-        </div>
       </Modal>
     </div>
   );
