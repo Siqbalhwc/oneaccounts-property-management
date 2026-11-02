@@ -362,7 +362,14 @@ def _apply_final_period_invoice(
         # its original; reversing it again would put the cancelled amount back
         # into the ledger) -- the same rule invoicing.py follows.
         for entry in live_entries:
-            reverse_journal_entry(supabase, company_id, entry["id"], reason="Lease closed — final period recalculated")
+            # Dated the move-out date -- the same date the corrected invoice is
+            # reposted on -- so the reversal and the repost always fall in the
+            # same period (a reversal dated "today" left the original invoice
+            # in its month and the cancellation in a later one).
+            reverse_journal_entry(
+                supabase, company_id, entry["id"],
+                reason="Lease closed — final period recalculated", entry_date=str(move_out_date),
+            )
 
         supabase.table("invoice_line_items").delete().eq("invoice_id", move_out_month_invoice["id"]).execute()
         if not final_period_charges:
@@ -465,7 +472,7 @@ def _record_settlement_receipts(
     cash: float, offset: float, discount: float,
     cash_account: Optional[dict], offset_account_id: Optional[str],
     payment_date: str, preview: dict, final_invoice: Optional[dict],
-) -> None:
+) -> list[str]:
     """
     Records what settled the tenant's dues as ordinary receipts against the
     invoices, oldest dues first -- the same order Receive Payment uses:
@@ -478,10 +485,12 @@ def _record_settlement_receipts(
     simply pays them), so the invoices show as paid, the receipt appears in
     Receipts by Head by income head, and the tenant's ledger and invoice
     balances agree. No journal entry is posted here: the single settlement
-    entry already contains them. Best-effort after the books are posted: a
-    failure is logged and shows up as a difference in the report's cash-book
-    check.
+    entry already contains them. Runs after the books are posted, so a failure
+    here cannot undo the closing -- but it is NEVER silent: the problems are
+    returned and shown to the user, who is told to review the invoices.
     """
+    problems: list[str] = []
+    created = 0
     group_id = str(uuid.uuid4())
     cash_method = "cash" if "cash" in ((cash_account or {}).get("name") or "").lower() else "bank_transfer"
     left = {"cash": round(cash, 2), "offset": round(offset, 2), "discount": round(discount, 2)}
@@ -508,6 +517,7 @@ def _record_settlement_receipts(
                 row.update({"company_id": company_id, "invoice_id": seg["invoice_id"], "tenant_id": tenant_id,
                             "payment_date": payment_date, "receipt_group_id": group_id})
                 payment = supabase.table("payments").insert(row).execute().data[0]
+                created += 1
                 left[kind] = round(left[kind] - take, 2)
                 seg_left = round(seg_left - take, 2)
                 if seg["invoice_id"]:
@@ -516,8 +526,9 @@ def _record_settlement_receipts(
                             supabase, company_id, payment["id"], seg["invoice_id"], tenant_id, lease_id,
                             row["amount"], row["discount_amount"],
                         )
-                    except Exception:
+                    except Exception as exc:
                         logger.exception("allocation failed for settlement payment %s", payment["id"])
+                        problems.append(f"Splitting a receipt by income head failed ({exc}).")
                     if seg["invoice_id"] not in touched_invoices:
                         touched_invoices.append(seg["invoice_id"])
         for invoice_id in touched_invoices:
@@ -536,8 +547,12 @@ def _record_settlement_receipts(
                     "payment_method": cash_method, "notes": "Received at final settlement (advance)", "receipt_group_id": group_id,
                 }
             ).execute()
-    except Exception:
+    except Exception as exc:
         logger.exception("could not record settlement receipts for lease %s", lease_id)
+        problems.append(f"Recording the receipts against the invoices failed ({exc}).")
+    if (cash + offset + discount) > 0.01 and created == 0 and not problems:
+        problems.append("No receipt was recorded against the invoices (nothing was found to settle).")
+    return problems
 
 
 def _build_settlement_lines(
@@ -776,6 +791,7 @@ def finalize_settlement(
     net_amount = round(deposit_paid - deductions_total - total_owed_by_tenant + received, 2)
 
     entry_date = str(refund_date or move_out_date)
+    warnings: list[str] = []
 
     # ONE journal entry for the whole settlement:
     #   Dr [cash/bank]            money received now (deposit short of dues)
@@ -854,7 +870,7 @@ def finalize_settlement(
         # settled invoices -- record them as receipts so the invoices show as
         # paid and Receipts by Head shows them by income head.
         if received > 0.01 or rent_offset > 0.01 or discount > 0.01:
-            _record_settlement_receipts(
+            warnings = _record_settlement_receipts(
                 supabase, company_id, lease_id, tenant_id, received, rent_offset, discount,
                 received_account, (refund_account or received_account or {}).get("id"),
                 entry_date, preview, final_invoice,
@@ -893,6 +909,13 @@ def finalize_settlement(
         "reason": reason,
         "created_by": created_by,
         "ledger_adjustments": {
+            # What was actually received / refunded, and into / out of which
+            # account -- printed on the statement.
+            "received_amount": received,
+            "received_account": f"{received_account['code']} · {received_account['name']}" if received_account else None,
+            "refund_amount": refund_amount,
+            "refund_account": f"{refund_account['code']} · {refund_account['name']}" if refund_account else None,
+            "still_owed": round(max(shortfall - received, 0.0), 2),
             "applied": preview["ledger_applied"],
             "other_receivable": preview["ledger_other_receivable"],
             "deposit_paid_in_records": preview["deposit_paid_in_records"],
@@ -914,4 +937,5 @@ def finalize_settlement(
     _save_settlement_lines(
         supabase, company_id, saved["id"], lease_id, tenant_id, entry_date, settlement_lines
     )
+    saved["warnings"] = warnings
     return saved

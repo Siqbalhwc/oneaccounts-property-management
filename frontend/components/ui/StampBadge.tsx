@@ -7,6 +7,7 @@ const STATUS_MAP: Record<string, { label: string; className: string }> = {
   cancelled: { label: "Cancelled", className: "stamp-terminated" },
   active: { label: "Active", className: "stamp-active" },
   terminated: { label: "Terminated", className: "stamp-terminated" },
+  settled: { label: "Settled", className: "stamp-terminated" },
   expired: { label: "Expired", className: "stamp-terminated" },
   vacant: { label: "Vacant", className: "stamp-pending" },
   occupied: { label: "Occupied", className: "stamp-active" },

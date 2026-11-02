@@ -219,12 +219,35 @@ def render_settlement_pdf(ctx: dict) -> bytes:
         c.setStrokeColorRGB(*INK)
         c.line(20 * mm, y, width - 20 * mm, y)
 
+    # What was actually received from / paid to the tenant at settlement, and
+    # through which cash or bank account.
+    adj = settlement.get("ledger_adjustments") or {}
+    received_now = float(adj.get("received_amount") or 0)
+    refund_paid = float(adj.get("refund_amount") or 0)
+    if received_now > 0.005 or refund_paid > 0.005:
+        c.setFillColorRGB(*INK)
+        if received_now > 0.005:
+            y -= 9 * mm
+            c.setFont("Helvetica", 10)
+            c.drawString(20 * mm, y, f"Received from tenant at settlement ({adj.get('received_account') or 'cash / bank'})")
+            c.drawRightString(width - 20 * mm, y, f"Rs {received_now:,.0f}")
+        if refund_paid > 0.005:
+            y -= 9 * mm
+            c.setFont("Helvetica", 10)
+            c.drawString(20 * mm, y, f"Refund paid to tenant ({adj.get('refund_account') or 'cash / bank'})")
+            c.drawRightString(width - 20 * mm, y, f"Rs {refund_paid:,.0f}")
+
     y -= 16 * mm
-    c.setFillColorRGB(*(LEDGER if is_refund else RED))
+    settled_in_full = abs(net_amount) < 0.5
+    c.setFillColorRGB(*(LEDGER if (is_refund or settled_in_full) else RED))
     c.rect(20 * mm, y - 4 * mm, width - 40 * mm, 14 * mm, fill=1, stroke=0)
     c.setFillColorRGB(1, 1, 1)
     c.setFont("Helvetica-Bold", 13)
-    label = "Net refund to tenant" if is_refund else "Net amount still owed by tenant"
+    label = (
+        "Settled in full — nothing owed, nothing to refund"
+        if settled_in_full
+        else "Net refund to tenant" if is_refund else "Net amount still owed by tenant"
+    )
     c.drawString(24 * mm, y, label)
     c.drawRightString(width - 24 * mm, y, f"Rs {abs(net_amount):,.0f}")
 

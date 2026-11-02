@@ -54,6 +54,7 @@ export default function LeaseSettlementPage() {
   const [discountAmount, setDiscountAmount] = useState("");
   const [discountAccountId, setDiscountAccountId] = useState("");
   const [refundAccountId, setRefundAccountId] = useState("");
+  const [closeWarnings, setCloseWarnings] = useState<string[]>([]);
   const [receivedAmount, setReceivedAmount] = useState("");
   const [receivedTouched, setReceivedTouched] = useState(false);
   const [receivedAccountId, setReceivedAccountId] = useState("");
@@ -143,7 +144,7 @@ export default function LeaseSettlementPage() {
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const result = await api.post<{ id: string }>(`/leases/${leaseId}/settlement`, {
+      const result = await api.post<{ id: string; warnings?: string[] }>(`/leases/${leaseId}/settlement`, {
         move_out_date: moveOutDate,
         discount_amount: discountNum,
         discount_account_id: discountAccountId || undefined,
@@ -157,6 +158,7 @@ export default function LeaseSettlementPage() {
         received_account_id: receivedNum > 0.005 ? receivedAccountId : undefined,
         reason: closeReason || undefined,
       });
+      setCloseWarnings(result.warnings ?? []);
       setDoneSettlementId(result.id);
     } catch (err: any) {
       setSubmitError(err.message);
@@ -188,12 +190,38 @@ export default function LeaseSettlementPage() {
             </h1>
             <div
               className={`inline-block px-6 py-4 rounded-card text-lg font-display font-semibold ${
-                isRefund ? "bg-accent/10 text-accent" : "bg-stamp-red/10 text-stamp-red"
+                isRefund || (shortfall > 0 && stillOwedAfter <= 0.005)
+                  ? "bg-accent/10 text-accent"
+                  : "bg-stamp-red/10 text-stamp-red"
               }`}
             >
-              {isRefund ? "Net refund to tenant" : "Net amount still owed by tenant"}
-              <div className="text-2xl mt-1 figures">{formatPkr(Math.abs(projectedNet))}</div>
+              {isRefund
+                ? "Net refund to tenant"
+                : shortfall > 0 && stillOwedAfter <= 0.005
+                ? "Settled in full — nothing owed"
+                : "Still owed by tenant after closing"}
+              <div className="text-2xl mt-1 figures">
+                {isRefund ? formatPkr(Math.abs(projectedNet)) : formatPkr(stillOwedAfter)}
+              </div>
             </div>
+            {receivedNum > 0.005 && (
+              <p className="text-sm text-ink/60">
+                Received from tenant now: <span className="figures font-medium">{formatPkr(receivedNum)}</span>
+                {accounts.find((a) => a.id === receivedAccountId)
+                  ? ` into ${accounts.find((a) => a.id === receivedAccountId)!.code} · ${accounts.find((a) => a.id === receivedAccountId)!.name}`
+                  : ""}
+              </p>
+            )}
+            {closeWarnings.length > 0 && (
+              <div className="mx-auto max-w-xl rounded-card border border-stamp-red/40 bg-stamp-red/5 px-4 py-3 text-left text-sm text-stamp-red">
+                <p className="font-medium">The lease is closed and the books are posted, but please review:</p>
+                <ul className="mt-1 list-disc pl-5 space-y-0.5">
+                  {closeWarnings.map((w, i) => (
+                    <li key={i}>{w}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div className="flex justify-center gap-2 pt-4">
               <Button variant="secondary" onClick={() => router.push("/leases")}>
                 Back to leases
@@ -407,7 +435,7 @@ export default function LeaseSettlementPage() {
               </Card>
 
               <Card className="bg-accent/5 border-accent/20">
-                <p className="text-sm font-medium">{projectedNet >= 0 ? "Net refund to tenant" : "Net amount still owed by tenant"}</p>
+                <p className="text-sm font-medium">{projectedNet >= 0 ? "Net refund to tenant" : "Owed by tenant after the deposit"}</p>
                 <p className={`text-2xl font-display font-semibold figures mt-1 ${projectedNet >= 0 ? "text-accent" : "text-stamp-red"}`}>
                   {formatPkr(Math.abs(projectedNet))}
                 </p>
@@ -439,10 +467,16 @@ export default function LeaseSettlementPage() {
                         No cash or bank accounts are marked in your Chart of Accounts. Mark them there first.
                       </p>
                     )}
-                    {stillOwedAfter > 0.005 && (
+                    {stillOwedAfter > 0.005 ? (
                       <p className="text-xs text-stamp-red">
                         {formatPkr(stillOwedAfter)} will remain owed by the tenant after closing.
                       </p>
+                    ) : (
+                      receivedNum > 0.005 && (
+                        <p className="text-xs text-stamp-green">
+                          After receiving {formatPkr(receivedNum)} the tenant is settled in full — nothing owed.
+                        </p>
+                      )
                     )}
                   </div>
                 )}

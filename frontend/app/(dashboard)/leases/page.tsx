@@ -717,7 +717,7 @@ export default function LeasesPage() {
                           <td className="py-3 pr-4 whitespace-nowrap figures">{l.end_date}</td>
                         )}
                         <td className="py-3 pr-4 whitespace-nowrap">
-                          <StampBadge status={l.status} />
+                          <StampBadge status={l.status === "terminated" ? "settled" : l.status} />
                         </td>
                         {showDepositCol && (
                           <td className="py-3 pr-4 whitespace-nowrap">
