@@ -57,6 +57,7 @@ from app.core.hooks import emit
 from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
 from app.crud.generic import write_audit_log, friendly_db_error
 from postgrest.exceptions import APIError
+from app.services.charge_heads import norm_label
 from app.services.invoice_batch import fetch_all
 from app.services.owner_tenants import ensure_owner_tenant
 from app.services.ledger import JournalLine, UnbalancedJournalEntry, post_journal_entry
@@ -1105,8 +1106,9 @@ def import_lease_charges(
     open_charges = fetch_all(
         lambda: supabase.table("lease_charges").select("id, lease_id, label, amount").eq("company_id", company_id).is_("effective_to", "null").order("id")
     )
+    # normalized name -> the name exactly as the company saved it
     mapped_labels = {
-        str(m["label"]).strip()
+        norm_label(m["label"]): str(m["label"]).strip()
         for m in fetch_all(lambda: supabase.table("charge_type_accounts").select("id, label").eq("company_id", company_id).order("id"))
     }
 
@@ -1169,6 +1171,10 @@ def import_lease_charges(
             continue
         seen_leases.add(lease["id"])
 
+        # Use the name exactly as the company saved it ("COMMISSION" -> "Commission"
+        # if that is how the charge head is set up), so spellings never drift.
+        for c in wanted:
+            c["label"] = mapped_labels.get(norm_label(c["label"]), c["label"])
         existing = charges_by_lease.get(lease["id"], [])
         by_identity = {charge_identity(c["label"]): c for c in existing}
         to_add: List[Dict[str, Any]] = []
@@ -1177,7 +1183,7 @@ def import_lease_charges(
             have = by_identity.get(charge_identity(c["label"]))
             if have is None:
                 to_add.append(c)
-                if c["label"] not in mapped_labels:
+                if norm_label(c["label"]) not in mapped_labels:
                     unmapped.add(c["label"])
             elif abs(float(have["amount"]) - c["amount"]) > 0.005:
                 notes.append(f'{c["label"]}: lease already has {float(have["amount"]):,.0f}, file says {c["amount"]:,.0f} - left unchanged')

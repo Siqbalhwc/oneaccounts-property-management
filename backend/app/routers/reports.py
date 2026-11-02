@@ -9,13 +9,14 @@ from app.core.deps import get_current_company_id, get_current_user, get_supabase
 from app.services.income_allocation import allocate_payment_to_line_items
 from app.services.invoice_receipt_comparison import build_comparison
 from app.services.ledger import get_account_id, get_tenant_account_balance_as_of
+from app.services.charge_heads import ChargeHeads
 from app.services.receipts_report import (
     ADVANCE_LABEL,
     OTHER_LABEL,
     PAID_LABEL,
     SECURITY_LABEL,
     build_receipts_report,
-    drilldown_settlement,
+    drilldown_settlement_lines,
     drilldown_special,
 )
 
@@ -739,7 +740,6 @@ def income_by_head_drilldown(
     date_to: date = Query(...),
     lease_id: Optional[str] = Query(None),
     tenant_id: Optional[str] = Query(None),
-    part: str = Query("receipts", description="'receipts' (cash/bank) or 'settlement' (settled from security deposit)"),
     supabase: Client = Depends(get_supabase),
 ):
     """
@@ -752,8 +752,6 @@ def income_by_head_drilldown(
     made it up.
     """
     try:
-        if part == "settlement" and lease_id:
-            return drilldown_settlement(supabase, label, date_from, date_to, lease_id)
         if label in (SECURITY_LABEL, ADVANCE_LABEL, OTHER_LABEL, PAID_LABEL):
             return drilldown_special(supabase, label, date_from, date_to, lease_id, tenant_id)
         if not lease_id and not tenant_id:
@@ -762,19 +760,24 @@ def income_by_head_drilldown(
         query = (
             supabase.table("payment_allocations")
             .select(
-                "amount, payment_id, invoice_id, "
+                "amount, label, payment_id, invoice_id, "
                 "payments(payment_date, payment_method, account_id, receipt_group_id, notes), "
                 "invoices(invoice_number, invoice_month)"
             )
             .eq("allocation_type", "cash")
-            .eq("label", label)
         )
         query = query.eq("lease_id", lease_id) if lease_id else query.eq("tenant_id", tenant_id)
         allocations = query.execute().data
 
+        # The column is one GL account's head name, which several charge names
+        # can share ("Gas" and "Gas Bill"): pick every allocation whose name
+        # resolves to that head, inside the date range.
+        heads = ChargeHeads(supabase)
         allocations = [
             a for a in allocations
-            if a.get("payments") and date_from <= date.fromisoformat(str(a["payments"]["payment_date"])) <= date_to
+            if heads.heading_for_label(a.get("label")) == label
+            and a.get("payments")
+            and date_from <= date.fromisoformat(str(a["payments"]["payment_date"])) <= date_to
         ]
 
         # Resolve the bank/cash account for every receipt: straight off the
@@ -816,6 +819,7 @@ def income_by_head_drilldown(
                 }
             )
 
+        receipts.extend(drilldown_settlement_lines(supabase, label, date_from, date_to, lease_id, tenant_id, heads))
         receipts.sort(key=lambda r: r["payment_date"])
         return {"receipts": receipts, "total": round(sum(r["amount"] for r in receipts), 2)}
     except Exception as e:

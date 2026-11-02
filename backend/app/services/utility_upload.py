@@ -38,6 +38,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from supabase import Client
 
 from app.crud.generic import write_audit_log
+from app.services.charge_heads import norm_label
 from app.services.invoice_batch import fetch_all, fetch_in
 from app.services.invoicing import EDITABLE_INVOICE_STATUSES, merge_current_charges, resync_invoice_for_month
 from app.services.utility_bills import fetch_bills, is_utility_label, label_key
@@ -313,7 +314,7 @@ def evaluate_upload(supabase: Client, rows: list[dict], bill_month: date) -> dic
     }
     existing_bills = fetch_bills(supabase, lease_ids, bill_month)
     mapped_labels = {
-        m["label"] for m in fetch_all(lambda: supabase.table("charge_type_accounts").select("id, label").order("id"))
+        norm_label(m["label"]) for m in fetch_all(lambda: supabase.table("charge_type_accounts").select("id, label").order("id"))
     }
     building_name_by_id = {b["id"]: b["name"] for b in buildings}
     room_by_id = {r["id"]: r for r in rooms}
@@ -392,7 +393,7 @@ def evaluate_upload(supabase: Client, rows: list[dict], bill_month: date) -> dic
             entry["lease_amount"] = float(matches[0]["amount"])
         else:
             resolved_label = entry["utility"]
-            if resolved_label not in mapped_labels:
+            if norm_label(resolved_label) not in mapped_labels:
                 entry["warnings"].append(
                     f'No income account is set up for "{resolved_label}", so it will post to Other Income (4100).'
                 )

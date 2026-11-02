@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api, Tenant, Room, Building, Account } from "@/lib/api";
+import { api, Tenant, Room, Building, Account, accountHeadName } from "@/lib/api";
 import { Card } from "@/components/ui/Card";
 import { Field, Input, Select, AmountInput } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
@@ -169,15 +169,15 @@ export default function NewLeasePage() {
     );
   }
 
-  // Selecting an account fills in the fee name to match it (e.g. picking
-  // "4400 · Gas Recovery Income" sets the label to "Gas Recovery Income") so
-  // the two stay in sync by default -- the label field remains a normal
-  // text input, so it can still be renamed afterward if needed.
+  // The fee name comes from the GL account and cannot be retyped: picking
+  // "4400 · Gas Recovery Income" sets the name to "Gas Recovery Income" (or
+  // the account's own report name, e.g. "Rent" for Due to Owners), so one
+  // account is never spelled several ways.
   function updateChargeAccount(index: number, accountId: string) {
     const account = accounts.find((a) => a.id === accountId);
     setCharges((prev) =>
       prev.map((c, i) =>
-        i === index ? { ...c, account_id: accountId, label: account ? account.name : c.label } : c
+        i === index ? { ...c, account_id: accountId, label: account ? accountHeadName(account) : c.label } : c
       )
     );
   }
@@ -198,11 +198,13 @@ export default function NewLeasePage() {
     setCharges((prev) =>
       prev.map((c) => {
         if (c.account_id || !c.label) return c;
-        const mapping = chargeMappings.find((m) => m.label.toLowerCase() === c.label.toLowerCase());
-        return mapping ? { ...c, account_id: mapping.account_id } : c;
+        const mapping = chargeMappings.find((m) => m.label.trim().toLowerCase() === c.label.trim().toLowerCase());
+        if (!mapping) return c;
+        const account = accounts.find((a) => a.id === mapping.account_id);
+        return { ...c, account_id: mapping.account_id, label: account ? accountHeadName(account) : c.label };
       })
     );
-  }, [chargeMappings]);
+  }, [chargeMappings, accounts]);
 
   function removeCharge(index: number) {
     setCharges((prev) => prev.filter((_, i) => i !== index));
@@ -408,16 +410,18 @@ export default function NewLeasePage() {
               losing the history of what was charged before.
             </p>
             {charges.map((c, i) => {
-              const isKnownLabel = c.label && chargeMappings.some((m) => m.label.toLowerCase() === c.label.toLowerCase());
+              const isKnownLabel = c.label && chargeMappings.some((m) => m.label.trim().toLowerCase() === c.label.trim().toLowerCase());
               return (
                 <div key={i} className="border border-border rounded-card p-3">
                   <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-start">
                     <div className="lg:col-span-3">
                       <Field label="Fee name">
                         <Input
-                          placeholder="e.g. Generator charges"
+                          placeholder="Fills in when you pick the account"
                           value={c.label}
-                          onChange={(e) => updateCharge(i, "label", e.target.value)}
+                          readOnly
+                          title="The name comes from the account you pick"
+                          className="bg-ink/[0.04] cursor-default"
                         />
                       </Field>
                     </div>

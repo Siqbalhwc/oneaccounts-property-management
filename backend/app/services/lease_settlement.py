@@ -45,7 +45,7 @@ from app.services.ledger import (
     resolve_room_owner,
     reverse_journal_entry,
 )
-from app.services.income_allocation import allocate_payment_to_line_items, split_invoice_balance_by_head
+from app.services.income_allocation import allocate_payment_to_line_items
 from app.services.utility_bills import apply_utility_overrides, fetch_bills
 
 logger = logging.getLogger("app.lease_settlement")
@@ -460,120 +460,101 @@ def _dues_segments(preview: dict, final_invoice: Optional[dict]) -> list[dict]:
     return segments
 
 
-def _record_settlement_cash(
-    supabase: Client, company_id: str, lease_id: str, tenant_id: str, amount: float,
-    account: dict, payment_date: str, preview: dict, final_invoice: Optional[dict],
+def _record_settlement_receipts(
+    supabase: Client, company_id: str, lease_id: str, tenant_id: str,
+    cash: float, offset: float, discount: float,
+    cash_account: Optional[dict], offset_account_id: Optional[str],
+    payment_date: str, preview: dict, final_invoice: Optional[dict],
 ) -> None:
     """
-    Records the money received at settlement as ordinary payments, oldest
-    dues first -- the same order Receive Payment uses. Payments only (no
-    journal entry of their own): the bank debit is already in the settlement
-    entry. Invoices fully covered become 'paid', others 'partial'. Allocation
-    by income head is written exactly as for any receipt, so Receipts by Head
-    shows it. Best-effort after the books are posted: a failure here is logged
-    and shows up as a difference in the report's cash-book check.
+    Records what settled the tenant's dues as ordinary receipts against the
+    invoices, oldest dues first -- the same order Receive Payment uses:
+
+      cash      money the tenant handed over now
+      offset    dues paid out of the tenant's own security deposit
+      discount  dues written off
+
+    All three are real settlements of what the tenant owed (the deposit
+    simply pays them), so the invoices show as paid, the receipt appears in
+    Receipts by Head by income head, and the tenant's ledger and invoice
+    balances agree. No journal entry is posted here: the single settlement
+    entry already contains them. Best-effort after the books are posted: a
+    failure is logged and shows up as a difference in the report's cash-book
+    check.
     """
     group_id = str(uuid.uuid4())
-    method = "cash" if "cash" in (account.get("name") or "").lower() else "bank_transfer"
-    remaining = round(amount, 2)
+    cash_method = "cash" if "cash" in ((cash_account or {}).get("name") or "").lower() else "bank_transfer"
+    left = {"cash": round(cash, 2), "offset": round(offset, 2), "discount": round(discount, 2)}
+    touched_invoices: list[str] = []
     try:
         for seg in _dues_segments(preview, final_invoice):
-            if remaining <= 0.005:
-                break
-            take = round(min(remaining, seg["balance"]), 2)
-            if take <= 0:
-                continue
-            note = "Received at final settlement" + (
-                " (applied to opening balance)" if seg["kind"] == "opening" else " (applied to unbilled months)" if seg["kind"] == "gap" else ""
-            )
-            row = {
-                "company_id": company_id,
-                "invoice_id": seg["invoice_id"],
-                "tenant_id": tenant_id,
-                "amount": take,
-                "discount_amount": 0,
-                "account_id": account["id"],
-                "payment_date": payment_date,
-                "payment_method": method,
-                "notes": note,
-                "receipt_group_id": group_id,
-            }
-            payment = supabase.table("payments").insert(row).execute().data[0]
-            remaining = round(remaining - take, 2)
-            if seg["invoice_id"]:
-                try:
-                    allocate_payment_to_line_items(supabase, company_id, payment["id"], seg["invoice_id"], tenant_id, lease_id, take, 0.0)
-                except Exception:
-                    logger.exception("allocation failed for settlement payment %s", payment["id"])
-                inv_rows = supabase.table("payments").select("amount, discount_amount").eq("invoice_id", seg["invoice_id"]).execute().data
-                settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in inv_rows)
-                inv = supabase.table("invoices").select("total_amount").eq("id", seg["invoice_id"]).single().execute().data
-                new_status = "paid" if inv and settled >= float(inv["total_amount"]) - 0.01 else "partial"
-                supabase.table("invoices").update({"status": new_status}).eq("id", seg["invoice_id"]).execute()
-        if remaining > 0.005:
+            seg_left = seg["balance"]
+            for kind in ("cash", "offset", "discount"):
+                take = round(min(left[kind], seg_left), 2)
+                if take <= 0.005:
+                    continue
+                if seg["kind"] != "invoice" and kind == "discount":
+                    continue  # nothing to write a discount against on an opening / unbilled balance
+                where = " (applied to opening balance)" if seg["kind"] == "opening" else " (applied to unbilled months)" if seg["kind"] == "gap" else ""
+                if kind == "cash":
+                    row = {"amount": take, "discount_amount": 0, "account_id": cash_account["id"], "payment_method": cash_method,
+                           "notes": "Received at final settlement" + where}
+                elif kind == "offset":
+                    row = {"amount": take, "discount_amount": 0, "account_id": offset_account_id, "payment_method": "other",
+                           "notes": "Paid out of security deposit at final settlement" + where}
+                else:
+                    row = {"amount": 0, "discount_amount": take, "account_id": None, "payment_method": "other",
+                           "notes": "Discount at final settlement"}
+                row.update({"company_id": company_id, "invoice_id": seg["invoice_id"], "tenant_id": tenant_id,
+                            "payment_date": payment_date, "receipt_group_id": group_id})
+                payment = supabase.table("payments").insert(row).execute().data[0]
+                left[kind] = round(left[kind] - take, 2)
+                seg_left = round(seg_left - take, 2)
+                if seg["invoice_id"]:
+                    try:
+                        allocate_payment_to_line_items(
+                            supabase, company_id, payment["id"], seg["invoice_id"], tenant_id, lease_id,
+                            row["amount"], row["discount_amount"],
+                        )
+                    except Exception:
+                        logger.exception("allocation failed for settlement payment %s", payment["id"])
+                    if seg["invoice_id"] not in touched_invoices:
+                        touched_invoices.append(seg["invoice_id"])
+        for invoice_id in touched_invoices:
+            inv_rows = supabase.table("payments").select("amount, discount_amount").eq("invoice_id", invoice_id).execute().data
+            settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in inv_rows)
+            inv = supabase.table("invoices").select("total_amount").eq("id", invoice_id).single().execute().data
+            new_status = "paid" if inv and settled >= float(inv["total_amount"]) - 0.01 else "partial"
+            supabase.table("invoices").update({"status": new_status}).eq("id", invoice_id).execute()
+        if left["cash"] > 0.005:
             # Cannot happen (received is capped at what is owed), but never
             # lose track of money that came in: keep it as an advance.
             supabase.table("payments").insert(
                 {
-                    "company_id": company_id, "invoice_id": None, "tenant_id": tenant_id, "amount": remaining,
-                    "discount_amount": 0, "account_id": account["id"], "payment_date": payment_date,
-                    "payment_method": method, "notes": "Received at final settlement (advance)", "receipt_group_id": group_id,
+                    "company_id": company_id, "invoice_id": None, "tenant_id": tenant_id, "amount": left["cash"],
+                    "discount_amount": 0, "account_id": cash_account["id"], "payment_date": payment_date,
+                    "payment_method": cash_method, "notes": "Received at final settlement (advance)", "receipt_group_id": group_id,
                 }
             ).execute()
     except Exception:
-        logger.exception("could not record settlement cash payments for lease %s", lease_id)
+        logger.exception("could not record settlement receipts for lease %s", lease_id)
 
 
 def _build_settlement_lines(
-    supabase: Client, preview: dict, final_invoice: Optional[dict], deductions: list,
-    rent_offset: float, refund_amount: float, refund_account: Optional[dict], lease_id: str,
-    cash_received: float = 0.0,
+    deductions: list, refund_amount: float, refund_account: Optional[dict],
 ) -> list[dict]:
     """
-    What the Receipts by Head report shows for this settlement (Part 2):
-    the amount of dues cleared out of the deposit, split by income head; each
-    settlement charge; and the refund paid. Reporting only -- the journal
-    entry is posted separately and is not affected by anything here.
-
-    Dues are walked in the order a receipt clears them. Cash received at
-    settlement clears the oldest dues first (those heads appear in Part 1, as
-    payments); the deposit then clears the next ones (those heads appear
-    here), so no head is ever claimed twice.
+    Reporting detail kept for each settlement: each settlement charge (income
+    taken from the deposit, with its own GL account) and the refund paid out.
+    The dues paid out of the deposit are NOT listed here -- they are recorded
+    as ordinary receipts against the invoices (see _record_settlement_receipts),
+    which is where Receipts by Head reads them from.
     """
     lines: list[dict] = []
-
-    def take(label_amounts: list[dict]) -> None:
-        for la in label_amounts:
-            lines.append({"kind": "invoice_settled", "label": la["label"], "amount": la["amount"], "account_id": None})
-
-    cash_left = round(float(cash_received or 0), 2)
-    offset_left = round(float(rent_offset or 0), 2)
-    for seg in _dues_segments(preview, final_invoice):
-        if offset_left <= 0.005:
-            break
-        bal = seg["balance"]
-        cash_part = round(min(cash_left, bal), 2)
-        cash_left = round(cash_left - cash_part, 2)
-        offset_part = round(min(offset_left, bal - cash_part), 2)
-        if offset_part <= 0.005:
-            continue
-        if seg["kind"] == "invoice":
-            split = split_invoice_balance_by_head(
-                supabase, seg["invoice_id"], lease_id, round(seg["invoice_total"] - bal + cash_part, 2), offset_part
-            ) or [{"label": INVOICES_SETTLED_FALLBACK, "amount": offset_part}]
-        else:
-            split = [{"label": seg["label"], "amount": offset_part}]
-        take(split)
-        offset_left = round(offset_left - offset_part, 2)
-
-    if offset_left > 0.005:
-        take([{"label": INVOICES_SETTLED_FALLBACK, "amount": offset_left}])
-
     for d in deductions:
         amt = round(float(d["amount"]), 2)
         if amt > 0:
             lines.append({"kind": "charge", "label": d["reason"], "amount": amt, "account_id": d.get("account_id")})
-
     if refund_amount > 0.01 and refund_account:
         lines.append({"kind": "refund_paid", "label": "Refund paid", "amount": round(refund_amount, 2), "account_id": refund_account["id"]})
     return lines
@@ -869,9 +850,14 @@ def finalize_settlement(
         # invoices (no second journal entry -- the bank debit is already in
         # the entry above), so those invoices show as paid and the receipt
         # appears in Receipts by Head by income head.
-        if received > 0.01:
-            _record_settlement_cash(
-                supabase, company_id, lease_id, tenant_id, received, received_account, entry_date, preview, final_invoice
+        # Cash received, dues paid out of the deposit, and any discount all
+        # settled invoices -- record them as receipts so the invoices show as
+        # paid and Receipts by Head shows them by income head.
+        if received > 0.01 or rent_offset > 0.01 or discount > 0.01:
+            _record_settlement_receipts(
+                supabase, company_id, lease_id, tenant_id, received, rent_offset, discount,
+                received_account, (refund_account or received_account or {}).get("id"),
+                entry_date, preview, final_invoice,
             )
 
     # --- Close the lease itself ---
@@ -913,9 +899,7 @@ def finalize_settlement(
             "deposit_from_ledger_extra": preview["deposit_from_ledger_extra"],
         },
     }
-    settlement_lines = _build_settlement_lines(
-        supabase, preview, final_invoice, deductions, rent_offset, refund_amount, refund_account, lease_id, received
-    )
+    settlement_lines = _build_settlement_lines(deductions, refund_amount, refund_account)
     try:
         saved = supabase.table("lease_settlements").insert(settlement_row).execute().data[0]
     except Exception:

@@ -36,11 +36,18 @@ ROW_ALT = colors.Color(0.965, 0.965, 0.955)
 WHITE = colors.white
 
 
+def _clip(text, n: int) -> str:
+    """One line only: longer text ends in an ellipsis (the screen shows the full text on click)."""
+    text = str(text or "—")
+    return text if len(text) <= n else text[: n - 1].rstrip() + "…"
+
+
 def _fmt(n: float) -> str:
     """Plain number -- the report says "Amounts in Rupees" once, top right, instead
     of repeating "Rs" in every cell."""
     try:
-        return f"{float(n):,.0f}"
+        r = round(float(n))
+        return f"({abs(r):,.0f})" if r < 0 else f"{r:,.0f}"
     except (TypeError, ValueError):
         return "0"
 
@@ -126,7 +133,6 @@ def render_income_by_head_pdf(
     )
     title_table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0)]))
     story.append(title_table)
-    story.append(Paragraph("Part 1 — Cash and bank receipts", styles["part"]))
 
     # ---- Table ----
     columns = report["columns"]
@@ -169,15 +175,15 @@ def render_income_by_head_pdf(
     header_row = (
         [Paragraph("Sr", styles["th"]), Paragraph("Tenant", styles["th"]), Paragraph(unit_from_company(company)["singular"], styles["th"])]
         + [Paragraph(c, styles["th_r"]) for c in columns]
-        + [Paragraph("Total received", styles["th_r"]), Paragraph("Paid against security", styles["th_r"]), Paragraph("Net", styles["th_r"])]
+        + [Paragraph("Total received", styles["th_r"]), Paragraph("Paid against security", styles["th_r"]), Paragraph("Net cash", styles["th_r"])]
     )
 
     table_data = [header_row]
     for r in rows:
         row_cells = [
             Paragraph(str(r["sr"]), styles["cell"]),
-            Paragraph(r["tenant_name"] or "—", styles["cell"]),
-            Paragraph(r["room_label"] or "—", styles["cell"]),
+            Paragraph(_clip(r["tenant_name"], 26), styles["cell"]),
+            Paragraph(_clip(r["room_label"], 24), styles["cell"]),
         ]
         for c in columns:
             amount = r["heads"].get(c, 0)
@@ -227,81 +233,13 @@ def render_income_by_head_pdf(
     recon = report.get("reconciliation") or {}
     story.append(Spacer(1, 3 * mm))
     if recon.get("matches", True):
-        recon_text = (
-            f"Matches the cash and bank books for the period: received {_fmt(recon.get('books_total', report['grand_total']))}, "
-            f"paid against security {_fmt(recon.get('paid_books', 0))}."
-        )
+        recon_text = f"Net cash matches the cash and bank books for the period: {_fmt(recon.get('books_net', report.get('net_total', 0)))}."
     else:
         recon_text = (
-            f"Does not yet match the cash and bank books: received {_fmt(recon.get('report_total', 0))} vs books "
-            f"{_fmt(recon.get('books_total', 0))} (difference {_fmt(recon.get('gap', 0))}); paid against security "
-            f"{_fmt(recon.get('paid_report', 0))} vs books {_fmt(recon.get('paid_books', 0))} (difference {_fmt(recon.get('paid_gap', 0))})."
+            f"Net cash does not yet match the cash and bank books: report {_fmt(recon.get('report_net', 0))} vs books "
+            f"{_fmt(recon.get('books_net', 0))} (difference {_fmt(recon.get('gap', 0))})."
         )
     story.append(Paragraph(recon_text, styles["footer"]))
-
-    settlement = report.get("settlement") or {}
-    if settlement.get("rows"):
-        story.append(Spacer(1, 6 * mm))
-        story.append(Paragraph("Part 2 — Settled at final settlement (from security deposit, not cash)", styles["part"]))
-        s_cols = settlement["columns"]
-        s_header = (
-            [Paragraph("Sr", styles["th"]), Paragraph("Tenant", styles["th"]), Paragraph(unit_from_company(company)["singular"], styles["th"])]
-            + [Paragraph(c, styles["th_r"]) for c in s_cols]
-            + [Paragraph("Settled", styles["th_r"]), Paragraph("Refund paid", styles["th_r"]), Paragraph("Deposit released", styles["th_r"])]
-        )
-        s_data = [s_header]
-        for r in settlement["rows"]:
-            cells = [
-                Paragraph(str(r["sr"]), styles["cell"]),
-                Paragraph(r["tenant_name"] or "—", styles["cell"]),
-                Paragraph(r["room_label"] or "—", styles["cell"]),
-            ]
-            for c in s_cols:
-                amount = r["heads"].get(c, 0)
-                cells.append(Paragraph(_fmt(amount) if amount else "—", styles["cell_r"] if amount else styles["cell_r_dim"]))
-            cells += [
-                Paragraph(_fmt(r["settled_total"]), styles["total_cell_r"]),
-                Paragraph(_fmt(r["refund_paid"]) if r["refund_paid"] else "—", styles["cell_r"] if r["refund_paid"] else styles["cell_r_dim"]),
-                Paragraph(_fmt(r["deposit_released"]), styles["total_cell_r"]),
-            ]
-            s_data.append(cells)
-        s_data.append(
-            [Paragraph("", styles["cell"]), Paragraph("Total", styles["total_cell"]), Paragraph("", styles["cell"])]
-            + [Paragraph(_fmt(settlement["totals"].get(c, 0)), styles["total_cell_r"]) for c in s_cols]
-            + [
-                Paragraph(_fmt(settlement["settled_total"]), styles["total_cell_r"]),
-                Paragraph(_fmt(settlement["refund_total"]), styles["total_cell_r"]),
-                Paragraph(_fmt(settlement["deposit_released_total"]), styles["total_cell_r"]),
-            ]
-        )
-        s_numeric = len(s_cols) + 3
-        s_w = (usable_width - sr_w - tenant_w - room_w) / max(s_numeric, 1)
-        s_table = Table(s_data, colWidths=[sr_w, tenant_w, room_w] + [s_w] * s_numeric, repeatRows=1)
-        s_style = [
-            ("BACKGROUND", (0, 0), (-1, 0), LEDGER),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("TOPPADDING", (0, 0), (-1, -1), 3.2 * mm),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3.2 * mm),
-            ("LEFTPADDING", (0, 0), (-1, -1), 2.5 * mm),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 2.5 * mm),
-            ("LEFTPADDING", (3, 0), (-1, -1), num_pad),
-            ("RIGHTPADDING", (3, 0), (-1, -1), num_pad),
-            ("LINEBELOW", (0, -1), (-1, -1), 1.1, LEDGER),
-            ("LINEABOVE", (0, -1), (-1, -1), 0.75, BRASS),
-            ("BACKGROUND", (0, -1), (-1, -1), PAPER),
-        ]
-        for i in range(1, len(s_data) - 1):
-            s_style.append(("LINEBELOW", (0, i), (-1, i), 0.4, colors.Color(0.85, 0.84, 0.8)))
-        s_table.setStyle(TableStyle(s_style))
-        story.append(s_table)
-        story.append(Spacer(1, 3 * mm))
-        story.append(
-            Paragraph(
-                "Part 2 amounts were cleared out of the tenant's security deposit when the lease was closed, so no cash or bank "
-                "money moved for them except the refund paid. Deposit released = settled + refund paid.",
-                styles["footer"],
-            )
-        )
 
     doc.build(story)
     buffer.seek(0)

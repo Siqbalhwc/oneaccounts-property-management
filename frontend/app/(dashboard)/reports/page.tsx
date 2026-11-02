@@ -470,7 +470,7 @@ export default function ReportsPage() {
           <Button variant="secondary" onClick={() => window.print()} className="no-print">
             <Printer size={15} /> Print this report
           </Button>
-          <span className="text-xs italic text-ink/55">Amounts in Rupees</span>
+          {tab !== "Receipts by Head" && <span className="text-xs italic text-ink/55">Amounts in Rupees</span>}
         </div>
       </div>
 
@@ -552,7 +552,7 @@ export default function ReportsPage() {
             <p className="text-xs text-ink/40 mt-3">
               Invoices are counted in the month they were billed for. Receipts are counted in the month the money was
               received (taken from the ledger, same as the dashboard&apos;s Collected figure), whichever month they paid
-              for. Amounts in Rs.
+              for. Amounts in Rupees.
             </p>
           </Card>
         </div>

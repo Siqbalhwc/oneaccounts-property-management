@@ -243,7 +243,15 @@ export type Account = {
   account_type: string;
   transfers_to_owner: boolean;
   is_cash_or_bank?: boolean;
+  // The name charge lines and report columns show for this account when it
+  // should differ from the account's own name (e.g. "Due to Owners" -> "Rent").
+  report_head_name?: string | null;
 };
+
+// The one name a charge line / report column shows for a GL account.
+export function accountHeadName(account: { name: string; report_head_name?: string | null }): string {
+  return (account.report_head_name ?? "").trim() || account.name;
+}
 
 export type SecurityDeposit = {
   id: string;

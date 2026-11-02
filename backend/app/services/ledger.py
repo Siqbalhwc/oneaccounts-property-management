@@ -12,6 +12,8 @@ drift out of sync with each other.
 from typing import Optional, TypedDict
 from supabase import Client
 
+from app.services.charge_heads import norm_label
+
 
 class UnbalancedJournalEntry(Exception):
     """Raised when a caller tries to post an entry where debits != credits.
@@ -57,15 +59,13 @@ def get_account_for_charge_label(supabase: Client, company_id: str, label: str) 
     for any label nobody's explicitly mapped yet -- an unmapped label just
     means it hasn't been configured, not that the invoice should fail.
     """
-    mapping = (
-        supabase.table("charge_type_accounts")
-        .select("account_id")
-        .eq("company_id", company_id)
-        .eq("label", label)
-        .execute()
-        .data
-    )
-    account_id = mapping[0]["account_id"] if mapping else get_account_id(supabase, company_id, "4100")
+    # Matched ignoring capital letters and extra spaces ("Commission" and
+    # "COMMISSION" are the same charge) -- an exact-match lookup silently sent
+    # near-miss spellings to Other Income.
+    wanted = norm_label(label)
+    mappings = supabase.table("charge_type_accounts").select("label, account_id").eq("company_id", company_id).execute().data or []
+    match = next((m for m in mappings if norm_label(m["label"]) == wanted), None)
+    account_id = match["account_id"] if match else get_account_id(supabase, company_id, "4100")
 
     account = (
         supabase.table("chart_of_accounts")

@@ -1,33 +1,29 @@
 """
-Receipts by Head -- the complete report.
+Receipts by Head -- the complete cash report, ONE table.
 
-PART 1 -- cash / bank receipts. Every rupee that actually hit a cash or bank
-account in the period, tenant by tenant, split into:
-  * one column per income head (from payment_allocations, as before)
-  * Security                    -- security deposit payments received
-  * Advance / opening balance   -- receipts with no invoice (paid against an
-                                   opening balance, or received in advance)
-  * Other receipts              -- cash/bank debits that are not tenant
-                                   receipts at all (e.g. a manual journal
-                                   entry), on one row of their own
-Cash received at a final settlement is an ordinary receipt here (it is in
-the settlement entry's bank debit and in the tenant's payment records).
-Money paid OUT against a security deposit (a refund, from the settlement or
-from the deposit screen) is shown beside it as "Paid against security", so
-the cash report shows both what came in against invoices and what went out
-against security, and the net.
-The grand total is checked against the cash/bank accounts in the books
-(journal) for the same period -- see "reconciliation" in the result. It works
-the same for a month or for a single day.
+Every rupee that moved through cash or bank in the period, tenant by tenant:
 
-PART 2 -- settled at final settlement (non-cash). When a lease is closed the
-invoice dues and the settlement charges are cleared out of the security
-deposit; no cash moves except the refund. These lines are reported separately
-so Part 1 can stay an exact match for the cash/bank books, while the invoice
-receipt, the charges (e.g. 1,000 electricity) and the refund paid are all still
-visible. Read from settlement_allocations (written when a lease is closed);
-settlements closed before that table existed are rebuilt from their journal
-entry, with the invoice portion as a single "Invoices settled" figure.
+  received (left of Total)
+    * one column per GL account / charge head (Rent, Electricity Recovery
+      Income, ...) -- charge names are matched ignoring capital letters and
+      spacing and shown under the one name of their GL account
+    * Security                    -- security deposit payments received
+    * Advance / opening balance   -- receipts with no invoice
+    * Other receipts              -- cash/bank debits that are not tenant
+                                     receipts at all (e.g. a manual journal)
+  Total received
+  Paid against security            -- the security deposit paid out (a refund,
+                                     or a final settlement)
+  Net cash                         -- Total received minus Paid against security
+
+A final settlement is treated exactly as the money it represents: the dues
+the tenant owed (rent, charges) are RECEIPTS, the deposit is a PAYMENT out, and
+the system nets them into one entry. Example: deposit 20,000, rent 10,000,
+charge 1,000 -> received 11,000, paid against security 20,000, net cash
+(9,000) = the 9,000 actually refunded.
+
+Net cash is checked against the cash/bank accounts in the books for the same
+dates ("reconciliation"). Works the same for a month or a single day.
 
 Read-only. Every query goes through the caller's own RLS-scoped client, so it
 can only ever see the caller's own company's rows.
@@ -40,6 +36,8 @@ from typing import Callable, Dict, List, Optional
 
 from supabase import Client
 
+from app.services.charge_heads import ChargeHeads
+
 logger = logging.getLogger("app.receipts_report")
 
 SECURITY_LABEL = "Security"
@@ -49,7 +47,7 @@ SPECIAL_LABELS = [SECURITY_LABEL, ADVANCE_LABEL, OTHER_LABEL]
 PAID_KEY = "__paid_against_security__"
 PAID_LABEL = "Paid against security"
 
-INVOICES_SETTLED_LABEL = "Invoices settled"
+INVOICES_SETTLED_LABEL = "Invoices settled (earlier)"
 SETTLEMENT_DESCRIPTION_PREFIX = "Security deposit settled at move-out"
 # A settlement entry (source "security_deposit_refund") can debit a bank/cash
 # account (money received at settlement) and credit one (the refund paid).
@@ -174,6 +172,47 @@ def _lookups(supabase: Client, lease_ids: List[str], tenant_ids: List[str]):
     return leases, rooms, buildings, tenants
 
 
+def _books_deposit_released(
+    supabase: Client, date_from: date, date_to: date, building_id: Optional[str]
+) -> List[dict]:
+    """
+    Every debit to Security Deposits Held (2100) from a security-deposit
+    refund or final-settlement entry in the period: the deposit paid out.
+    Each: {entry_id, description, entry_date, amount, lease_id, tenant_id}.
+    """
+    dep = supabase.table("chart_of_accounts").select("id").eq("code", "2100").execute().data
+    if not dep:
+        return []
+    entries = fetch_all(
+        lambda: supabase.table("journal_entries")
+        .select("id, description, entry_date")
+        .eq("source_type", REFUND_SOURCE)
+        .eq("status", "posted")
+        .is_("reversal_of", "null")
+        .gte("entry_date", str(date_from))
+        .lte("entry_date", str(date_to))
+        .order("id")
+    )
+    by_id = {e["id"]: e for e in entries}
+
+    def extra(q):
+        q = q.eq("direction", "debit").eq("account_id", dep[0]["id"])
+        if building_id:
+            q = q.eq("building_id", building_id)
+        return q.order("id")
+
+    lines = _in_chunks(supabase, "journal_lines", "id, journal_entry_id, amount, lease_id, tenant_id", "journal_entry_id", list(by_id.keys()), extra)
+    out = []
+    for l in lines:
+        e = by_id.get(l["journal_entry_id"])
+        if e:
+            out.append(
+                {"entry_id": e["id"], "description": e.get("description"), "entry_date": str(e["entry_date"]),
+                 "amount": round(float(l["amount"]), 2), "lease_id": l.get("lease_id"), "tenant_id": l.get("tenant_id")}
+            )
+    return out
+
+
 def build_receipts_report(
     supabase: Client,
     date_from: date,
@@ -181,7 +220,8 @@ def build_receipts_report(
     building_id: Optional[str],
     label_sort_key: Callable[[str], tuple],
 ) -> dict:
-    # ------------------------------------------------------------------ Part 1
+    heads = ChargeHeads(supabase)
+
     payments = fetch_all(
         lambda: supabase.table("payments")
         .select("id, invoice_id, tenant_id, amount, discount_amount, payment_date, account_id")
@@ -228,20 +268,21 @@ def build_receipts_report(
         if untied_lease[t_id]:
             lease_ids.add(untied_lease[t_id])
 
-    # Books: every cash/bank debit and credit in the period (needed up front
-    # because refunds paid against security carry their own lease/tenant).
     cash_accounts = _cash_bank_accounts(supabase)
-    books = _books_cash_lines(supabase, date_from, date_to, building_id, list(cash_accounts.keys()), "debit")
-    books_credits = _books_cash_lines(supabase, date_from, date_to, building_id, list(cash_accounts.keys()), "credit")
-    refunds = [b for b in books_credits if b["source_type"] == REFUND_SOURCE]
-    lease_ids |= {r["lease_id"] for r in refunds if r.get("lease_id")}
+    cash_ids = list(cash_accounts.keys())
+    books_in = _books_cash_lines(supabase, date_from, date_to, building_id, cash_ids, "debit")
+    books_out = [b for b in _books_cash_lines(supabase, date_from, date_to, building_id, cash_ids, "credit") if b["source_type"] == REFUND_SOURCE]
+    released = _books_deposit_released(supabase, date_from, date_to, building_id)
+    settlement_rows = [r for r in _load_settlement_data(supabase, date_from, date_to)["rows"] if r["kind"] in ("invoice_settled", "charge")]
 
-    # Settlement (Part 2) needs the same lookups, so gather its data first.
-    settlement_data = _load_settlement_data(supabase, date_from, date_to, building_id)
-    lease_ids |= {k for k in settlement_data["lease_ids"] if k}
-    tenant_ids_all = [a["tenant_id"] for a in allocations if a.get("tenant_id")] + untied_tenant_ids + [
-        t for t in settlement_data["tenant_ids"] if t
-    ] + [r["tenant_id"] for r in refunds if r.get("tenant_id")]
+    lease_ids |= {r["lease_id"] for r in released if r.get("lease_id")}
+    lease_ids |= {r["lease_id"] for r in settlement_rows if r.get("lease_id")}
+    tenant_ids_all = (
+        [a["tenant_id"] for a in allocations if a.get("tenant_id")]
+        + untied_tenant_ids
+        + [r["tenant_id"] for r in released if r.get("tenant_id")]
+        + [r["tenant_id"] for r in settlement_rows if r.get("tenant_id")]
+    )
     leases, rooms, buildings, tenants = _lookups(supabase, list(lease_ids), tenant_ids_all)
 
     grouped: Dict[str, dict] = {}
@@ -269,7 +310,7 @@ def build_receipts_report(
         row["total"] = round(row["total"] + amount, 2)
 
     for a in allocations:
-        add(a.get("lease_id"), a.get("tenant_id"), a["label"], float(a["amount"]))
+        add(a.get("lease_id"), a.get("tenant_id"), heads.heading_for_label(a["label"]), float(a["amount"]))
     for p in sd_payments:
         dep = deposits.get(p["security_deposit_id"])
         lid = dep["lease_id"] if dep else None
@@ -277,141 +318,95 @@ def build_receipts_report(
     for p in untied:
         lid = untied_lease.get(p.get("tenant_id"))
         add(lid, p.get("tenant_id"), ADVANCE_LABEL, float(p["amount"]))
-    for r in refunds:
+    # Settlement charges (income taken from the deposit) and dues paid out of
+    # the deposit by earlier-version settlements: receipts, shown by head.
+    for r in settlement_rows:
+        label = heads.heading_for_account(r["account_id"]) if (r["kind"] == "charge" and r.get("account_id")) else (
+            heads.heading_for_label(r["label"]) if r["label"] != INVOICES_SETTLED_LABEL else INVOICES_SETTLED_LABEL
+        )
+        add(r.get("lease_id"), r.get("tenant_id"), label, float(r["amount"]))
+    for r in released:
         add(r.get("lease_id"), r.get("tenant_id"), PAID_KEY, r["amount"])
 
     rows = list(grouped.values())
     if building_id:
         rows = [r for r in rows if r["building_id"] == building_id]
 
-    # -------- books: every cash/bank debit in the period, by source
     books_by_source: Dict[str, float] = defaultdict(float)
-    for b in books:
+    for b in books_in:
         books_by_source[b["source_type"]] += b["amount"]
-    books_receipts = round(sum(books_by_source.get(s, 0.0) for s in RECEIPT_SOURCES), 2)
-    books_security = round(books_by_source.get(SECURITY_SOURCE, 0.0), 2)
-    other_entries = [b for b in books if b["source_type"] not in RECEIPT_SOURCES and b["source_type"] != SECURITY_SOURCE]
+    other_entries = [b for b in books_in if b["source_type"] not in RECEIPT_SOURCES and b["source_type"] != SECURITY_SOURCE]
     books_other = round(sum(b["amount"] for b in other_entries), 2)
 
     all_columns_used = {label for r in rows for label in r["heads"].keys()}
     head_columns = sorted([c for c in all_columns_used if c not in SPECIAL_LABELS], key=label_sort_key)
 
-    other_row = None
-    if abs(books_other) > 0.004:
-        other_row = {
-            "lease_id": None,
-            "tenant_id": None,
-            "room_id": None,
-            "building_id": None,
-            "heads": {OTHER_LABEL: books_other},
-            "total": books_other,
-            "paid": 0.0,
-            "is_other": True,
-        }
-
     rows_sorted = sorted(
         rows,
         key=lambda r: (buildings.get(r["building_id"], "—"), rooms.get(r["room_id"], {}).get("room_number", "")),
     )
-    if other_row:
-        rows_sorted.append(other_row)
-
+    if abs(books_other) > 0.004:
+        rows_sorted.append(
+            {"lease_id": None, "tenant_id": None, "room_id": None, "building_id": None,
+             "heads": {OTHER_LABEL: books_other}, "total": books_other, "paid": 0.0, "is_other": True}
+        )
     columns = head_columns + [c for c in SPECIAL_LABELS if c in {l for r in rows_sorted for l in r["heads"]}]
 
     out_rows = []
     for i, r in enumerate(rows_sorted):
         if r.get("is_other"):
             out_rows.append(
-                {
-                    "sr": i + 1,
-                    "lease_id": None,
-                    "tenant_id": None,
-                    "tenant_name": "Other receipts (not from a tenant)",
-                    "room_id": None,
-                    "room_label": "—",
-                    "building_id": None,
-                    "heads": {c: r["heads"].get(c, 0.0) for c in columns},
-                    "total": r["total"],
-                    "paid_against_security": 0.0,
-                    "net": r["total"],
-                    "is_other": True,
-                }
+                {"sr": i + 1, "lease_id": None, "tenant_id": None, "tenant_name": "Other receipts (not from a tenant)",
+                 "room_id": None, "room_label": "—", "building_id": None,
+                 "heads": {c: r["heads"].get(c, 0.0) for c in columns}, "total": r["total"],
+                 "paid_against_security": 0.0, "net": r["total"], "is_other": True}
             )
             continue
         room = rooms.get(r["room_id"])
         out_rows.append(
-            {
-                "sr": i + 1,
-                "lease_id": r["lease_id"],
-                "tenant_id": r["tenant_id"],
-                "tenant_name": tenants.get(r["tenant_id"], "—"),
-                "room_id": r["room_id"],
-                "room_label": f"{buildings.get(r['building_id'], '—')} — {room['room_number']}" if room else "—",
-                "building_id": r["building_id"],
-                "heads": {c: r["heads"].get(c, 0.0) for c in columns},
-                "total": r["total"],
-                "paid_against_security": r["paid"],
-                "net": round(r["total"] - r["paid"], 2),
-                "is_other": False,
-            }
+            {"sr": i + 1, "lease_id": r["lease_id"], "tenant_id": r["tenant_id"], "tenant_name": tenants.get(r["tenant_id"], "—"),
+             "room_id": r["room_id"],
+             "room_label": f"{buildings.get(r['building_id'], '—')} — {room['room_number']}" if room else "—",
+             "building_id": r["building_id"], "heads": {c: r["heads"].get(c, 0.0) for c in columns}, "total": r["total"],
+             "paid_against_security": r["paid"], "net": round(r["total"] - r["paid"], 2), "is_other": False}
         )
 
     totals = {c: round(sum(r["heads"][c] for r in out_rows), 2) for c in columns}
     grand_total = round(sum(r["total"] for r in out_rows), 2)
     paid_total = round(sum(r["paid_against_security"] for r in out_rows), 2)
+    net_total = round(grand_total - paid_total, 2)
 
-    report_receipts = round(
-        sum(float(a["amount"]) for a in allocations if _row_visible(a.get("lease_id"), leases, rooms, building_id))
-        + sum(float(p["amount"]) for p in untied if _row_visible(untied_lease.get(p.get("tenant_id")), leases, rooms, building_id)),
-        2,
-    )
-    report_security = round(
-        sum(
-            float(p["amount"])
-            for p in sd_payments
-            if _row_visible((deposits.get(p["security_deposit_id"]) or {}).get("lease_id"), leases, rooms, building_id)
-        ),
-        2,
-    )
-    books_total = round(books_receipts + books_security + books_other, 2)
-    gap = round(books_total - grand_total, 2)
-    books_paid = round(sum(r["amount"] for r in refunds), 2)
-    paid_gap = round(books_paid - paid_total, 2)
-
+    # Net cash against the cash/bank books: money in minus the refunds paid out.
+    books_in_total = round(sum(b["amount"] for b in books_in), 2)
+    books_out_total = round(sum(b["amount"] for b in books_out), 2)
+    books_net = round(books_in_total - books_out_total, 2)
+    gap = round(books_net - net_total, 2)
     unsplit = round(sum(float(p["amount"]) for p in tied) - sum(float(a["amount"]) for a in allocations), 2)
 
     reconciliation = {
-        "books_total": books_total,
-        "report_total": grand_total,
+        "books_net": books_net,
+        "report_net": net_total,
         "gap": gap,
-        "paid_books": books_paid,
-        "paid_report": paid_total,
-        "paid_gap": paid_gap,
-        "matches": abs(gap) < 0.01 and abs(paid_gap) < 0.01,
+        "matches": abs(gap) < 0.01,
         "by_source": [
-            {"source": "Tenant receipts (incl. advance / opening balance)", "books": books_receipts, "report": report_receipts},
-            {"source": "Security deposits received", "books": books_security, "report": report_security},
-            {"source": "Other cash/bank receipts (journal)", "books": books_other, "report": books_other},
-            {"source": "Paid against security (refunds out of cash/bank)", "books": books_paid, "report": paid_total},
+            {"source": "Cash and bank received (books)", "amount": books_in_total},
+            {"source": "Cash and bank paid out as refunds (books)", "amount": books_out_total},
+            {"source": "Net cash (books)", "amount": books_net},
         ],
         "unsplit_invoice_receipts": unsplit if abs(unsplit) > 0.01 and not building_id else 0.0,
         "note": (
-            "Compared with every debit to a cash or bank account in the books for the same dates. "
-            "A difference usually means a receipt whose payment date and journal date fall in different periods, "
-            "or a receipt that has not been split by head yet."
+            "Net cash is compared with every debit and refund credit on the cash and bank accounts in the books for the "
+            "same dates. A difference usually means a receipt whose payment date and journal date fall in different "
+            "periods, or a receipt that has not been split by head yet."
         ),
     }
-
-    settlement = _build_settlement_part(settlement_data, leases, rooms, buildings, tenants, cash_accounts, building_id, label_sort_key)
-
     return {
         "columns": columns,
         "rows": out_rows,
         "totals": totals,
         "grand_total": grand_total,
         "paid_total": paid_total,
-        "net_total": round(grand_total - paid_total, 2),
-        "settlement": settlement,
+        "net_total": net_total,
         "reconciliation": reconciliation,
     }
 
@@ -424,10 +419,14 @@ def _row_visible(lease_id: Optional[str], leases: dict, rooms: dict, building_id
     return bool(room and room.get("building_id") == building_id)
 
 
-# ------------------------------------------------------------------ Part 2
-def _load_settlement_data(supabase: Client, date_from: date, date_to: date, building_id: Optional[str]) -> dict:
-    """Settlement lines for the period: from settlement_allocations where they
-    exist, otherwise rebuilt from the settlement's journal entry."""
+def _load_settlement_data(supabase: Client, date_from: date, date_to: date) -> dict:
+    """
+    Settlement lines for the period that are NOT already ordinary payments:
+    the charges (income taken from the deposit) and, for settlements closed
+    before dues paid out of the deposit were recorded as receipts, the dues
+    cleared from the deposit. Read from settlement_allocations; settlements
+    that pre-date that table are rebuilt from their journal entry.
+    """
     table_rows: List[dict] = []
     try:
         table_rows = fetch_all(
@@ -438,7 +437,6 @@ def _load_settlement_data(supabase: Client, date_from: date, date_to: date, buil
             .order("id")
         )
     except Exception:
-        # Migration 022 not run yet -- everything falls back to the journal.
         logger.exception("settlement_allocations unavailable; rebuilding settlements from the journal")
         table_rows = []
 
@@ -447,7 +445,7 @@ def _load_settlement_data(supabase: Client, date_from: date, date_to: date, buil
     entries = fetch_all(
         lambda: supabase.table("journal_entries")
         .select("id, entry_date, description")
-        .eq("source_type", "security_deposit_refund")
+        .eq("source_type", REFUND_SOURCE)
         .eq("status", "posted")
         .is_("reversal_of", "null")
         .ilike("description", f"{SETTLEMENT_DESCRIPTION_PREFIX}%")
@@ -459,16 +457,12 @@ def _load_settlement_data(supabase: Client, date_from: date, date_to: date, buil
     if entries:
         entry_by_id = {e["id"]: e for e in entries}
         lines = _in_chunks(
-            supabase,
-            "journal_lines",
-            "journal_entry_id, account_id, direction, amount, lease_id, tenant_id",
-            "journal_entry_id",
-            list(entry_by_id.keys()),
+            supabase, "journal_lines", "journal_entry_id, account_id, direction, amount, lease_id, tenant_id", "journal_entry_id", list(entry_by_id.keys())
         )
         acc_ids = list({l["account_id"] for l in lines})
         accounts = {a["id"]: a for a in _in_chunks(supabase, "chart_of_accounts", "id, code, name, is_cash_or_bank", "id", acc_ids)}
         ar_credit: Dict[str, float] = defaultdict(float)
-        other_debits: Dict[str, float] = defaultdict(float)  # cash received + discount: not cleared from the deposit
+        other_debits: Dict[str, float] = defaultdict(float)
         bases: Dict[str, dict] = {}
         for l in lines:
             e = entry_by_id[l["journal_entry_id"]]
@@ -477,25 +471,22 @@ def _load_settlement_data(supabase: Client, date_from: date, date_to: date, buil
             acct = accounts.get(l["account_id"], {})
             amount = round(float(l["amount"]), 2)
             eid = e["id"]
-            bases.setdefault(
-                eid,
-                {"lease_id": l["lease_id"], "tenant_id": l.get("tenant_id"), "settled_on": str(e["entry_date"]), "from_journal": True},
-            )
+            bases.setdefault(eid, {"lease_id": l["lease_id"], "tenant_id": l.get("tenant_id"), "settled_on": str(e["entry_date"]), "from_journal": True})
             base = {**bases[eid], "account_id": l["account_id"]}
             if l["direction"] == "debit":
                 if acct.get("code") != "2100":
                     other_debits[eid] += amount
             elif acct.get("is_cash_or_bank"):
-                fallback_rows.append({**base, "kind": "refund_paid", "label": "Refund paid", "amount": amount})
+                continue
             elif acct.get("code") == "1100":
                 ar_credit[eid] += amount
             else:
                 fallback_rows.append({**base, "kind": "charge", "label": acct.get("name") or "Charge", "amount": amount})
         for eid, total in ar_credit.items():
-            cleared_from_deposit = round(total - other_debits.get(eid, 0.0), 2)
-            if cleared_from_deposit > 0.005:
+            cleared = round(total - other_debits.get(eid, 0.0), 2)
+            if cleared > 0.005:
                 fallback_rows.append(
-                    {**bases[eid], "account_id": None, "kind": "invoice_settled", "label": INVOICES_SETTLED_LABEL, "amount": cleared_from_deposit}
+                    {**bases[eid], "account_id": None, "kind": "invoice_settled", "label": INVOICES_SETTLED_LABEL, "amount": cleared}
                 )
 
     all_rows = table_rows + fallback_rows
@@ -506,76 +497,16 @@ def _load_settlement_data(supabase: Client, date_from: date, date_to: date, buil
     }
 
 
-def _build_settlement_part(
-    data: dict, leases: dict, rooms: dict, buildings: dict, tenants: dict, cash_accounts: dict,
-    building_id: Optional[str], label_sort_key: Callable[[str], tuple],
-) -> dict:
-    grouped: Dict[str, dict] = {}
-    for r in data["rows"]:
-        lease_id = r.get("lease_id")
-        if not _row_visible(lease_id, leases, rooms, building_id):
-            continue
-        key = f"{lease_id}|{r['settled_on']}"
-        lease = leases.get(lease_id)
-        room = rooms.get(lease["room_id"]) if lease else None
-        row = grouped.setdefault(
-            key,
-            {
-                "lease_id": lease_id,
-                "tenant_id": r.get("tenant_id") or (lease["tenant_id"] if lease else None),
-                "room_id": lease["room_id"] if lease else None,
-                "building_id": room["building_id"] if room else None,
-                "settled_on": r["settled_on"],
-                "heads": {},
-                "settled_total": 0.0,
-                "refund_paid": 0.0,
-                "refund_account": None,
-            },
-        )
-        amount = float(r["amount"])
-        if r["kind"] == "refund_paid":
-            row["refund_paid"] = round(row["refund_paid"] + amount, 2)
-            acc = cash_accounts.get(r.get("account_id"))
-            if acc:
-                row["refund_account"] = f"{acc['code']} · {acc['name']}"
-        else:
-            row["heads"][r["label"]] = round(row["heads"].get(r["label"], 0.0) + amount, 2)
-            row["settled_total"] = round(row["settled_total"] + amount, 2)
-
-    columns = sorted({l for r in grouped.values() for l in r["heads"]}, key=label_sort_key)
-    ordered = sorted(
-        grouped.values(),
-        key=lambda r: (r["settled_on"], buildings.get(r["building_id"], "—"), rooms.get(r["room_id"], {}).get("room_number", "")),
-    )
-    out_rows = []
-    for i, r in enumerate(ordered):
-        room = rooms.get(r["room_id"])
-        out_rows.append(
-            {
-                "sr": i + 1,
-                "lease_id": r["lease_id"],
-                "tenant_id": r["tenant_id"],
-                "tenant_name": tenants.get(r["tenant_id"], "—"),
-                "room_label": f"{buildings.get(r['building_id'], '—')} — {room['room_number']}" if room else "—",
-                "settled_on": r["settled_on"],
-                "heads": {c: r["heads"].get(c, 0.0) for c in columns},
-                "settled_total": r["settled_total"],
-                "refund_paid": r["refund_paid"],
-                "refund_account": r["refund_account"],
-                "deposit_released": round(r["settled_total"] + r["refund_paid"], 2),
-            }
-        )
+# ---------------------------------------------------------------- Drill-down
+def _receipt_item(payment_id, date_s, method, account_id, account_name, notes, amount, invoice=None):
+    inv = invoice or {}
     return {
-        "columns": columns,
-        "rows": out_rows,
-        "totals": {c: round(sum(r["heads"][c] for r in out_rows), 2) for c in columns},
-        "settled_total": round(sum(r["settled_total"] for r in out_rows), 2),
-        "refund_total": round(sum(r["refund_paid"] for r in out_rows), 2),
-        "deposit_released_total": round(sum(r["deposit_released"] for r in out_rows), 2),
+        "payment_id": payment_id, "invoice_id": inv.get("id"), "invoice_number": inv.get("invoice_number"),
+        "invoice_month": inv.get("invoice_month"), "payment_date": str(date_s), "payment_method": method,
+        "account_id": account_id, "account_name": account_name, "notes": notes, "amount": round(float(amount), 2),
     }
 
 
-# ---------------------------------------------------------------- Drill-down
 def drilldown_special(
     supabase: Client,
     label: str,
@@ -584,8 +515,9 @@ def drilldown_special(
     lease_id: Optional[str],
     tenant_id: Optional[str],
 ) -> dict:
-    """Receipts behind a Security / Advance / Other cell. Same shape the
-    head drill-down returns, so the page renders them identically."""
+    """Receipts behind a Security / Advance / Other / Paid-against-security
+    cell. Same shape the head drill-down returns, so the page renders them
+    identically."""
     cash_accounts = _cash_bank_accounts(supabase)
 
     def account_name(account_id: Optional[str]) -> str:
@@ -600,14 +532,7 @@ def drilldown_special(
             lambda q: q.gte("payment_date", str(date_from)).lte("payment_date", str(date_to)),
         )
         for p in rows:
-            receipts.append(
-                {
-                    "payment_id": p["id"], "invoice_id": None, "invoice_number": None, "invoice_month": None,
-                    "payment_date": str(p["payment_date"]), "payment_method": "security deposit",
-                    "account_id": p.get("account_id"), "account_name": account_name(p.get("account_id")),
-                    "notes": "Security deposit received", "amount": round(float(p["amount"]), 2),
-                }
-            )
+            receipts.append(_receipt_item(p["id"], p["payment_date"], "security deposit", p.get("account_id"), account_name(p.get("account_id")), "Security deposit received", p["amount"]))
     elif label == ADVANCE_LABEL and (tenant_id or lease_id):
         t_id = tenant_id
         if not t_id and lease_id:
@@ -624,75 +549,39 @@ def drilldown_special(
                 .order("id")
             )
             for p in rows:
-                if float(p["amount"]) <= 0.004:
-                    continue
-                receipts.append(
-                    {
-                        "payment_id": p["id"], "invoice_id": None, "invoice_number": None, "invoice_month": None,
-                        "payment_date": str(p["payment_date"]), "payment_method": p.get("payment_method"),
-                        "account_id": p.get("account_id"), "account_name": account_name(p.get("account_id")),
-                        "notes": p.get("notes"), "amount": round(float(p["amount"]), 2),
-                    }
-                )
+                if float(p["amount"]) > 0.004:
+                    receipts.append(_receipt_item(p["id"], p["payment_date"], p.get("payment_method"), p.get("account_id"), account_name(p.get("account_id")), p.get("notes"), p["amount"]))
     elif label == PAID_LABEL and (lease_id or tenant_id):
-        credits = _books_cash_lines(supabase, date_from, date_to, None, list(cash_accounts.keys()), "credit")
-        for b in credits:
-            if b["source_type"] != REFUND_SOURCE:
+        for r in _books_deposit_released(supabase, date_from, date_to, None):
+            if (lease_id and r.get("lease_id") != lease_id) or (not lease_id and r.get("tenant_id") != tenant_id):
                 continue
-            if (lease_id and b.get("lease_id") != lease_id) or (not lease_id and tenant_id and b.get("tenant_id") != tenant_id):
-                continue
-            receipts.append(
-                {
-                    "payment_id": b["entry_id"], "invoice_id": None, "invoice_number": None, "invoice_month": None,
-                    "payment_date": b["entry_date"], "payment_method": "refund paid",
-                    "account_id": b["account_id"], "account_name": account_name(b["account_id"]),
-                    "notes": b.get("description"), "amount": b["amount"],
-                }
-            )
+            receipts.append(_receipt_item(r["entry_id"], r["entry_date"], "security deposit paid out", None, "Security Deposits Held", r.get("description"), r["amount"]))
     elif label == OTHER_LABEL:
-        books = _books_cash_debits(supabase, date_from, date_to, None, list(cash_accounts.keys()))
-        for b in books:
+        for b in _books_cash_debits(supabase, date_from, date_to, None, list(cash_accounts.keys())):
             if b["source_type"] in RECEIPT_SOURCES or b["source_type"] == SECURITY_SOURCE:
                 continue
-            receipts.append(
-                {
-                    "payment_id": b["entry_id"], "invoice_id": None, "invoice_number": None, "invoice_month": None,
-                    "payment_date": b["entry_date"], "payment_method": b["source_type"],
-                    "account_id": b["account_id"], "account_name": account_name(b["account_id"]),
-                    "notes": b.get("description"), "amount": b["amount"],
-                }
-            )
+            receipts.append(_receipt_item(b["entry_id"], b["entry_date"], b["source_type"], b["account_id"], account_name(b["account_id"]), b.get("description"), b["amount"]))
     receipts.sort(key=lambda r: r["payment_date"])
     return {"receipts": receipts, "total": round(sum(r["amount"] for r in receipts), 2)}
 
 
-def drilldown_settlement(
-    supabase: Client, label: str, date_from: date, date_to: date, lease_id: str
-) -> dict:
-    """The settlement lines behind one Part 2 cell (or 'Refund paid')."""
-    data = _load_settlement_data(supabase, date_from, date_to, None)
-    cash_accounts = _cash_bank_accounts(supabase)
+def drilldown_settlement_lines(
+    supabase: Client, heading: str, date_from: date, date_to: date, lease_id: Optional[str], tenant_id: Optional[str], heads: ChargeHeads
+) -> List[dict]:
+    """Settlement charges (and older dues-cleared-from-deposit lines) behind
+    a head cell, shown beside the ordinary receipts for that head."""
     out: List[dict] = []
-    for r in data["rows"]:
-        if r.get("lease_id") != lease_id:
+    for r in _load_settlement_data(supabase, date_from, date_to)["rows"]:
+        if r["kind"] not in ("invoice_settled", "charge"):
             continue
-        is_refund = r["kind"] == "refund_paid"
-        if (label == "Refund paid") != is_refund:
+        if (lease_id and r.get("lease_id") != lease_id) or (not lease_id and tenant_id and r.get("tenant_id") != tenant_id):
             continue
-        if not is_refund and r["label"] != label:
-            continue
-        acc = cash_accounts.get(r.get("account_id"))
-        out.append(
-            {
-                "payment_id": r.get("id") or f"{r['kind']}-{r['settled_on']}-{r['label']}",
-                "invoice_id": None, "invoice_number": None, "invoice_month": None,
-                "payment_date": str(r["settled_on"]),
-                "payment_method": "refund paid" if is_refund else "settled from security deposit",
-                "account_id": r.get("account_id"),
-                "account_name": f"{acc['code']} · {acc['name']}" if acc else "Security deposit (non-cash)",
-                "notes": "Final settlement",
-                "amount": round(float(r["amount"]), 2),
-            }
+        label = heads.heading_for_account(r["account_id"]) if (r["kind"] == "charge" and r.get("account_id")) else (
+            heads.heading_for_label(r["label"]) if r["label"] != INVOICES_SETTLED_LABEL else INVOICES_SETTLED_LABEL
         )
-    out.sort(key=lambda r: r["payment_date"])
-    return {"receipts": out, "total": round(sum(r["amount"] for r in out), 2)}
+        if label != heading:
+            continue
+        out.append(_receipt_item(r.get("id") or f"{r['kind']}-{r['settled_on']}-{r['label']}", r["settled_on"],
+                                 "settled against security deposit", None, "Security deposit (netted in the settlement entry)",
+                                 "Final settlement", r["amount"]))
+    return out

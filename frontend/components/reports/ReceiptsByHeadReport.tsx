@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Printer } from "lucide-react";
-import { Card, DataTable } from "@/components/ui/Card";
+import { Card } from "@/components/ui/Card";
 import { Field, Input, Select } from "@/components/ui/Field";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -11,7 +11,7 @@ import { api, Building, Company, downloadFile } from "@/lib/api";
 import { useLabels } from "@/lib/labels";
 import { firstOfMonthYmd, todayYmd } from "@/lib/dates";
 
-type IncomeByHeadRow = {
+type ReportRow = {
   sr: number;
   lease_id: string | null;
   tenant_id: string | null;
@@ -26,44 +26,19 @@ type IncomeByHeadRow = {
   is_other?: boolean;
 };
 
-type SettlementRow = {
-  sr: number;
-  lease_id: string | null;
-  tenant_id: string | null;
-  tenant_name: string;
-  room_label: string;
-  settled_on: string;
-  heads: Record<string, number>;
-  settled_total: number;
-  refund_paid: number;
-  refund_account: string | null;
-  deposit_released: number;
-};
-
-type IncomeByHeadResponse = {
+type ReportResponse = {
   columns: string[];
-  rows: IncomeByHeadRow[];
+  rows: ReportRow[];
   totals: Record<string, number>;
   grand_total: number;
   paid_total: number;
   net_total: number;
-  settlement: {
-    columns: string[];
-    rows: SettlementRow[];
-    totals: Record<string, number>;
-    settled_total: number;
-    refund_total: number;
-    deposit_released_total: number;
-  };
   reconciliation: {
-    books_total: number;
-    report_total: number;
+    books_net: number;
+    report_net: number;
     gap: number;
-    paid_books: number;
-    paid_report: number;
-    paid_gap: number;
     matches: boolean;
-    by_source: { source: string; books: number; report: number }[];
+    by_source: { source: string; amount: number }[];
     unsplit_invoice_receipts: number;
     note: string;
   };
@@ -71,7 +46,7 @@ type IncomeByHeadResponse = {
 
 type Receipt = {
   payment_id: string;
-  invoice_id: string;
+  invoice_id: string | null;
   invoice_number: string | null;
   invoice_month: string | null;
   payment_date: string;
@@ -84,12 +59,14 @@ type Receipt = {
 
 type DrilldownResponse = { receipts: Receipt[]; total: number };
 
-// Plain number: the page says "Amounts in Rs" once, top right, instead of
-// repeating "Rs" on every figure.
-function formatPkr(n: number) {
-  return Number(n || 0).toLocaleString("en-PK");
-}
+const PAID = "Paid against security";
 
+// Whole rupees, no "Rs" on any figure (the card says "Amounts in Rupees"
+// once, on its top border); negatives in brackets, as in a ledger.
+function num(n: number) {
+  const r = Math.round(Number(n || 0));
+  return r < 0 ? `(${Math.abs(r).toLocaleString("en-PK")})` : r.toLocaleString("en-PK");
+}
 
 export default function ReceiptsByHeadReport({ embedded = false }: { embedded?: boolean }) {
   const { L } = useLabels();
@@ -99,12 +76,13 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?: 
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [company, setCompany] = useState<Company | null>(null);
 
-  const [data, setData] = useState<IncomeByHeadResponse | null>(null);
+  const [data, setData] = useState<ReportResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [backfilling, setBackfilling] = useState(false);
   const [backfillMessage, setBackfillMessage] = useState<string | null>(null);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
+  const [expanded, setExpanded] = useState<string | null>(null);
 
   const [drilldown, setDrilldown] = useState<{
     row: { tenant_name: string; room_label: string };
@@ -118,13 +96,21 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?: 
     api.get<Company>("/company/me").then(setCompany);
   }, []);
 
+  // A long name is shown on one line ending in "…"; clicking it opens the
+  // full text (still on one line). Any other click closes it.
+  useEffect(() => {
+    const close = () => setExpanded(null);
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, []);
+
   function load() {
     setLoading(true);
     setError(null);
     const params = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
     if (buildingFilter) params.set("building_id", buildingFilter);
     api
-      .get<IncomeByHeadResponse>(`/reports/income-by-head?${params.toString()}`)
+      .get<ReportResponse>(`/reports/income-by-head?${params.toString()}`)
       .then(setData)
       .catch((err: any) => setError(err.message))
       .finally(() => setLoading(false));
@@ -132,25 +118,12 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?: 
 
   useEffect(load, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  async function openCell(row: IncomeByHeadRow, label: string) {
-    if (label === "Paid against security" ? !row.paid_against_security : !row.heads[label]) return;
+  async function openCell(row: ReportRow, label: string) {
+    if (label === PAID ? !row.paid_against_security : !row.heads[label]) return;
     setDrilldown({ row, label, data: null, loading: true });
     const params = new URLSearchParams({ label, date_from: dateFrom, date_to: dateTo });
     if (row.lease_id) params.set("lease_id", row.lease_id);
     if (row.tenant_id) params.set("tenant_id", row.tenant_id);
-    try {
-      const result = await api.get<DrilldownResponse>(`/reports/income-by-head/drilldown?${params.toString()}`);
-      setDrilldown({ row, label, data: result, loading: false });
-    } catch (err: any) {
-      setDrilldown(null);
-      setError(err.message);
-    }
-  }
-
-  async function openSettlementCell(row: SettlementRow, label: string) {
-    if (!row.lease_id) return;
-    setDrilldown({ row, label, data: null, loading: true });
-    const params = new URLSearchParams({ label, date_from: row.settled_on, date_to: row.settled_on, part: "settlement", lease_id: row.lease_id });
     try {
       const result = await api.get<DrilldownResponse>(`/reports/income-by-head/drilldown?${params.toString()}`);
       setDrilldown({ row, label, data: result, loading: false });
@@ -196,8 +169,52 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?: 
   const columns = data?.columns ?? [];
   const rows = data?.rows ?? [];
 
+  // Tenant / apartment text: one line, "…" when it is longer, full text on click.
+  function textCell(key: string, text: string, strong = false) {
+    return (
+      <td className="relative px-2.5 py-2.5 text-left align-middle max-w-[160px]">
+        <button
+          type="button"
+          title="Click to see all"
+          onClick={(e) => {
+            e.stopPropagation();
+            setExpanded(expanded === key ? null : key);
+          }}
+          className={`block w-full truncate text-left ${strong ? "font-medium" : ""}`}
+        >
+          {text}
+        </button>
+        {expanded === key && (
+          <div className="no-print absolute left-2 top-full z-30 -mt-1 whitespace-nowrap rounded-card bg-ink px-3 py-1.5 text-xs text-paper shadow-shell">
+            {text}
+          </div>
+        )}
+      </td>
+    );
+  }
+
+  function amountCell(row: ReportRow, label: string, value: number) {
+    return (
+      <td key={label} className="px-2.5 py-2.5 text-right align-middle figures whitespace-nowrap">
+        {value ? (
+          <button
+            onClick={() => openCell(row, label)}
+            className="underline decoration-dotted decoration-ink/30 hover:decoration-ink hover:text-brass-dark no-print-underline"
+          >
+            {num(value)}
+          </button>
+        ) : (
+          <span className="text-ink/25">—</span>
+        )}
+      </td>
+    );
+  }
+
+  const th = "px-2.5 py-2.5 text-right align-bottom text-[10.5px] font-semibold uppercase tracking-wider text-ink/60 leading-tight";
+  const group = "px-2 pb-1 text-center text-[10px] font-semibold uppercase tracking-[0.12em] text-ledger border-b border-border";
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
         {embedded ? (
           <div />
@@ -205,19 +222,15 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?: 
           <div>
             <h1 className="text-2xl font-display font-semibold">Receipts by Head</h1>
             <p className="text-sm text-ink/55 mt-1">
-              Cash and bank received against invoices (by income head), security deposits and advance / opening balance,
-              the amount paid out against security, and what was settled from deposits at final settlement. Click any
+              Cash and bank received by income head, security deposits and advances, and the security paid out. Click any
               amount to see what is behind it.
             </p>
           </div>
         )}
         {!embedded && (
-          <div className="flex flex-col items-end gap-1">
-            <Button variant="ghost" onClick={() => window.print()} className="no-print">
-              <Printer size={16} className="mr-1.5 inline" /> Print
-            </Button>
-            <span className="text-xs italic text-ink/55">Amounts in Rupees</span>
-          </div>
+          <Button variant="ghost" onClick={() => window.print()} className="no-print">
+            <Printer size={16} className="mr-1.5 inline" /> Print
+          </Button>
         )}
       </div>
 
@@ -249,7 +262,7 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?: 
             <Button variant="secondary" onClick={load} disabled={loading} className="w-full">
               {loading ? "Loading…" : "Apply"}
             </Button>
-            <Button variant="ghost" onClick={downloadPdf} disabled={downloadingPdf || !data?.rows.length} className="w-full">
+            <Button variant="ghost" onClick={downloadPdf} disabled={downloadingPdf || !rows.length} className="w-full">
               {downloadingPdf ? "Preparing…" : "PDF (landscape)"}
             </Button>
           </div>
@@ -265,16 +278,14 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?: 
       {data && !data.reconciliation.matches && (
         <Card className="border-brass/40 no-print">
           <p className="text-sm text-ink/70">
-            <span className="font-medium text-brass-dark">Heads up:</span> this report does not match the cash and bank books
-            for the same dates. Received: report {formatPkr(data.reconciliation.report_total)} vs books{" "}
-            {formatPkr(data.reconciliation.books_total)} (difference {formatPkr(data.reconciliation.gap)}). Paid against
-            security: report {formatPkr(data.reconciliation.paid_report)} vs books {formatPkr(data.reconciliation.paid_books)}{" "}
-            (difference {formatPkr(data.reconciliation.paid_gap)}).
+            <span className="font-medium text-brass-dark">Heads up:</span> net cash in this report ({num(data.reconciliation.report_net)})
+            does not match the cash and bank books for the same dates ({num(data.reconciliation.books_net)}) — difference{" "}
+            {num(data.reconciliation.gap)}.
           </p>
           <ul className="mt-2 text-xs text-ink/60 space-y-0.5">
             {data.reconciliation.by_source.map((b) => (
               <li key={b.source}>
-                {b.source}: books {formatPkr(b.books)} · report {formatPkr(b.report)}
+                {b.source}: {num(b.amount)}
               </li>
             ))}
           </ul>
@@ -292,155 +303,88 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?: 
 
       {data && data.reconciliation.matches && (
         <p className="text-xs text-stamp-green no-print">
-          Matches the cash and bank books for these dates: received {formatPkr(data.reconciliation.books_total)}, paid
-          against security {formatPkr(data.reconciliation.paid_books)}.
+          Net cash matches the cash and bank books for these dates: {num(data.reconciliation.books_net)}.
         </p>
       )}
 
-      <Card>
-        <h2 className="text-sm font-semibold mb-1">Part 1 — Cash and bank receipts</h2>
-        <p className="text-xs text-ink/45 mb-3 no-print">
-          Click any amount below to see exactly which receipt(s) — and which bank/cash account(s) — made it up.
-        </p>
-        <DataTable
-          keyField="sr"
-          rows={rows}
-          emptyMessage="No cash or bank receipts in this period."
-          columns={[
-            { header: "Sr", accessor: (r) => r.sr },
-            { header: "Tenant", accessor: (r) => <span className="font-medium">{r.tenant_name}</span> },
-            { header: L("Apartment"), accessor: (r) => r.room_label },
-            ...columns.map((c) => ({
-              header: c,
-              accessor: (r: IncomeByHeadRow) =>
-                r.heads[c] ? (
-                  <button
-                    onClick={() => openCell(r, c)}
-                    className="figures underline decoration-dotted decoration-ink/30 hover:decoration-ink hover:text-brass-dark no-print-underline"
-                  >
-                    {formatPkr(r.heads[c])}
-                  </button>
-                ) : (
-                  <span className="text-ink/30">—</span>
-                ),
-              align: "right" as const,
-            })),
-            {
-              header: "Total received",
-              accessor: (r) => <span className="figures font-semibold">{formatPkr(r.total)}</span>,
-              align: "right",
-            },
-            {
-              header: "Paid against security",
-              accessor: (r) =>
-                r.paid_against_security ? (
-                  <button
-                    onClick={() => openCell(r, "Paid against security")}
-                    className="figures underline decoration-dotted decoration-ink/30 hover:decoration-ink hover:text-brass-dark no-print-underline"
-                  >
-                    {formatPkr(r.paid_against_security)}
-                  </button>
-                ) : (
-                  <span className="text-ink/30">—</span>
-                ),
-              align: "right",
-            },
-            {
-              header: "Net",
-              accessor: (r) => <span className="figures font-semibold">{formatPkr(r.net)}</span>,
-              align: "right",
-            },
-          ]}
-        />
-        {rows.length > 0 && (
-          <div className="flex flex-wrap justify-end gap-6 pt-3 mt-3 border-t border-border text-sm font-medium">
-            {columns.map((c) => (
-              <span key={c}>
-                {c}: <span className="figures">{formatPkr(data?.totals[c] ?? 0)}</span>
-              </span>
-            ))}
-            <span>
-              Total received: <span className="figures">{formatPkr(data?.grand_total ?? 0)}</span>
-            </span>
-            <span>
-              Paid against security: <span className="figures">{formatPkr(data?.paid_total ?? 0)}</span>
-            </span>
-            <span>
-              Net: <span className="figures">{formatPkr(data?.net_total ?? 0)}</span>
-            </span>
-          </div>
-        )}
-      </Card>
-
-      {data && data.settlement.rows.length > 0 && (
+      <div className="relative">
+        <span className="absolute -top-2.5 right-5 z-10 bg-paper px-2 text-xs italic text-ink/60">Amounts in Rupees</span>
         <Card>
-          <h2 className="text-sm font-semibold mb-1">Part 2 — Settled at final settlement (from security deposit, not cash)</h2>
-          <p className="text-xs text-ink/45 mb-3">
-            Dues and charges cleared out of the tenant&apos;s security deposit when the lease was closed. No cash or bank
-            money moved for these except the refund paid. Deposit released = settled + refund paid.
+          <p className="text-xs text-ink/45 mb-3 no-print">
+            Click any amount to see the receipts behind it. Click a long name to see all of it.
           </p>
-          <DataTable
-            keyField="sr"
-            rows={data.settlement.rows}
-            emptyMessage="No final settlements in this period."
-            columns={[
-              { header: "Sr", accessor: (r) => r.sr },
-              { header: "Tenant", accessor: (r) => <span className="font-medium">{r.tenant_name}</span> },
-              { header: L("Apartment"), accessor: (r) => r.room_label },
-              { header: "Date", accessor: (r) => r.settled_on },
-              ...data.settlement.columns.map((c) => ({
-                header: c,
-                accessor: (r: SettlementRow) =>
-                  r.heads[c] ? (
-                    <button
-                      onClick={() => openSettlementCell(r, c)}
-                      className="figures underline decoration-dotted decoration-ink/30 hover:decoration-ink hover:text-brass-dark no-print-underline"
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12.5px] border-collapse">
+              <thead>
+                <tr>
+                  <th colSpan={3} />
+                  <th colSpan={columns.length + 1} className={group}>
+                    Received (cash &amp; bank)
+                  </th>
+                  <th className={group}>Paid out</th>
+                  <th className={group}>Cash</th>
+                </tr>
+                <tr className="border-b-2 border-ledger">
+                  <th className={`${th} text-left w-9`}>Sr</th>
+                  <th className={`${th} text-left`}>Tenant</th>
+                  <th className={`${th} text-left`}>{L("Apartment")}</th>
+                  {columns.map((c) => (
+                    <th key={c} className={th}>
+                      {c}
+                    </th>
+                  ))}
+                  <th className={th}>Total received</th>
+                  <th className={th}>{PAID}</th>
+                  <th className={th}>Net cash</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.length === 0 && (
+                  <tr>
+                    <td colSpan={columns.length + 6} className="py-10 text-center text-sm text-ink/45">
+                      {loading ? "Loading…" : "No cash or bank receipts in this period."}
+                    </td>
+                  </tr>
+                )}
+                {rows.map((r, i) => (
+                  <tr key={r.sr} className={`border-b border-border/70 ${i % 2 === 1 ? "bg-ink/[0.025]" : ""}`}>
+                    <td className="px-2.5 py-2.5 text-left text-ink/55 align-middle">{r.sr}</td>
+                    {textCell(`${r.sr}-t`, r.tenant_name, true)}
+                    {textCell(`${r.sr}-r`, r.room_label)}
+                    {columns.map((c) => amountCell(r, c, r.heads[c]))}
+                    <td className="px-2.5 py-2.5 text-right align-middle figures font-semibold whitespace-nowrap">{num(r.total)}</td>
+                    {amountCell(r, PAID, r.paid_against_security)}
+                    <td
+                      className={`px-2.5 py-2.5 text-right align-middle figures font-semibold whitespace-nowrap ${
+                        r.net < 0 ? "text-stamp-red" : ""
+                      }`}
                     >
-                      {formatPkr(r.heads[c])}
-                    </button>
-                  ) : (
-                    <span className="text-ink/30">—</span>
-                  ),
-                align: "right" as const,
-              })),
-              { header: "Settled", accessor: (r) => <span className="figures font-semibold">{formatPkr(r.settled_total)}</span>, align: "right" },
-              {
-                header: "Refund paid",
-                accessor: (r) =>
-                  r.refund_paid ? (
-                    <button
-                      onClick={() => openSettlementCell(r, "Refund paid")}
-                      className="figures underline decoration-dotted decoration-ink/30 hover:decoration-ink hover:text-brass-dark no-print-underline"
-                      title={r.refund_account ?? undefined}
-                    >
-                      {formatPkr(r.refund_paid)}
-                    </button>
-                  ) : (
-                    <span className="text-ink/30">—</span>
-                  ),
-                align: "right",
-              },
-              { header: "Deposit released", accessor: (r) => <span className="figures font-semibold">{formatPkr(r.deposit_released)}</span>, align: "right" },
-            ]}
-          />
-          <div className="flex flex-wrap justify-end gap-6 pt-3 mt-3 border-t border-border text-sm font-medium">
-            {data.settlement.columns.map((c) => (
-              <span key={c}>
-                {c}: <span className="figures">{formatPkr(data.settlement.totals[c] ?? 0)}</span>
-              </span>
-            ))}
-            <span>
-              Settled: <span className="figures">{formatPkr(data.settlement.settled_total)}</span>
-            </span>
-            <span>
-              Refund paid: <span className="figures">{formatPkr(data.settlement.refund_total)}</span>
-            </span>
-            <span>
-              Deposit released: <span className="figures">{formatPkr(data.settlement.deposit_released_total)}</span>
-            </span>
+                      {num(r.net)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              {rows.length > 0 && (
+                <tfoot>
+                  <tr className="border-t-2 border-brass bg-ink/[0.045] font-bold">
+                    <td />
+                    <td className="px-2.5 py-3 text-left">Total</td>
+                    <td />
+                    {columns.map((c) => (
+                      <td key={c} className="px-2.5 py-3 text-right figures whitespace-nowrap">
+                        {num(data?.totals[c] ?? 0)}
+                      </td>
+                    ))}
+                    <td className="px-2.5 py-3 text-right figures whitespace-nowrap">{num(data?.grand_total ?? 0)}</td>
+                    <td className="px-2.5 py-3 text-right figures whitespace-nowrap">{num(data?.paid_total ?? 0)}</td>
+                    <td className="px-2.5 py-3 text-right figures whitespace-nowrap">{num(data?.net_total ?? 0)}</td>
+                  </tr>
+                </tfoot>
+              )}
+            </table>
           </div>
         </Card>
-      )}
+      </div>
 
       <Modal
         open={!!drilldown}
@@ -448,9 +392,7 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?: 
         title={drilldown ? `${drilldown.label} — ${drilldown.row.tenant_name}` : "Receipts"}
       >
         <div className="space-y-3">
-          <p className="text-xs text-ink/50">
-            {drilldown?.row.room_label} — everything that makes up this amount.
-          </p>
+          <p className="text-xs text-ink/50">{drilldown?.row.room_label} — everything that makes up this amount.</p>
           {drilldown?.loading && <p className="text-sm text-ink/45">Loading…</p>}
           {drilldown?.data && (
             <>
@@ -468,13 +410,13 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?: 
                         {r.invoice_number ? ` · Invoice ${r.invoice_number}` : ""}
                       </p>
                     </div>
-                    <span className="figures font-medium">{formatPkr(r.amount)}</span>
+                    <span className="figures font-medium">{num(r.amount)}</span>
                   </div>
                 ))}
               </div>
               <div className="flex justify-between text-sm font-semibold pt-2 border-t border-border">
                 <span>Total</span>
-                <span className="figures">{formatPkr(drilldown.data.total)}</span>
+                <span className="figures">{num(drilldown.data.total)}</span>
               </div>
             </>
           )}

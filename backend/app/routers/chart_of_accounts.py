@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import Client
@@ -24,6 +26,10 @@ class AccountCreate(BaseModel):
     # "which account did this land in" pickers), so a receivable-type
     # account can never be mistaken for a real bank/cash account there.
     is_cash_or_bank: bool = False
+    # The name charge lines and report columns show for this account, when it
+    # should differ from the account's own name (e.g. "Due to Owners" shows as
+    # "Rent"). Empty = use the account name.
+    report_head_name: Optional[str] = None
 
 
 @router.post("", status_code=201)
@@ -38,6 +44,11 @@ def create_account(
     protected system accounts (Bank, AR, Due to Owners, etc.) can only be
     created by the schema patch, never through this endpoint."""
     row = payload.model_dump()
+    # Save the report name only when one was given, so creating accounts keeps
+    # working even before the report_head_name column exists.
+    row["report_head_name"] = " ".join((row.get("report_head_name") or "").split()) or None
+    if row["report_head_name"] is None:
+        row.pop("report_head_name")
     row["company_id"] = company_id
     row["is_system"] = False
     res = supabase.table("chart_of_accounts").insert(row).execute()
@@ -45,7 +56,9 @@ def create_account(
 
 
 class AccountUpdate(BaseModel):
-    is_cash_or_bank: bool
+    is_cash_or_bank: Optional[bool] = None
+    report_head_name: Optional[str] = None
+    # report_head_name can be cleared by sending an empty string.
 
 
 @router.patch("/{account_id}")
@@ -61,9 +74,17 @@ def update_account(
     field this exposes for now, since every other account property is
     fixed once created (changing an account's type/code after it already
     has posted journal lines would make historical reports inconsistent)."""
+    changes: dict = {}
+    if payload.is_cash_or_bank is not None:
+        changes["is_cash_or_bank"] = payload.is_cash_or_bank
+    if payload.report_head_name is not None:
+        cleaned = " ".join(payload.report_head_name.split())
+        changes["report_head_name"] = cleaned or None
+    if not changes:
+        raise HTTPException(status_code=400, detail="Nothing to update")
     res = (
         supabase.table("chart_of_accounts")
-        .update({"is_cash_or_bank": payload.is_cash_or_bank})
+        .update(changes)
         .eq("id", account_id)
         .eq("company_id", company_id)
         .execute()

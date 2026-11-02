@@ -15,6 +15,7 @@ type Account = {
   transfers_to_owner: boolean;
   is_system: boolean;
   is_cash_or_bank: boolean;
+  report_head_name?: string | null;
 };
 
 type ChargeMapping = {
@@ -45,8 +46,25 @@ export default function ChartOfAccountsPage() {
     account_type: "expense" as Account["account_type"],
     transfers_to_owner: false,
     is_cash_or_bank: false,
+    report_head_name: "",
   });
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [editingHeadId, setEditingHeadId] = useState<string | null>(null);
+  const [headDraft, setHeadDraft] = useState("");
+  const [savingHead, setSavingHead] = useState(false);
+
+  async function saveHeadName(account: Account) {
+    setSavingHead(true);
+    try {
+      await api.patch(`/chart-of-accounts/${account.id}`, { report_head_name: headDraft });
+      setEditingHeadId(null);
+      load();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSavingHead(false);
+    }
+  }
 
   const [mappingModalOpen, setMappingModalOpen] = useState(false);
   const [mappingSaving, setMappingSaving] = useState(false);
@@ -77,7 +95,7 @@ export default function ChartOfAccountsPage() {
     try {
       await api.post("/chart-of-accounts", accountForm);
       setAccountModalOpen(false);
-      setAccountForm({ code: "", name: "", account_type: "expense", transfers_to_owner: false, is_cash_or_bank: false });
+      setAccountForm({ code: "", name: "", account_type: "expense", transfers_to_owner: false, is_cash_or_bank: false, report_head_name: "" });
       load();
     } catch (err: any) {
       setAccountError(err.message);
@@ -146,6 +164,42 @@ export default function ChartOfAccountsPage() {
           columns={[
             { header: "Code", accessor: (a) => <span className="figures">{a.code}</span> },
             { header: "Name", accessor: (a) => a.name },
+            {
+              header: "Name on reports & charges",
+              accessor: (a) =>
+                editingHeadId === a.id ? (
+                  <span className="flex items-center gap-1.5">
+                    <input
+                      autoFocus
+                      value={headDraft}
+                      onChange={(e) => setHeadDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") saveHeadName(a);
+                        if (e.key === "Escape") setEditingHeadId(null);
+                      }}
+                      placeholder={a.name}
+                      className="w-40 rounded border border-border bg-paper-card px-2 py-1 text-xs"
+                    />
+                    <button onClick={() => saveHeadName(a)} disabled={savingHead} className="text-xs font-medium text-stamp-green hover:underline">
+                      {savingHead ? "…" : "Save"}
+                    </button>
+                    <button onClick={() => setEditingHeadId(null)} className="text-xs text-ink/45 hover:underline">
+                      Cancel
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setEditingHeadId(a.id);
+                      setHeadDraft(a.report_head_name ?? "");
+                    }}
+                    className="text-left text-xs hover:underline"
+                    title="Click to change the name charge lines and reports show for this account"
+                  >
+                    {a.report_head_name ? a.report_head_name : <span className="text-ink/35">same as name</span>}
+                  </button>
+                ),
+            },
             { header: "Type", accessor: (a) => TYPE_LABELS[a.account_type] },
             {
               header: "Transfers to owner",
@@ -229,6 +283,12 @@ export default function ChartOfAccountsPage() {
               required
               value={accountForm.name}
               onChange={(e) => setAccountForm({ ...accountForm, name: e.target.value })}
+            />
+          </Field>
+          <Field label="Name on reports & charges (optional)" hint="Leave empty to use the name above. Charge lines and report columns for this account will show this instead (e.g. Due to Owners shows as Rent).">
+            <Input
+              value={accountForm.report_head_name}
+              onChange={(e) => setAccountForm({ ...accountForm, report_head_name: e.target.value })}
             />
           </Field>
           <Field label="Type">

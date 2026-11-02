@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, Fragment } from "react";
 import Link from "next/link";
-import { api, ExpiringLease, Lease, Tenant, Room, Building, SecurityDeposit, SecurityDepositPayment, Account, fetchPdfBlob } from "@/lib/api";
+import { api, ExpiringLease, Lease, Tenant, Room, Building, SecurityDeposit, SecurityDepositPayment, Account, fetchPdfBlob, accountHeadName } from "@/lib/api";
 import { supabase } from "@/lib/supabaseClient";
 import { Card } from "@/components/ui/Card";
 import { StampBadge } from "@/components/ui/StampBadge";
@@ -976,16 +976,12 @@ export default function LeasesPage() {
                   <Field label="Label">
                     <Input
                       required
-                      list="known-charge-labels"
-                      placeholder="e.g. Parking"
+                      readOnly
+                      placeholder="Fills in when you pick the account below"
+                      title="The name comes from the account you pick"
+                      className="bg-ink/[0.04] cursor-default"
                       value={addChargeForm.label}
-                      onChange={(e) => handleAddChargeLabelChange(e.target.value)}
                     />
-                    <datalist id="known-charge-labels">
-                      {chargeMappings.map((m) => (
-                        <option key={m.label} value={m.label} />
-                      ))}
-                    </datalist>
                   </Field>
                   <Field label="Amount">
                     <Input
@@ -1022,7 +1018,7 @@ export default function LeasesPage() {
                       ? `"${addChargeForm.label}" already posts to this account — pick a different one below if that's wrong (e.g. a spelling mismatch from before). This updates it for every future charge under this label, on any lease.`
                       : addChargeForm.label.trim()
                       ? `"${addChargeForm.label}" hasn't been billed before — choose where it should post. Every future charge with this exact label will use the same account.`
-                      : "Type a label above, or pick one from the list — matching labels reuse the same account automatically."
+                      : "Pick the account this charge posts to — the charge name is taken from it, so it is always spelled the same way."
                   }
                 >
                   <Select
@@ -1030,7 +1026,9 @@ export default function LeasesPage() {
                     value={addChargeForm.account_id}
                     onChange={(e) => {
                       setAddChargeAccountTouched(true);
-                      setAddChargeForm({ ...addChargeForm, account_id: e.target.value });
+                      const picked = accounts.find((a) => a.id === e.target.value);
+                      // The charge name always comes from the GL account, never typed.
+                      setAddChargeForm({ ...addChargeForm, account_id: e.target.value, label: picked ? accountHeadName(picked) : "" });
                     }}
                   >
                     <option value="">Select an account…</option>

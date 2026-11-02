@@ -40,6 +40,7 @@ from typing import Callable, Iterable, Optional
 from supabase import Client
 
 from app.core.labels import get_unit
+from app.services.charge_heads import norm_label
 from app.services.invoicing import compute_prorated_charges, merge_current_charges
 from app.services.ledger import UnbalancedJournalEntry
 from app.services.utility_bills import apply_utility_overrides, fetch_bills, lease_overlaps_month
@@ -158,7 +159,7 @@ def _load_reference_data(supabase: Client, company_id: str) -> dict:
     return {
         "ar_id": by_code["1100"],
         "other_income_id": by_code["4100"],
-        "label_to_account": {m["label"]: m["account_id"] for m in mappings},
+        "label_to_account": {norm_label(m["label"]): m["account_id"] for m in mappings},
     }
 
 
@@ -304,7 +305,7 @@ def _generate_slice_bulk(
 
             credit_by_account: dict = defaultdict(float)
             for c in p["prorated"]:
-                acct = ref["label_to_account"].get(c["label"]) or ref["other_income_id"]
+                acct = ref["label_to_account"].get(norm_label(c["label"])) or ref["other_income_id"]
                 credit_by_account[acct] += float(c["amount"])
 
             tags = {
