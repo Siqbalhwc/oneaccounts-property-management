@@ -4,11 +4,8 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { friendlyAuthError } from "@/lib/authErrors";
-import { Field, PasswordInput } from "@/components/ui/Field";
-import { Button } from "@/components/ui/Button";
-import { BrandPanel, BrandPanelMobileHeader } from "@/components/marketing/BrandPanel";
-import { AuthShell } from "@/components/marketing/AuthShell";
-import { ContactFooter } from "@/components/marketing/ContactFooter";
+import { CircleAlert, CircleCheck } from "lucide-react";
+import { OaAuthFrame, OaHelp, OaPasswordField } from "@/components/marketing/OaAuthFrame";
 
 export default function ResetPasswordPage() {
   const router = useRouter();
@@ -55,56 +52,63 @@ export default function ResetPasswordPage() {
   }
 
   return (
-    <AuthShell>
-      <BrandPanel />
+    <OaAuthFrame>
+      <h2 className="oa-title">Set a new password</h2>
+      <p className="oa-sub">
+        {done ? "Password updated — taking you in now…" : "Choose a new password for your account."}
+      </p>
 
-      <div className="w-full max-w-sm">
-        <BrandPanelMobileHeader />
-
-        <div className="card p-6 sm:p-7 space-y-4 border-t-[3px] border-t-brass">
-          <div className="mb-1">
-            <h1 className="font-display text-xl font-semibold text-ink">Set a new password</h1>
-            <p className="text-sm text-ink/55 mt-1">
-              {done ? "Password updated — taking you in now…" : "Choose a new password for your account."}
-            </p>
-          </div>
-
-          {!done && (
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <Field label="New password" hint="At least 8 characters.">
-                <PasswordInput
-                  autoFocus
-                  autoComplete="new-password"
-                  minLength={8}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  disabled={!ready}
-                />
-              </Field>
-              <Field label="Confirm new password">
-                <PasswordInput
-                  autoComplete="new-password"
-                  minLength={8}
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  required
-                  disabled={!ready}
-                />
-              </Field>
-              {!ready && !error && (
-                <p className="text-xs text-ink/45">Verifying your reset link…</p>
-              )}
-              {error && <p className="text-sm text-stamp-red">{error}</p>}
-              <Button type="submit" className="w-full" loading={loading} disabled={!ready}>
-                {loading ? "Updating…" : "Update password"}
-              </Button>
-            </form>
-          )}
-
-          <ContactFooter />
+      {done && (
+        <div className="oa-msg oa-success" role="status">
+          <CircleCheck size={16} aria-hidden="true" />
+          <div>Your password has been changed.</div>
         </div>
-      </div>
-    </AuthShell>
+      )}
+
+      {!done && (
+        <form onSubmit={handleSubmit} noValidate>
+          {error && (
+            <div className="oa-msg oa-error" role="alert">
+              <CircleAlert size={16} aria-hidden="true" />
+              <div>{error}</div>
+            </div>
+          )}
+          <OaPasswordField
+            id="new-password"
+            label="New password"
+            value={password}
+            onChange={setPassword}
+            placeholder="Choose a new password"
+            autoComplete="new-password"
+            autoFocus
+            minLength={8}
+            disabled={!ready}
+            hint="At least 8 characters."
+          />
+          <OaPasswordField
+            id="confirm-password"
+            label="Confirm new password"
+            value={confirmPassword}
+            onChange={setConfirmPassword}
+            placeholder="Type it again"
+            autoComplete="new-password"
+            minLength={8}
+            disabled={!ready}
+          />
+          {!ready && !error && <p className="oa-info">Verifying your reset link…</p>}
+          <button type="submit" className="oa-btn" disabled={loading || !ready}>
+            {loading ? (
+              <>
+                <span className="oa-spinner" aria-hidden="true" /> Updating…
+              </>
+            ) : (
+              "Update password"
+            )}
+          </button>
+        </form>
+      )}
+
+      <OaHelp />
+    </OaAuthFrame>
   );
 }

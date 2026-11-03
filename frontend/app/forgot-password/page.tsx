@@ -4,12 +4,8 @@ import { useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabaseClient";
 import { friendlyAuthError } from "@/lib/authErrors";
-import { Field, EmailInput } from "@/components/ui/Field";
-import { Button } from "@/components/ui/Button";
-import { IconArrowLeft } from "@/components/ui/icons";
-import { BrandPanel, BrandPanelMobileHeader } from "@/components/marketing/BrandPanel";
-import { AuthShell } from "@/components/marketing/AuthShell";
-import { ContactFooter } from "@/components/marketing/ContactFooter";
+import { ArrowLeft, CircleAlert, MailCheck } from "lucide-react";
+import { OaAuthFrame, OaHelp, OaTextField } from "@/components/marketing/OaAuthFrame";
 
 export default function ForgotPasswordPage() {
   const [email, setEmail] = useState("");
@@ -33,56 +29,57 @@ export default function ForgotPasswordPage() {
   }
 
   return (
-    <AuthShell>
-      <BrandPanel />
+    <OaAuthFrame>
+      <Link href="/login" className="oa-back">
+        <ArrowLeft size={14} aria-hidden="true" /> Back to sign in
+      </Link>
+      <h2 className="oa-title">Reset your password</h2>
+      <p className="oa-sub">
+        {sent
+          ? "Check your inbox for the reset link."
+          : "Enter the email on your account and we'll send you a link to reset it."}
+      </p>
 
-      <div className="w-full max-w-sm">
-        <BrandPanelMobileHeader />
-
-        <div className="card p-6 sm:p-7 space-y-4 border-t-[3px] border-t-brass">
-          <div className="mb-1">
-            <Link
-              href="/login"
-              className="inline-flex items-center gap-1 text-xs text-ink/50 hover:text-ink transition-colors mb-3"
-            >
-              <IconArrowLeft size={14} />
-              Back to sign in
-            </Link>
-            <h1 className="font-display text-xl font-semibold text-ink">Reset your password</h1>
-            <p className="text-sm text-ink/55 mt-1">
-              {sent
-                ? "Check your inbox for the reset link."
-                : "Enter the email on your account and we'll send you a link to reset it."}
-            </p>
-          </div>
-
-          {sent ? (
-            <p className="text-sm text-ink/70 bg-accent/5 border border-accent/15 rounded-card px-3 py-2.5">
-              We've sent a reset link to <span className="font-medium">{email}</span>. It may take a
-              minute to arrive — check spam if you don't see it.
-            </p>
-          ) : (
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <Field label="Email">
-                <EmailInput
-                  autoFocus
-                  autoComplete="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="name@company.com"
-                  required
-                />
-              </Field>
-              {error && <p className="text-sm text-stamp-red">{error}</p>}
-              <Button type="submit" className="w-full" loading={loading}>
-                {loading ? "Sending…" : "Send reset link"}
-              </Button>
-            </form>
-          )}
-
-          <ContactFooter />
+      {sent ? (
+        <div className="oa-confirm" role="status">
+          <MailCheck size={28} aria-hidden="true" />
+          <h2>Check your email</h2>
+          <p>
+            We&apos;ve sent a reset link to <strong>{email}</strong>.<br />
+            It may take a minute to arrive — check spam if you don&apos;t see it.
+          </p>
         </div>
-      </div>
-    </AuthShell>
+      ) : (
+        <form onSubmit={handleSubmit} noValidate>
+          {error && (
+            <div className="oa-msg oa-error" role="alert">
+              <CircleAlert size={16} aria-hidden="true" />
+              <div>{error}</div>
+            </div>
+          )}
+          <OaTextField
+            id="email"
+            label="Email address"
+            type="email"
+            value={email}
+            onChange={setEmail}
+            placeholder="you@company.com"
+            autoComplete="email"
+            autoFocus
+          />
+          <button type="submit" className="oa-btn" disabled={loading}>
+            {loading ? (
+              <>
+                <span className="oa-spinner" aria-hidden="true" /> Sending…
+              </>
+            ) : (
+              "Send reset link"
+            )}
+          </button>
+        </form>
+      )}
+
+      <OaHelp />
+    </OaAuthFrame>
   );
 }

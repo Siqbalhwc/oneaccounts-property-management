@@ -6,11 +6,8 @@ import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { postPublic, api } from "@/lib/api";
 import { friendlyAuthError } from "@/lib/authErrors";
-import { Field, Input, EmailInput, PasswordInput } from "@/components/ui/Field";
-import { Button } from "@/components/ui/Button";
-import { BrandPanel, BrandPanelMobileHeader } from "@/components/marketing/BrandPanel";
-import { AuthShell } from "@/components/marketing/AuthShell";
-import { ContactFooter } from "@/components/marketing/ContactFooter";
+import { CircleAlert, MailCheck } from "lucide-react";
+import { OaAuthFrame, OaHelp, OaPasswordField, OaTextField } from "@/components/marketing/OaAuthFrame";
 
 export default function SignupPage() {
   const router = useRouter();
@@ -56,96 +53,94 @@ export default function SignupPage() {
 
   if (pendingApproval) {
     return (
-      <AuthShell>
-        <BrandPanel />
-        <div className="w-full max-w-sm">
-          <BrandPanelMobileHeader />
-          <div className="card p-6 sm:p-7 space-y-4 text-center border-t-[3px] border-t-brass">
-            <h1 className="font-display text-xl font-semibold text-ink">Account created</h1>
-            <p className="text-sm text-ink/60">
-              Your company has been set up, but a platform admin needs to approve it
-              before you can sign in. You&apos;ll be able to log in as soon as that
-              happens — no further action needed from you right now.
-            </p>
-            <Link href="/login" className="text-sm text-accent hover:underline inline-block pt-2">
-              Back to sign in
-            </Link>
-            <ContactFooter />
-          </div>
+      <OaAuthFrame>
+        <h2 className="oa-title">Account created</h2>
+        <p className="oa-sub">Thank you for signing up.</p>
+        <div className="oa-confirm" role="status">
+          <MailCheck size={28} aria-hidden="true" />
+          <h2>Waiting for approval</h2>
+          <p>
+            Your company has been set up, but a platform admin needs to approve it
+            before you can sign in. You&apos;ll be able to log in as soon as that
+            happens — no further action needed from you right now.
+          </p>
         </div>
-      </AuthShell>
+        <div className="oa-switch-row">
+          <Link href="/login" className="oa-switch"><strong>Back to sign in</strong></Link>
+        </div>
+        <OaHelp />
+      </OaAuthFrame>
     );
   }
 
   return (
-    <AuthShell>
-      <BrandPanel />
+    <OaAuthFrame>
+      <h2 className="oa-title">Create your account</h2>
+      <p className="oa-sub">
+        Set up your own company — completely separate from anyone else&apos;s data.
+      </p>
 
-      <div className="w-full max-w-sm">
-        <BrandPanelMobileHeader />
+      {error && (
+        <div className="oa-msg oa-error" role="alert">
+          <CircleAlert size={16} aria-hidden="true" />
+          <div>{error}</div>
+        </div>
+      )}
 
-        <form onSubmit={handleSubmit} className="card p-6 sm:p-7 space-y-4 border-t-[3px] border-t-brass">
-          <div className="hidden lg:block mb-1">
-            <p className="text-[11px] tracking-[0.1em] text-brass-dark font-medium">ONEACCOUNTS</p>
-            <h1 className="font-display text-xl font-semibold text-ink mt-1">Create your account</h1>
-            <p className="text-sm text-ink/55 mt-1">
-              Set up your own company — completely separate from anyone else&apos;s data.
-            </p>
-          </div>
-          <p className="lg:hidden text-sm text-ink/60 -mt-1 mb-1">
-            Set up your own company — completely separate from anyone else&apos;s data.
-          </p>
+      <form onSubmit={handleSubmit} noValidate>
+        <OaTextField
+          id="company"
+          label="Company name"
+          value={form.company_name}
+          onChange={(v) => setForm({ ...form, company_name: v })}
+          placeholder="e.g. Green Valley Estates"
+          autoFocus
+        />
+        <OaTextField
+          id="full-name"
+          label="Your full name"
+          value={form.full_name}
+          onChange={(v) => setForm({ ...form, full_name: v })}
+          autoComplete="name"
+        />
+        <OaTextField
+          id="email"
+          label="Email address"
+          type="email"
+          value={form.email}
+          onChange={(v) => setForm({ ...form, email: v })}
+          placeholder="you@company.com"
+          autoComplete="email"
+        />
+        <OaPasswordField
+          id="password"
+          label="Password"
+          value={form.password}
+          onChange={(v) => setForm({ ...form, password: v })}
+          placeholder="Create a password"
+          autoComplete="new-password"
+          minLength={8}
+          hint="At least 8 characters."
+        />
 
-          <Field label="Company name">
-            <Input
-              required
-              value={form.company_name}
-              onChange={(e) => setForm({ ...form, company_name: e.target.value })}
-              placeholder="e.g. Green Valley Estates"
-            />
-          </Field>
-          <Field label="Your full name">
-            <Input
-              required
-              value={form.full_name}
-              onChange={(e) => setForm({ ...form, full_name: e.target.value })}
-            />
-          </Field>
-          <Field label="Email">
-            <EmailInput
-              autoComplete="email"
-              required
-              value={form.email}
-              onChange={(e) => setForm({ ...form, email: e.target.value })}
-              placeholder="name@company.com"
-            />
-          </Field>
-          <Field label="Password" hint="At least 8 characters.">
-            <PasswordInput
-              autoComplete="new-password"
-              required
-              minLength={8}
-              value={form.password}
-              onChange={(e) => setForm({ ...form, password: e.target.value })}
-            />
-          </Field>
+        <button type="submit" className="oa-btn" disabled={loading}>
+          {loading ? (
+            <>
+              <span className="oa-spinner" aria-hidden="true" /> Creating your company…
+            </>
+          ) : (
+            "Create account"
+          )}
+        </button>
+      </form>
 
-          {error && <p className="text-sm text-stamp-red">{error}</p>}
-
-          <Button type="submit" className="w-full" loading={loading}>
-            {loading ? "Creating your company…" : "Create account"}
-          </Button>
-
-          <p className="text-xs text-center text-ink/45 pt-1">
-            Already have an account?{" "}
-            <Link href="/login" className="text-accent hover:underline">
-              Sign in
-            </Link>
-          </p>
-
-          <ContactFooter />
-        </form>
+      <div className="oa-switch-row">
+        <Link href="/login" className="oa-switch">
+          Already have an account? <strong>Sign in</strong>
+        </Link>
       </div>
-    </AuthShell>
+
+      <OaHelp />
+    </OaAuthFrame>
   );
 }
