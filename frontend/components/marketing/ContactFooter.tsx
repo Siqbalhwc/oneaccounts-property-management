@@ -4,7 +4,7 @@ import { IconPhone, IconMail, IconVideo } from "@/components/ui/icons";
 // not a find-and-replace across every auth page.
 export const WHATSAPP_DIGITS = "923716853677"; // 0371 6853677, normalized for wa.me
 export const WHATSAPP_DISPLAY = "0371 6853677";
-export const CONTACT_EMAIL = "siqbalhwc@gmail.com";
+export const CONTACT_EMAIL = "shahid@oneaccountsbysiqbal.com";
 export const WEBSITE_URL = "https://www.oneaccountsbysiqbal.com";
 const YOUTUBE_URL = "https://www.youtube.com/@OneAccountsbySiqbal";
 
