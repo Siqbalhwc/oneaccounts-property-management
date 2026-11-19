@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase import Client
 
 from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
-from app.services.income_allocation import allocate_payment_to_line_items
+from app.services.income_allocation import allocate_payment_to_line_items, allocated_payment_ids
 from app.services.invoice_receipt_comparison import build_comparison
 from app.services.ledger import get_account_id, get_tenant_account_balance_as_of
 from app.services.charge_heads import ChargeHeads
@@ -16,6 +16,8 @@ from app.services.receipts_report import (
     PAID_LABEL,
     SECURITY_LABEL,
     build_receipts_report,
+    cap_allocations_to_receipts,
+    fetch_all,
     drilldown_manual_lines,
     drilldown_settlement_lines,
     drilldown_special,
@@ -590,25 +592,19 @@ def _self_heal_allocations_for_range(supabase: Client, date_from: date, date_to:
     banner / manual backfill for that one gap.
     """
     try:
-        payments_in_range = (
-            supabase.table("payments")
+        payments_in_range = fetch_all(
+            lambda: supabase.table("payments")
             .select("id, invoice_id, tenant_id, amount, discount_amount, created_at")
             .gte("payment_date", str(date_from))
             .lte("payment_date", str(date_to))
             .not_.is_("invoice_id", "null")
             .order("created_at")
-            .execute()
-            .data
+            .order("id")
         )
         if not payments_in_range:
             return
 
-        payment_ids = [p["id"] for p in payments_in_range]
-        already_allocated_ids = set()
-        for i in range(0, len(payment_ids), 500):
-            chunk = payment_ids[i : i + 500]
-            rows = supabase.table("payment_allocations").select("payment_id").in_("payment_id", chunk).execute().data
-            already_allocated_ids |= {r["payment_id"] for r in rows}
+        already_allocated_ids = allocated_payment_ids(supabase, [p["id"] for p in payments_in_range])
 
         missing = [p for p in payments_in_range if p["id"] not in already_allocated_ids]
         if not missing:
@@ -624,16 +620,19 @@ def _self_heal_allocations_for_range(supabase: Client, date_from: date, date_to:
             invoice = invoices.get(p["invoice_id"])
             if not invoice:
                 continue
-            allocate_payment_to_line_items(
-                supabase,
-                company_id=invoice["company_id"],
-                payment_id=p["id"],
-                invoice_id=p["invoice_id"],
-                tenant_id=p.get("tenant_id"),
-                lease_id=invoice.get("lease_id"),
-                cash_amount=float(p.get("amount") or 0),
-                discount_amount=float(p.get("discount_amount") or 0),
-            )
+            try:
+                allocate_payment_to_line_items(
+                    supabase,
+                    company_id=invoice["company_id"],
+                    payment_id=p["id"],
+                    invoice_id=p["invoice_id"],
+                    tenant_id=p.get("tenant_id"),
+                    lease_id=invoice.get("lease_id"),
+                    cash_amount=float(p.get("amount") or 0),
+                    discount_amount=float(p.get("discount_amount") or 0),
+                )
+            except Exception:
+                logging.getLogger("app.reports").exception("Self-heal could not split payment %s", p["id"])
     except Exception:
         logging.getLogger("app.reports").exception("Self-heal of payment_allocations failed for %s to %s", date_from, date_to)
 
@@ -648,7 +647,7 @@ def _compute_income_by_head(
     downloaded PDF can never drift apart from each other.
 
     The report itself is built in services/receipts_report.py: cash/bank
-    receipts by head (plus Security, Advance / opening balance and Other
+    receipts by head (plus Security, Receipts not against an invoice and Other
     receipts) checked against the cash/bank books, and a separate part for
     amounts settled from the security deposit at final settlement.
     """
@@ -758,17 +757,26 @@ def income_by_head_drilldown(
         if not lease_id and not tenant_id:
             return {"receipts": [], "total": 0.0}
 
-        query = (
-            supabase.table("payment_allocations")
-            .select(
-                "amount, label, payment_id, invoice_id, "
-                "payments(payment_date, payment_method, account_id, receipt_group_id, notes), "
-                "invoices(invoice_number, invoice_month)"
+        def make_query():
+            q = (
+                supabase.table("payment_allocations")
+                .select(
+                    "id, created_at, amount, label, payment_id, invoice_id, "
+                    "payments(amount, payment_date, payment_method, account_id, receipt_group_id, notes), "
+                    "invoices(invoice_number, invoice_month)"
+                )
+                .eq("allocation_type", "cash")
             )
-            .eq("allocation_type", "cash")
+            q = q.eq("lease_id", lease_id) if lease_id else q.eq("tenant_id", tenant_id)
+            return q.order("id")
+
+        allocations = fetch_all(make_query)
+        # Never list more cash against a payment than it actually received
+        # (same cap the report itself applies).
+        allocations, _ = cap_allocations_to_receipts(
+            allocations,
+            {a["payment_id"]: float((a.get("payments") or {}).get("amount") or 0) for a in allocations},
         )
-        query = query.eq("lease_id", lease_id) if lease_id else query.eq("tenant_id", tenant_id)
-        allocations = query.execute().data
 
         # The column is one GL account's head name, which several charge names
         # can share ("Gas" and "Gas Bill"): pick every allocation whose name
@@ -860,14 +868,13 @@ def backfill_income_by_head(
     same class of bug already found and fixed once in record_receipt.
     """
     try:
-        all_payments = (
-            supabase.table("payments")
+        all_payments = fetch_all(
+            lambda: supabase.table("payments")
             .select("id, invoice_id, tenant_id, amount, discount_amount, payment_date, created_at")
             .not_.is_("invoice_id", "null")
             .order("payment_date")
             .order("created_at")
-            .execute()
-            .data
+            .order("id")
         )
         if not all_payments:
             return {
@@ -877,13 +884,7 @@ def backfill_income_by_head(
                 "errors": [],
             }
 
-        payment_ids = [p["id"] for p in all_payments]
-        already_allocated_payment_ids = set()
-        # Chunk the IN() list defensively -- fine at this app's scale either way.
-        for i in range(0, len(payment_ids), 500):
-            chunk = payment_ids[i : i + 500]
-            rows = supabase.table("payment_allocations").select("payment_id").in_("payment_id", chunk).execute().data
-            already_allocated_payment_ids |= {r["payment_id"] for r in rows}
+        already_allocated_payment_ids = allocated_payment_ids(supabase, [p["id"] for p in all_payments])
 
         invoice_ids = list({p["invoice_id"] for p in all_payments})
         invoices = (

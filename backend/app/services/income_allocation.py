@@ -83,6 +83,38 @@ def _line_items_sorted_for_allocation(supabase: Client, invoice_id: str, lease_i
     return items
 
 
+def allocated_payment_ids(supabase: Client, payment_ids: List[str]) -> set:
+    """
+    Which of these payments already have at least one allocation row.
+
+    Reads page by page: the API returns at most 1,000 rows per request and a
+    payment has several allocation rows (one per income head), so a single
+    unpaged read silently misses payments once a period is busy -- which made
+    the report split the same payment again every time it was opened.
+    """
+    found: set = set()
+    ids = [i for i in dict.fromkeys(payment_ids) if i]
+    for i in range(0, len(ids), 100):
+        chunk = ids[i : i + 100]
+        start = 0
+        while True:
+            rows = (
+                supabase.table("payment_allocations")
+                .select("payment_id")
+                .in_("payment_id", chunk)
+                .order("id")
+                .range(start, start + 999)
+                .execute()
+                .data
+                or []
+            )
+            found |= {r["payment_id"] for r in rows}
+            if len(rows) < 1000:
+                break
+            start += 1000
+    return found
+
+
 def _already_allocated_by_item(supabase: Client, item_ids: List[str]) -> Dict[str, float]:
     if not item_ids:
         return {}
@@ -114,10 +146,8 @@ def allocate_payment_to_line_items(
     across this invoice's line items, one-time/smallest-first, and writes
     one payment_allocations row per (line item, type) actually touched.
 
-    Call this AT MOST ONCE per payment_id -- live payment/receipt creation
-    only ever calls it once, right after inserting the payment row; the
-    /backfill endpoint checks payment_allocations for an existing row
-    before calling it again for a historical payment.
+    A payment that already has allocation rows is never split again (this
+    function returns [] for it), whoever calls it and however often.
 
     Any leftover after every line item is fully covered (should only ever
     happen from floating-point rounding, since callers never let
@@ -129,6 +159,12 @@ def allocate_payment_to_line_items(
     cash_amount = round(float(cash_amount or 0), 2)
     discount_amount = round(float(discount_amount or 0), 2)
     if cash_amount <= 0 and discount_amount <= 0:
+        return []
+
+    # A payment is split once, ever. Whoever calls this (live receipt, report
+    # self-heal, backfill, settlement) a payment that already has rows is left
+    # exactly as it is, so a repeated call can never double the report.
+    if allocated_payment_ids(supabase, [payment_id]):
         return []
 
     items = _line_items_sorted_for_allocation(supabase, invoice_id, lease_id)
@@ -177,19 +213,26 @@ def allocate_payment_to_line_items(
             # Rounding-only safety net -- top up the last (largest) item,
             # guaranteeing this payment's full amount is always accounted for.
             last = items[-1]
-            rows_to_insert.append(
-                {
-                    "company_id": company_id,
-                    "payment_id": payment_id,
-                    "invoice_id": invoice_id,
-                    "invoice_line_item_id": last["id"],
-                    "label": last["label"],
-                    "tenant_id": tenant_id,
-                    "lease_id": lease_id,
-                    "allocation_type": alloc_type,
-                    "amount": remaining,
-                }
+            existing = next(
+                (r for r in rows_to_insert if r["invoice_line_item_id"] == last["id"] and r["allocation_type"] == alloc_type),
+                None,
             )
+            if existing:
+                existing["amount"] = round(existing["amount"] + remaining, 2)
+            else:
+                rows_to_insert.append(
+                    {
+                        "company_id": company_id,
+                        "payment_id": payment_id,
+                        "invoice_id": invoice_id,
+                        "invoice_line_item_id": last["id"],
+                        "label": last["label"],
+                        "tenant_id": tenant_id,
+                        "lease_id": lease_id,
+                        "allocation_type": alloc_type,
+                        "amount": remaining,
+                    }
+                )
 
     _sweep(cash_amount, "cash")
     _sweep(discount_amount, "discount")

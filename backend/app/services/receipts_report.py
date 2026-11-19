@@ -8,7 +8,7 @@ Every rupee that moved through cash or bank in the period, tenant by tenant:
       Income, ...) -- charge names are matched ignoring capital letters and
       spacing and shown under the one name of their GL account
     * Security                    -- security deposit payments received
-    * Advance / opening balance   -- receipts with no invoice
+    * Receipts not against an invoice -- bank/cash receipts with no invoice
     * Other receipts              -- cash/bank debits that are not tenant
                                      receipts at all (e.g. a manual journal)
   Total received
@@ -41,7 +41,7 @@ from app.services.charge_heads import ChargeHeads
 logger = logging.getLogger("app.receipts_report")
 
 SECURITY_LABEL = "Security"
-ADVANCE_LABEL = "Advance / opening balance"
+ADVANCE_LABEL = "Receipts not against an invoice"
 OTHER_LABEL = "Other receipts"
 SPECIAL_LABELS = [SECURITY_LABEL, ADVANCE_LABEL, OTHER_LABEL]
 PAID_KEY = "__paid_against_security__"
@@ -91,6 +91,29 @@ def _in_chunks(supabase: Client, table: str, select: str, column: str, values: L
 
         out.extend(fetch_all(make))
     return out
+
+
+def cap_allocations_to_receipts(allocations: List[dict], cash_by_payment: Dict[str, float]) -> tuple:
+    """
+    A payment can never have more cash split across heads than it actually
+    received. Rows are counted oldest first; anything beyond the payment's
+    amount (an accidental repeat of the same split) is left out, and a row
+    that straddles the limit is trimmed. Returns (kept_rows, excess_ignored).
+    """
+    ordered = sorted(allocations, key=lambda a: (str(a.get("created_at") or ""), str(a.get("id") or "")))
+    left = {k: round(float(v or 0), 2) for k, v in cash_by_payment.items()}
+    kept: List[dict] = []
+    excess = 0.0
+    for a in ordered:
+        pid = a.get("payment_id")
+        amt = round(float(a.get("amount") or 0), 2)
+        room = max(left.get(pid, 0.0), 0.0)
+        take = round(min(amt, room), 2)
+        if take > 0.004:
+            kept.append({**a, "amount": take})
+            left[pid] = round(room - take, 2)
+        excess += amt - take
+    return kept, round(excess, 2)
 
 
 def _cash_bank_accounts(supabase: Client) -> Dict[str, dict]:
@@ -333,10 +356,13 @@ def build_receipts_report(
     allocations = _in_chunks(
         supabase,
         "payment_allocations",
-        "amount, label, lease_id, tenant_id, payment_id",
+        "id, created_at, amount, label, lease_id, tenant_id, payment_id",
         "payment_id",
         [p["id"] for p in tied],
         lambda q: q.eq("allocation_type", "cash").order("id"),
+    )
+    allocations, duplicate_excess = cap_allocations_to_receipts(
+        allocations, {p["id"]: float(p.get("amount") or 0) for p in tied}
     )
 
     sd_payments = fetch_all(
@@ -503,6 +529,7 @@ def build_receipts_report(
             {"source": "Net cash (books)", "amount": books_net},
         ],
         "unsplit_invoice_receipts": unsplit if abs(unsplit) > 0.01 and not building_id else 0.0,
+        "duplicate_allocation_excess_ignored": duplicate_excess,
         "note": (
             "Net cash is compared with every debit and refund credit on the cash and bank accounts in the books for the "
             "same dates. A difference usually means a receipt whose payment date and journal date fall in different "
