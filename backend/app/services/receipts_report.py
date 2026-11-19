@@ -54,6 +54,11 @@ SETTLEMENT_DESCRIPTION_PREFIX = "Security deposit settled at move-out"
 RECEIPT_SOURCES = ("receipt", "payment", "security_deposit_refund")
 SECURITY_SOURCE = "security_deposit_payment"
 REFUND_SOURCE = "security_deposit_refund"
+# Entries typed in by hand on the Journal page. A cash/bank debit in one of
+# these is classified by what it was credited to (see _classify_manual_receipts)
+# instead of being dumped under "Other receipts".
+MANUAL_SOURCE = "manual_adjustment"
+SECURITY_DEPOSITS_CODE = "2100"
 
 PAGE = 1000
 CHUNK = 150
@@ -172,6 +177,99 @@ def _lookups(supabase: Client, lease_ids: List[str], tenant_ids: List[str]):
     return leases, rooms, buildings, tenants
 
 
+def _classify_manual_receipts(supabase: Client, books_in: List[dict], heads: ChargeHeads):
+    """
+    Money received through a MANUAL journal entry (source 'manual_adjustment':
+    Dr Bank/Cash, Cr something) used to land under "Other receipts" no matter
+    what it was credited to -- so a security deposit keyed in by journal, even
+    with the right account (2100), tenant and building on its lines, showed as
+    an unknown receipt instead of under Security.
+
+    Here each cash/bank debit of a manual entry is split across the entry's
+    non-cash credit lines, and each share is given a head by its account:
+      * Security Deposits Held (2100)             -> "Security"
+      * an income account / Due to Owners (2200)  -> that account's head
+        (same name the invoice-based receipts use, e.g. Rent)
+    Anything credited elsewhere (another bank account, a liability, a
+    receivable, ...) stays under "Other receipts", exactly as before.
+
+    Tenant / building come from the credit line (else the cash line); a line
+    without a lease is attached to that tenant's lease (active first).
+
+    Returns (items, leftover):
+      items    -- [{entry_id, entry_date, description, account_id, label,
+                    amount, tenant_id, lease_id, building_id}]
+      leftover -- {(entry_id, cash_account_id): amount still unclassified}
+    """
+    manual = [b for b in books_in if b["source_type"] == MANUAL_SOURCE]
+    if not manual:
+        return [], {}
+
+    entry_ids = list({b["entry_id"] for b in manual})
+    lines = _in_chunks(
+        supabase, "journal_lines", "journal_entry_id, account_id, direction, amount, building_id, tenant_id, lease_id",
+        "journal_entry_id", entry_ids,
+    )
+    accounts = {
+        a["id"]: a
+        for a in _in_chunks(
+            supabase, "chart_of_accounts", "id, code, name, account_type, transfers_to_owner, is_cash_or_bank",
+            "id", list({l["account_id"] for l in lines}),
+        )
+    }
+    credits_by_entry: Dict[str, List[dict]] = defaultdict(list)
+    for l in lines:
+        if l["direction"] == "credit" and not accounts.get(l["account_id"], {}).get("is_cash_or_bank"):
+            credits_by_entry[l["journal_entry_id"]].append(l)
+
+    def label_for(account: dict, account_id: str) -> Optional[str]:
+        if account.get("code") == SECURITY_DEPOSITS_CODE:
+            return SECURITY_LABEL
+        if account.get("account_type") == "income" or account.get("transfers_to_owner"):
+            return heads.heading_for_account(account_id)
+        return None
+
+    # Tenants that have no lease on the line: look their leases up once.
+    need_lease = {
+        (l.get("tenant_id") or b.get("tenant_id"))
+        for b in manual
+        for l in credits_by_entry.get(b["entry_id"], [])
+        if not (l.get("lease_id") or b.get("lease_id")) and (l.get("tenant_id") or b.get("tenant_id"))
+    }
+    tenant_leases: Dict[str, List[dict]] = defaultdict(list)
+    for lease in _in_chunks(supabase, "leases", "id, tenant_id, status, start_date", "tenant_id", list(need_lease)):
+        tenant_leases[lease["tenant_id"]].append(lease)
+
+    items: List[dict] = []
+    leftover: Dict[tuple, float] = defaultdict(float)
+    for b in manual:
+        credits = credits_by_entry.get(b["entry_id"], [])
+        credit_total = sum(float(l["amount"]) for l in credits)
+        classified = 0.0
+        if credit_total > 0.004:
+            for l in credits:
+                label = label_for(accounts.get(l["account_id"], {}), l["account_id"])
+                if not label:
+                    continue
+                share = round(b["amount"] * float(l["amount"]) / credit_total, 2)
+                if share <= 0.004:
+                    continue
+                tenant_id = l.get("tenant_id") or b.get("tenant_id")
+                lease_id = l.get("lease_id") or b.get("lease_id") or (
+                    _pick_lease_for_tenant(tenant_leases.get(tenant_id, [])) if tenant_id else None
+                )
+                items.append(
+                    {"entry_id": b["entry_id"], "entry_date": b["entry_date"], "description": b.get("description"),
+                     "account_id": b["account_id"], "label": label, "amount": share, "tenant_id": tenant_id,
+                     "lease_id": lease_id, "building_id": l.get("building_id")}
+                )
+                classified += share
+        remainder = round(b["amount"] - classified, 2)
+        if remainder > 0.004:
+            leftover[(b["entry_id"], b["account_id"])] += remainder
+    return items, dict(leftover)
+
+
 def _books_deposit_released(
     supabase: Client, date_from: date, date_to: date, building_id: Optional[str]
 ) -> List[dict]:
@@ -274,20 +372,23 @@ def build_receipts_report(
     books_out = [b for b in _books_cash_lines(supabase, date_from, date_to, building_id, cash_ids, "credit") if b["source_type"] == REFUND_SOURCE]
     released = _books_deposit_released(supabase, date_from, date_to, building_id)
     settlement_rows = [r for r in _load_settlement_data(supabase, date_from, date_to)["rows"] if r["kind"] in ("invoice_settled", "charge")]
+    manual_items, manual_leftover = _classify_manual_receipts(supabase, books_in, heads)
 
     lease_ids |= {r["lease_id"] for r in released if r.get("lease_id")}
     lease_ids |= {r["lease_id"] for r in settlement_rows if r.get("lease_id")}
+    lease_ids |= {m["lease_id"] for m in manual_items if m.get("lease_id")}
     tenant_ids_all = (
         [a["tenant_id"] for a in allocations if a.get("tenant_id")]
         + untied_tenant_ids
         + [r["tenant_id"] for r in released if r.get("tenant_id")]
         + [r["tenant_id"] for r in settlement_rows if r.get("tenant_id")]
+        + [m["tenant_id"] for m in manual_items if m.get("tenant_id")]
     )
     leases, rooms, buildings, tenants = _lookups(supabase, list(lease_ids), tenant_ids_all)
 
     grouped: Dict[str, dict] = {}
 
-    def add(lease_id: Optional[str], tenant_id: Optional[str], label: str, amount: float) -> None:
+    def add(lease_id: Optional[str], tenant_id: Optional[str], label: str, amount: float, building_hint: Optional[str] = None) -> None:
         key = lease_id or f"tenant:{tenant_id}"
         lease = leases.get(lease_id) if lease_id else None
         room = rooms.get(lease["room_id"]) if lease else None
@@ -297,7 +398,7 @@ def build_receipts_report(
                 "lease_id": lease_id,
                 "tenant_id": tenant_id or (lease["tenant_id"] if lease else None),
                 "room_id": lease["room_id"] if lease else None,
-                "building_id": room["building_id"] if room else None,
+                "building_id": room["building_id"] if room else building_hint,
                 "heads": {},
                 "total": 0.0,
                 "paid": 0.0,
@@ -327,6 +428,10 @@ def build_receipts_report(
         add(r.get("lease_id"), r.get("tenant_id"), label, float(r["amount"]))
     for r in released:
         add(r.get("lease_id"), r.get("tenant_id"), PAID_KEY, r["amount"])
+    # Receipts keyed in by manual journal entry: shown under their proper head
+    # (Security, Rent, ...) on the tenant's own row, not under "Other receipts".
+    for m in manual_items:
+        add(m.get("lease_id"), m.get("tenant_id"), m["label"], m["amount"], m.get("building_id"))
 
     rows = list(grouped.values())
     if building_id:
@@ -335,8 +440,12 @@ def build_receipts_report(
     books_by_source: Dict[str, float] = defaultdict(float)
     for b in books_in:
         books_by_source[b["source_type"]] += b["amount"]
-    other_entries = [b for b in books_in if b["source_type"] not in RECEIPT_SOURCES and b["source_type"] != SECURITY_SOURCE]
-    books_other = round(sum(b["amount"] for b in other_entries), 2)
+    other_entries = [
+        b for b in books_in
+        if b["source_type"] not in RECEIPT_SOURCES and b["source_type"] != SECURITY_SOURCE and b["source_type"] != MANUAL_SOURCE
+    ]
+    # Manual entries only keep the part that could not be given a head.
+    books_other = round(sum(b["amount"] for b in other_entries) + sum(manual_leftover.values()), 2)
 
     all_columns_used = {label for r in rows for label in r["heads"].keys()}
     head_columns = sorted([c for c in all_columns_used if c not in SPECIAL_LABELS], key=label_sort_key)
@@ -525,14 +634,16 @@ def drilldown_special(
         return f"{a['code']} · {a['name']}" if a else "—"
 
     receipts: List[dict] = []
-    if label == SECURITY_LABEL and lease_id:
-        deposit_ids = [d["id"] for d in supabase.table("security_deposits").select("id").eq("lease_id", lease_id).execute().data]
-        rows = _in_chunks(
-            supabase, "security_deposit_payments", "id, amount, account_id, payment_date", "security_deposit_id", deposit_ids,
-            lambda q: q.gte("payment_date", str(date_from)).lte("payment_date", str(date_to)),
-        )
-        for p in rows:
-            receipts.append(_receipt_item(p["id"], p["payment_date"], "security deposit", p.get("account_id"), account_name(p.get("account_id")), "Security deposit received", p["amount"]))
+    if label == SECURITY_LABEL and (lease_id or tenant_id):
+        if lease_id:
+            deposit_ids = [d["id"] for d in supabase.table("security_deposits").select("id").eq("lease_id", lease_id).execute().data]
+            rows = _in_chunks(
+                supabase, "security_deposit_payments", "id, amount, account_id, payment_date", "security_deposit_id", deposit_ids,
+                lambda q: q.gte("payment_date", str(date_from)).lte("payment_date", str(date_to)),
+            )
+            for p in rows:
+                receipts.append(_receipt_item(p["id"], p["payment_date"], "security deposit", p.get("account_id"), account_name(p.get("account_id")), "Security deposit received", p["amount"]))
+        receipts.extend(drilldown_manual_lines(supabase, label, date_from, date_to, lease_id, tenant_id, ChargeHeads(supabase)))
     elif label == ADVANCE_LABEL and (tenant_id or lease_id):
         t_id = tenant_id
         if not t_id and lease_id:
@@ -557,12 +668,45 @@ def drilldown_special(
                 continue
             receipts.append(_receipt_item(r["entry_id"], r["entry_date"], "security deposit paid out", None, "Security Deposits Held", r.get("description"), r["amount"]))
     elif label == OTHER_LABEL:
-        for b in _books_cash_debits(supabase, date_from, date_to, None, list(cash_accounts.keys())):
+        books_in = _books_cash_debits(supabase, date_from, date_to, None, list(cash_accounts.keys()))
+        _, manual_leftover = _classify_manual_receipts(supabase, books_in, ChargeHeads(supabase))
+        for b in books_in:
             if b["source_type"] in RECEIPT_SOURCES or b["source_type"] == SECURITY_SOURCE:
                 continue
-            receipts.append(_receipt_item(b["entry_id"], b["entry_date"], b["source_type"], b["account_id"], account_name(b["account_id"]), b.get("description"), b["amount"]))
+            amount = b["amount"]
+            if b["source_type"] == MANUAL_SOURCE:
+                # Only the part of a manual entry that has no head of its own.
+                amount = round(manual_leftover.pop((b["entry_id"], b["account_id"]), 0.0), 2)
+                if amount <= 0.004:
+                    continue
+            receipts.append(_receipt_item(b["entry_id"], b["entry_date"], b["source_type"], b["account_id"], account_name(b["account_id"]), b.get("description"), amount))
     receipts.sort(key=lambda r: r["payment_date"])
     return {"receipts": receipts, "total": round(sum(r["amount"] for r in receipts), 2)}
+
+
+def drilldown_manual_lines(
+    supabase: Client, heading: str, date_from: date, date_to: date, lease_id: Optional[str], tenant_id: Optional[str], heads: ChargeHeads
+) -> List[dict]:
+    """Receipts keyed in by manual journal entry that the report shows under
+    this head for this lease/tenant, listed beside the ordinary receipts."""
+    cash_accounts = _cash_bank_accounts(supabase)
+    books_in = _books_cash_debits(supabase, date_from, date_to, None, list(cash_accounts.keys()))
+    items, _ = _classify_manual_receipts(supabase, books_in, heads)
+    out: List[dict] = []
+    for m in items:
+        if m["label"] != heading:
+            continue
+        if lease_id:
+            if m.get("lease_id") != lease_id:
+                continue
+        elif m.get("tenant_id") != tenant_id:
+            continue
+        acct = cash_accounts.get(m["account_id"])
+        out.append(
+            _receipt_item(m["entry_id"], m["entry_date"], "journal entry", m["account_id"],
+                          f"{acct['code']} · {acct['name']}" if acct else "—", m.get("description"), m["amount"])
+        )
+    return out
 
 
 def drilldown_settlement_lines(

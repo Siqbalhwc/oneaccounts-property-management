@@ -16,6 +16,7 @@ from app.services.receipts_report import (
     PAID_LABEL,
     SECURITY_LABEL,
     build_receipts_report,
+    drilldown_manual_lines,
     drilldown_settlement_lines,
     drilldown_special,
 )
@@ -820,6 +821,7 @@ def income_by_head_drilldown(
             )
 
         receipts.extend(drilldown_settlement_lines(supabase, label, date_from, date_to, lease_id, tenant_id, heads))
+        receipts.extend(drilldown_manual_lines(supabase, label, date_from, date_to, lease_id, tenant_id, heads))
         receipts.sort(key=lambda r: r["payment_date"])
         return {"receipts": receipts, "total": round(sum(r["amount"] for r in receipts), 2)}
     except Exception as e:

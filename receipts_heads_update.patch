@@ -1,0 +1,2219 @@
+diff --git a/023_schema_patch_039_account_report_head_name.sql b/023_schema_patch_039_account_report_head_name.sql
+new file mode 100644
+index 0000000..9343e64
+--- /dev/null
++++ b/023_schema_patch_039_account_report_head_name.sql
+@@ -0,0 +1,10 @@
++alter table chart_of_accounts add column if not exists report_head_name text;
++
++update chart_of_accounts
++set report_head_name = 'Rent'
++where code = '2200' and report_head_name is null;
++
++select code, name, report_head_name
++from chart_of_accounts
++where report_head_name is not null
++order by code;
+diff --git a/backend/app/routers/chart_of_accounts.py b/backend/app/routers/chart_of_accounts.py
+index 76e1a65..2b4e03c 100644
+--- a/backend/app/routers/chart_of_accounts.py
++++ b/backend/app/routers/chart_of_accounts.py
+@@ -1,3 +1,5 @@
++from typing import Optional
++
+ from fastapi import APIRouter, Depends, HTTPException
+ from pydantic import BaseModel
+ from supabase import Client
+@@ -24,6 +26,10 @@ class AccountCreate(BaseModel):
+     # "which account did this land in" pickers), so a receivable-type
+     # account can never be mistaken for a real bank/cash account there.
+     is_cash_or_bank: bool = False
++    # The name charge lines and report columns show for this account, when it
++    # should differ from the account's own name (e.g. "Due to Owners" shows as
++    # "Rent"). Empty = use the account name.
++    report_head_name: Optional[str] = None
+ 
+ 
+ @router.post("", status_code=201)
+@@ -38,6 +44,11 @@ def create_account(
+     protected system accounts (Bank, AR, Due to Owners, etc.) can only be
+     created by the schema patch, never through this endpoint."""
+     row = payload.model_dump()
++    # Save the report name only when one was given, so creating accounts keeps
++    # working even before the report_head_name column exists.
++    row["report_head_name"] = " ".join((row.get("report_head_name") or "").split()) or None
++    if row["report_head_name"] is None:
++        row.pop("report_head_name")
+     row["company_id"] = company_id
+     row["is_system"] = False
+     res = supabase.table("chart_of_accounts").insert(row).execute()
+@@ -45,7 +56,9 @@ def create_account(
+ 
+ 
+ class AccountUpdate(BaseModel):
+-    is_cash_or_bank: bool
++    is_cash_or_bank: Optional[bool] = None
++    report_head_name: Optional[str] = None
++    # report_head_name can be cleared by sending an empty string.
+ 
+ 
+ @router.patch("/{account_id}")
+@@ -61,9 +74,17 @@ def update_account(
+     field this exposes for now, since every other account property is
+     fixed once created (changing an account's type/code after it already
+     has posted journal lines would make historical reports inconsistent)."""
++    changes: dict = {}
++    if payload.is_cash_or_bank is not None:
++        changes["is_cash_or_bank"] = payload.is_cash_or_bank
++    if payload.report_head_name is not None:
++        cleaned = " ".join(payload.report_head_name.split())
++        changes["report_head_name"] = cleaned or None
++    if not changes:
++        raise HTTPException(status_code=400, detail="Nothing to update")
+     res = (
+         supabase.table("chart_of_accounts")
+-        .update({"is_cash_or_bank": payload.is_cash_or_bank})
++        .update(changes)
+         .eq("id", account_id)
+         .eq("company_id", company_id)
+         .execute()
+diff --git a/backend/app/routers/data_transfer.py b/backend/app/routers/data_transfer.py
+index 686aa31..7ddc517 100644
+--- a/backend/app/routers/data_transfer.py
++++ b/backend/app/routers/data_transfer.py
+@@ -57,6 +57,7 @@ from app.core.hooks import emit
+ from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
+ from app.crud.generic import write_audit_log, friendly_db_error
+ from postgrest.exceptions import APIError
++from app.services.charge_heads import norm_label
+ from app.services.invoice_batch import fetch_all
+ from app.services.owner_tenants import ensure_owner_tenant
+ from app.services.ledger import JournalLine, UnbalancedJournalEntry, post_journal_entry
+@@ -1105,8 +1106,9 @@ def import_lease_charges(
+     open_charges = fetch_all(
+         lambda: supabase.table("lease_charges").select("id, lease_id, label, amount").eq("company_id", company_id).is_("effective_to", "null").order("id")
+     )
++    # normalized name -> the name exactly as the company saved it
+     mapped_labels = {
+-        str(m["label"]).strip()
++        norm_label(m["label"]): str(m["label"]).strip()
+         for m in fetch_all(lambda: supabase.table("charge_type_accounts").select("id, label").eq("company_id", company_id).order("id"))
+     }
+ 
+@@ -1169,6 +1171,10 @@ def import_lease_charges(
+             continue
+         seen_leases.add(lease["id"])
+ 
++        # Use the name exactly as the company saved it ("COMMISSION" -> "Commission"
++        # if that is how the charge head is set up), so spellings never drift.
++        for c in wanted:
++            c["label"] = mapped_labels.get(norm_label(c["label"]), c["label"])
+         existing = charges_by_lease.get(lease["id"], [])
+         by_identity = {charge_identity(c["label"]): c for c in existing}
+         to_add: List[Dict[str, Any]] = []
+@@ -1177,7 +1183,7 @@ def import_lease_charges(
+             have = by_identity.get(charge_identity(c["label"]))
+             if have is None:
+                 to_add.append(c)
+-                if c["label"] not in mapped_labels:
++                if norm_label(c["label"]) not in mapped_labels:
+                     unmapped.add(c["label"])
+             elif abs(float(have["amount"]) - c["amount"]) > 0.005:
+                 notes.append(f'{c["label"]}: lease already has {float(have["amount"]):,.0f}, file says {c["amount"]:,.0f} - left unchanged')
+diff --git a/backend/app/routers/reports.py b/backend/app/routers/reports.py
+index 7c5465f..83838d4 100644
+--- a/backend/app/routers/reports.py
++++ b/backend/app/routers/reports.py
+@@ -9,13 +9,14 @@ from app.core.deps import get_current_company_id, get_current_user, get_supabase
+ from app.services.income_allocation import allocate_payment_to_line_items
+ from app.services.invoice_receipt_comparison import build_comparison
+ from app.services.ledger import get_account_id, get_tenant_account_balance_as_of
++from app.services.charge_heads import ChargeHeads
+ from app.services.receipts_report import (
+     ADVANCE_LABEL,
+     OTHER_LABEL,
+     PAID_LABEL,
+     SECURITY_LABEL,
+     build_receipts_report,
+-    drilldown_settlement,
++    drilldown_settlement_lines,
+     drilldown_special,
+ )
+ 
+@@ -739,7 +740,6 @@ def income_by_head_drilldown(
+     date_to: date = Query(...),
+     lease_id: Optional[str] = Query(None),
+     tenant_id: Optional[str] = Query(None),
+-    part: str = Query("receipts", description="'receipts' (cash/bank) or 'settlement' (settled from security deposit)"),
+     supabase: Client = Depends(get_supabase),
+ ):
+     """
+@@ -752,8 +752,6 @@ def income_by_head_drilldown(
+     made it up.
+     """
+     try:
+-        if part == "settlement" and lease_id:
+-            return drilldown_settlement(supabase, label, date_from, date_to, lease_id)
+         if label in (SECURITY_LABEL, ADVANCE_LABEL, OTHER_LABEL, PAID_LABEL):
+             return drilldown_special(supabase, label, date_from, date_to, lease_id, tenant_id)
+         if not lease_id and not tenant_id:
+@@ -762,19 +760,24 @@ def income_by_head_drilldown(
+         query = (
+             supabase.table("payment_allocations")
+             .select(
+-                "amount, payment_id, invoice_id, "
++                "amount, label, payment_id, invoice_id, "
+                 "payments(payment_date, payment_method, account_id, receipt_group_id, notes), "
+                 "invoices(invoice_number, invoice_month)"
+             )
+             .eq("allocation_type", "cash")
+-            .eq("label", label)
+         )
+         query = query.eq("lease_id", lease_id) if lease_id else query.eq("tenant_id", tenant_id)
+         allocations = query.execute().data
+ 
++        # The column is one GL account's head name, which several charge names
++        # can share ("Gas" and "Gas Bill"): pick every allocation whose name
++        # resolves to that head, inside the date range.
++        heads = ChargeHeads(supabase)
+         allocations = [
+             a for a in allocations
+-            if a.get("payments") and date_from <= date.fromisoformat(str(a["payments"]["payment_date"])) <= date_to
++            if heads.heading_for_label(a.get("label")) == label
++            and a.get("payments")
++            and date_from <= date.fromisoformat(str(a["payments"]["payment_date"])) <= date_to
+         ]
+ 
+         # Resolve the bank/cash account for every receipt: straight off the
+@@ -816,6 +819,7 @@ def income_by_head_drilldown(
+                 }
+             )
+ 
++        receipts.extend(drilldown_settlement_lines(supabase, label, date_from, date_to, lease_id, tenant_id, heads))
+         receipts.sort(key=lambda r: r["payment_date"])
+         return {"receipts": receipts, "total": round(sum(r["amount"] for r in receipts), 2)}
+     except Exception as e:
+diff --git a/backend/app/services/charge_heads.py b/backend/app/services/charge_heads.py
+new file mode 100644
+index 0000000..60ada46
+--- /dev/null
++++ b/backend/app/services/charge_heads.py
+@@ -0,0 +1,82 @@
++"""
++Charge heads -- one name per GL account.
++
++A charge on a lease is saved with a name (its label) and posts to a GL account
++through the company's charge_type_accounts mapping. Names used to be typed by
++hand, so "Commission" and "COMMISSION" (or "Gas" and "Gas Bill") were treated
++as different things: the lookup was case-sensitive, a name that missed the
++mapping silently posted to Other Income, and reports showed one column per
++spelling.
++
++This module is the single place that decides:
++  * norm_label()        -- two names are "the same" when they match ignoring
++                           capital letters and extra spaces
++  * ChargeHeads         -- label -> GL account (same matching), and the one
++                           name a column / charge line shows for that account:
++                           the account's report_head_name if it has one (e.g.
++                           Due to Owners shows as "Rent"), else its own name.
++
++Read-only. Every query goes through the caller's own RLS-scoped client, so it
++only ever sees the caller's own company's accounts and mappings.
++"""
++
++import logging
++from typing import Dict, Optional
++
++from supabase import Client
++
++logger = logging.getLogger("app.charge_heads")
++
++OTHER_INCOME_CODE = "4100"
++
++
++def norm_label(label: Optional[str]) -> str:
++    """Case-insensitive, whitespace-collapsed key for comparing charge names."""
++    return " ".join(str(label or "").split()).casefold()
++
++
++def head_name(account: Optional[dict]) -> str:
++    """The name shown for a GL account's charge head."""
++    if not account:
++        return "Other Income"
++    custom = str(account.get("report_head_name") or "").strip()
++    return custom or str(account.get("name") or "Other Income")
++
++
++class ChargeHeads:
++    """Loads the company's accounts and charge mappings once."""
++
++    def __init__(self, supabase: Client, company_id: Optional[str] = None):
++        def accounts_query(columns: str):
++            q = supabase.table("chart_of_accounts").select(columns)
++            return q.eq("company_id", company_id) if company_id else q
++
++        try:
++            rows = accounts_query("id, code, name, report_head_name").execute().data or []
++        except Exception:
++            # Migration 023 (report_head_name) not run yet: use plain account names.
++            logger.warning("chart_of_accounts.report_head_name unavailable; using account names")
++            rows = accounts_query("id, code, name").execute().data or []
++        self.accounts: Dict[str, dict] = {r["id"]: r for r in rows}
++        self.other_income = next((r for r in rows if r.get("code") == OTHER_INCOME_CODE), None)
++
++        q = supabase.table("charge_type_accounts").select("label, account_id")
++        if company_id:
++            q = q.eq("company_id", company_id)
++        self._label_to_account: Dict[str, str] = {}
++        for m in q.execute().data or []:
++            self._label_to_account.setdefault(norm_label(m["label"]), m["account_id"])
++
++    def account_for_label(self, label: Optional[str]) -> Optional[dict]:
++        """The GL account a charge name posts to; Other Income when unmapped."""
++        account_id = self._label_to_account.get(norm_label(label))
++        return self.accounts.get(account_id) if account_id else self.other_income
++
++    def is_mapped(self, label: Optional[str]) -> bool:
++        return norm_label(label) in self._label_to_account
++
++    def heading_for_label(self, label: Optional[str]) -> str:
++        return head_name(self.account_for_label(label))
++
++    def heading_for_account(self, account_id: Optional[str]) -> str:
++        return head_name(self.accounts.get(account_id)) if account_id else head_name(self.other_income)
+diff --git a/backend/app/services/income_by_head_pdf.py b/backend/app/services/income_by_head_pdf.py
+index 630dfdb..ddf1334 100644
+--- a/backend/app/services/income_by_head_pdf.py
++++ b/backend/app/services/income_by_head_pdf.py
+@@ -36,11 +36,18 @@ ROW_ALT = colors.Color(0.965, 0.965, 0.955)
+ WHITE = colors.white
+ 
+ 
++def _clip(text, n: int) -> str:
++    """One line only: longer text ends in an ellipsis (the screen shows the full text on click)."""
++    text = str(text or "—")
++    return text if len(text) <= n else text[: n - 1].rstrip() + "…"
++
++
+ def _fmt(n: float) -> str:
+     """Plain number -- the report says "Amounts in Rupees" once, top right, instead
+     of repeating "Rs" in every cell."""
+     try:
+-        return f"{float(n):,.0f}"
++        r = round(float(n))
++        return f"({abs(r):,.0f})" if r < 0 else f"{r:,.0f}"
+     except (TypeError, ValueError):
+         return "0"
+ 
+@@ -126,7 +133,6 @@ def render_income_by_head_pdf(
+     )
+     title_table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0)]))
+     story.append(title_table)
+-    story.append(Paragraph("Part 1 — Cash and bank receipts", styles["part"]))
+ 
+     # ---- Table ----
+     columns = report["columns"]
+@@ -169,15 +175,15 @@ def render_income_by_head_pdf(
+     header_row = (
+         [Paragraph("Sr", styles["th"]), Paragraph("Tenant", styles["th"]), Paragraph(unit_from_company(company)["singular"], styles["th"])]
+         + [Paragraph(c, styles["th_r"]) for c in columns]
+-        + [Paragraph("Total received", styles["th_r"]), Paragraph("Paid against security", styles["th_r"]), Paragraph("Net", styles["th_r"])]
++        + [Paragraph("Total received", styles["th_r"]), Paragraph("Paid against security", styles["th_r"]), Paragraph("Net cash", styles["th_r"])]
+     )
+ 
+     table_data = [header_row]
+     for r in rows:
+         row_cells = [
+             Paragraph(str(r["sr"]), styles["cell"]),
+-            Paragraph(r["tenant_name"] or "—", styles["cell"]),
+-            Paragraph(r["room_label"] or "—", styles["cell"]),
++            Paragraph(_clip(r["tenant_name"], 26), styles["cell"]),
++            Paragraph(_clip(r["room_label"], 24), styles["cell"]),
+         ]
+         for c in columns:
+             amount = r["heads"].get(c, 0)
+@@ -227,82 +233,14 @@ def render_income_by_head_pdf(
+     recon = report.get("reconciliation") or {}
+     story.append(Spacer(1, 3 * mm))
+     if recon.get("matches", True):
+-        recon_text = (
+-            f"Matches the cash and bank books for the period: received {_fmt(recon.get('books_total', report['grand_total']))}, "
+-            f"paid against security {_fmt(recon.get('paid_books', 0))}."
+-        )
++        recon_text = f"Net cash matches the cash and bank books for the period: {_fmt(recon.get('books_net', report.get('net_total', 0)))}."
+     else:
+         recon_text = (
+-            f"Does not yet match the cash and bank books: received {_fmt(recon.get('report_total', 0))} vs books "
+-            f"{_fmt(recon.get('books_total', 0))} (difference {_fmt(recon.get('gap', 0))}); paid against security "
+-            f"{_fmt(recon.get('paid_report', 0))} vs books {_fmt(recon.get('paid_books', 0))} (difference {_fmt(recon.get('paid_gap', 0))})."
++            f"Net cash does not yet match the cash and bank books: report {_fmt(recon.get('report_net', 0))} vs books "
++            f"{_fmt(recon.get('books_net', 0))} (difference {_fmt(recon.get('gap', 0))})."
+         )
+     story.append(Paragraph(recon_text, styles["footer"]))
+ 
+-    settlement = report.get("settlement") or {}
+-    if settlement.get("rows"):
+-        story.append(Spacer(1, 6 * mm))
+-        story.append(Paragraph("Part 2 — Settled at final settlement (from security deposit, not cash)", styles["part"]))
+-        s_cols = settlement["columns"]
+-        s_header = (
+-            [Paragraph("Sr", styles["th"]), Paragraph("Tenant", styles["th"]), Paragraph(unit_from_company(company)["singular"], styles["th"])]
+-            + [Paragraph(c, styles["th_r"]) for c in s_cols]
+-            + [Paragraph("Settled", styles["th_r"]), Paragraph("Refund paid", styles["th_r"]), Paragraph("Deposit released", styles["th_r"])]
+-        )
+-        s_data = [s_header]
+-        for r in settlement["rows"]:
+-            cells = [
+-                Paragraph(str(r["sr"]), styles["cell"]),
+-                Paragraph(r["tenant_name"] or "—", styles["cell"]),
+-                Paragraph(r["room_label"] or "—", styles["cell"]),
+-            ]
+-            for c in s_cols:
+-                amount = r["heads"].get(c, 0)
+-                cells.append(Paragraph(_fmt(amount) if amount else "—", styles["cell_r"] if amount else styles["cell_r_dim"]))
+-            cells += [
+-                Paragraph(_fmt(r["settled_total"]), styles["total_cell_r"]),
+-                Paragraph(_fmt(r["refund_paid"]) if r["refund_paid"] else "—", styles["cell_r"] if r["refund_paid"] else styles["cell_r_dim"]),
+-                Paragraph(_fmt(r["deposit_released"]), styles["total_cell_r"]),
+-            ]
+-            s_data.append(cells)
+-        s_data.append(
+-            [Paragraph("", styles["cell"]), Paragraph("Total", styles["total_cell"]), Paragraph("", styles["cell"])]
+-            + [Paragraph(_fmt(settlement["totals"].get(c, 0)), styles["total_cell_r"]) for c in s_cols]
+-            + [
+-                Paragraph(_fmt(settlement["settled_total"]), styles["total_cell_r"]),
+-                Paragraph(_fmt(settlement["refund_total"]), styles["total_cell_r"]),
+-                Paragraph(_fmt(settlement["deposit_released_total"]), styles["total_cell_r"]),
+-            ]
+-        )
+-        s_numeric = len(s_cols) + 3
+-        s_w = (usable_width - sr_w - tenant_w - room_w) / max(s_numeric, 1)
+-        s_table = Table(s_data, colWidths=[sr_w, tenant_w, room_w] + [s_w] * s_numeric, repeatRows=1)
+-        s_style = [
+-            ("BACKGROUND", (0, 0), (-1, 0), LEDGER),
+-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+-            ("TOPPADDING", (0, 0), (-1, -1), 3.2 * mm),
+-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3.2 * mm),
+-            ("LEFTPADDING", (0, 0), (-1, -1), 2.5 * mm),
+-            ("RIGHTPADDING", (0, 0), (-1, -1), 2.5 * mm),
+-            ("LEFTPADDING", (3, 0), (-1, -1), num_pad),
+-            ("RIGHTPADDING", (3, 0), (-1, -1), num_pad),
+-            ("LINEBELOW", (0, -1), (-1, -1), 1.1, LEDGER),
+-            ("LINEABOVE", (0, -1), (-1, -1), 0.75, BRASS),
+-            ("BACKGROUND", (0, -1), (-1, -1), PAPER),
+-        ]
+-        for i in range(1, len(s_data) - 1):
+-            s_style.append(("LINEBELOW", (0, i), (-1, i), 0.4, colors.Color(0.85, 0.84, 0.8)))
+-        s_table.setStyle(TableStyle(s_style))
+-        story.append(s_table)
+-        story.append(Spacer(1, 3 * mm))
+-        story.append(
+-            Paragraph(
+-                "Part 2 amounts were cleared out of the tenant's security deposit when the lease was closed, so no cash or bank "
+-                "money moved for them except the refund paid. Deposit released = settled + refund paid.",
+-                styles["footer"],
+-            )
+-        )
+-
+     doc.build(story)
+     buffer.seek(0)
+     return buffer.read()
+diff --git a/backend/app/services/invoice_batch.py b/backend/app/services/invoice_batch.py
+index b626f55..7af6dee 100644
+--- a/backend/app/services/invoice_batch.py
++++ b/backend/app/services/invoice_batch.py
+@@ -40,6 +40,7 @@ from typing import Callable, Iterable, Optional
+ from supabase import Client
+ 
+ from app.core.labels import get_unit
++from app.services.charge_heads import norm_label
+ from app.services.invoicing import compute_prorated_charges, merge_current_charges
+ from app.services.ledger import UnbalancedJournalEntry
+ from app.services.utility_bills import apply_utility_overrides, fetch_bills, lease_overlaps_month
+@@ -158,7 +159,7 @@ def _load_reference_data(supabase: Client, company_id: str) -> dict:
+     return {
+         "ar_id": by_code["1100"],
+         "other_income_id": by_code["4100"],
+-        "label_to_account": {m["label"]: m["account_id"] for m in mappings},
++        "label_to_account": {norm_label(m["label"]): m["account_id"] for m in mappings},
+     }
+ 
+ 
+@@ -304,7 +305,7 @@ def _generate_slice_bulk(
+ 
+             credit_by_account: dict = defaultdict(float)
+             for c in p["prorated"]:
+-                acct = ref["label_to_account"].get(c["label"]) or ref["other_income_id"]
++                acct = ref["label_to_account"].get(norm_label(c["label"])) or ref["other_income_id"]
+                 credit_by_account[acct] += float(c["amount"])
+ 
+             tags = {
+diff --git a/backend/app/services/lease_settlement.py b/backend/app/services/lease_settlement.py
+index b9f89d7..cc67b13 100644
+--- a/backend/app/services/lease_settlement.py
++++ b/backend/app/services/lease_settlement.py
+@@ -45,7 +45,7 @@ from app.services.ledger import (
+     resolve_room_owner,
+     reverse_journal_entry,
+ )
+-from app.services.income_allocation import allocate_payment_to_line_items, split_invoice_balance_by_head
++from app.services.income_allocation import allocate_payment_to_line_items
+ from app.services.utility_bills import apply_utility_overrides, fetch_bills
+ 
+ logger = logging.getLogger("app.lease_settlement")
+@@ -460,120 +460,101 @@ def _dues_segments(preview: dict, final_invoice: Optional[dict]) -> list[dict]:
+     return segments
+ 
+ 
+-def _record_settlement_cash(
+-    supabase: Client, company_id: str, lease_id: str, tenant_id: str, amount: float,
+-    account: dict, payment_date: str, preview: dict, final_invoice: Optional[dict],
++def _record_settlement_receipts(
++    supabase: Client, company_id: str, lease_id: str, tenant_id: str,
++    cash: float, offset: float, discount: float,
++    cash_account: Optional[dict], offset_account_id: Optional[str],
++    payment_date: str, preview: dict, final_invoice: Optional[dict],
+ ) -> None:
+     """
+-    Records the money received at settlement as ordinary payments, oldest
+-    dues first -- the same order Receive Payment uses. Payments only (no
+-    journal entry of their own): the bank debit is already in the settlement
+-    entry. Invoices fully covered become 'paid', others 'partial'. Allocation
+-    by income head is written exactly as for any receipt, so Receipts by Head
+-    shows it. Best-effort after the books are posted: a failure here is logged
+-    and shows up as a difference in the report's cash-book check.
++    Records what settled the tenant's dues as ordinary receipts against the
++    invoices, oldest dues first -- the same order Receive Payment uses:
++
++      cash      money the tenant handed over now
++      offset    dues paid out of the tenant's own security deposit
++      discount  dues written off
++
++    All three are real settlements of what the tenant owed (the deposit
++    simply pays them), so the invoices show as paid, the receipt appears in
++    Receipts by Head by income head, and the tenant's ledger and invoice
++    balances agree. No journal entry is posted here: the single settlement
++    entry already contains them. Best-effort after the books are posted: a
++    failure is logged and shows up as a difference in the report's cash-book
++    check.
+     """
+     group_id = str(uuid.uuid4())
+-    method = "cash" if "cash" in (account.get("name") or "").lower() else "bank_transfer"
+-    remaining = round(amount, 2)
++    cash_method = "cash" if "cash" in ((cash_account or {}).get("name") or "").lower() else "bank_transfer"
++    left = {"cash": round(cash, 2), "offset": round(offset, 2), "discount": round(discount, 2)}
++    touched_invoices: list[str] = []
+     try:
+         for seg in _dues_segments(preview, final_invoice):
+-            if remaining <= 0.005:
+-                break
+-            take = round(min(remaining, seg["balance"]), 2)
+-            if take <= 0:
+-                continue
+-            note = "Received at final settlement" + (
+-                " (applied to opening balance)" if seg["kind"] == "opening" else " (applied to unbilled months)" if seg["kind"] == "gap" else ""
+-            )
+-            row = {
+-                "company_id": company_id,
+-                "invoice_id": seg["invoice_id"],
+-                "tenant_id": tenant_id,
+-                "amount": take,
+-                "discount_amount": 0,
+-                "account_id": account["id"],
+-                "payment_date": payment_date,
+-                "payment_method": method,
+-                "notes": note,
+-                "receipt_group_id": group_id,
+-            }
+-            payment = supabase.table("payments").insert(row).execute().data[0]
+-            remaining = round(remaining - take, 2)
+-            if seg["invoice_id"]:
+-                try:
+-                    allocate_payment_to_line_items(supabase, company_id, payment["id"], seg["invoice_id"], tenant_id, lease_id, take, 0.0)
+-                except Exception:
+-                    logger.exception("allocation failed for settlement payment %s", payment["id"])
+-                inv_rows = supabase.table("payments").select("amount, discount_amount").eq("invoice_id", seg["invoice_id"]).execute().data
+-                settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in inv_rows)
+-                inv = supabase.table("invoices").select("total_amount").eq("id", seg["invoice_id"]).single().execute().data
+-                new_status = "paid" if inv and settled >= float(inv["total_amount"]) - 0.01 else "partial"
+-                supabase.table("invoices").update({"status": new_status}).eq("id", seg["invoice_id"]).execute()
+-        if remaining > 0.005:
++            seg_left = seg["balance"]
++            for kind in ("cash", "offset", "discount"):
++                take = round(min(left[kind], seg_left), 2)
++                if take <= 0.005:
++                    continue
++                if seg["kind"] != "invoice" and kind == "discount":
++                    continue  # nothing to write a discount against on an opening / unbilled balance
++                where = " (applied to opening balance)" if seg["kind"] == "opening" else " (applied to unbilled months)" if seg["kind"] == "gap" else ""
++                if kind == "cash":
++                    row = {"amount": take, "discount_amount": 0, "account_id": cash_account["id"], "payment_method": cash_method,
++                           "notes": "Received at final settlement" + where}
++                elif kind == "offset":
++                    row = {"amount": take, "discount_amount": 0, "account_id": offset_account_id, "payment_method": "other",
++                           "notes": "Paid out of security deposit at final settlement" + where}
++                else:
++                    row = {"amount": 0, "discount_amount": take, "account_id": None, "payment_method": "other",
++                           "notes": "Discount at final settlement"}
++                row.update({"company_id": company_id, "invoice_id": seg["invoice_id"], "tenant_id": tenant_id,
++                            "payment_date": payment_date, "receipt_group_id": group_id})
++                payment = supabase.table("payments").insert(row).execute().data[0]
++                left[kind] = round(left[kind] - take, 2)
++                seg_left = round(seg_left - take, 2)
++                if seg["invoice_id"]:
++                    try:
++                        allocate_payment_to_line_items(
++                            supabase, company_id, payment["id"], seg["invoice_id"], tenant_id, lease_id,
++                            row["amount"], row["discount_amount"],
++                        )
++                    except Exception:
++                        logger.exception("allocation failed for settlement payment %s", payment["id"])
++                    if seg["invoice_id"] not in touched_invoices:
++                        touched_invoices.append(seg["invoice_id"])
++        for invoice_id in touched_invoices:
++            inv_rows = supabase.table("payments").select("amount, discount_amount").eq("invoice_id", invoice_id).execute().data
++            settled = sum(float(p["amount"]) + float(p.get("discount_amount") or 0) for p in inv_rows)
++            inv = supabase.table("invoices").select("total_amount").eq("id", invoice_id).single().execute().data
++            new_status = "paid" if inv and settled >= float(inv["total_amount"]) - 0.01 else "partial"
++            supabase.table("invoices").update({"status": new_status}).eq("id", invoice_id).execute()
++        if left["cash"] > 0.005:
+             # Cannot happen (received is capped at what is owed), but never
+             # lose track of money that came in: keep it as an advance.
+             supabase.table("payments").insert(
+                 {
+-                    "company_id": company_id, "invoice_id": None, "tenant_id": tenant_id, "amount": remaining,
+-                    "discount_amount": 0, "account_id": account["id"], "payment_date": payment_date,
+-                    "payment_method": method, "notes": "Received at final settlement (advance)", "receipt_group_id": group_id,
++                    "company_id": company_id, "invoice_id": None, "tenant_id": tenant_id, "amount": left["cash"],
++                    "discount_amount": 0, "account_id": cash_account["id"], "payment_date": payment_date,
++                    "payment_method": cash_method, "notes": "Received at final settlement (advance)", "receipt_group_id": group_id,
+                 }
+             ).execute()
+     except Exception:
+-        logger.exception("could not record settlement cash payments for lease %s", lease_id)
++        logger.exception("could not record settlement receipts for lease %s", lease_id)
+ 
+ 
+ def _build_settlement_lines(
+-    supabase: Client, preview: dict, final_invoice: Optional[dict], deductions: list,
+-    rent_offset: float, refund_amount: float, refund_account: Optional[dict], lease_id: str,
+-    cash_received: float = 0.0,
++    deductions: list, refund_amount: float, refund_account: Optional[dict],
+ ) -> list[dict]:
+     """
+-    What the Receipts by Head report shows for this settlement (Part 2):
+-    the amount of dues cleared out of the deposit, split by income head; each
+-    settlement charge; and the refund paid. Reporting only -- the journal
+-    entry is posted separately and is not affected by anything here.
+-
+-    Dues are walked in the order a receipt clears them. Cash received at
+-    settlement clears the oldest dues first (those heads appear in Part 1, as
+-    payments); the deposit then clears the next ones (those heads appear
+-    here), so no head is ever claimed twice.
++    Reporting detail kept for each settlement: each settlement charge (income
++    taken from the deposit, with its own GL account) and the refund paid out.
++    The dues paid out of the deposit are NOT listed here -- they are recorded
++    as ordinary receipts against the invoices (see _record_settlement_receipts),
++    which is where Receipts by Head reads them from.
+     """
+     lines: list[dict] = []
+-
+-    def take(label_amounts: list[dict]) -> None:
+-        for la in label_amounts:
+-            lines.append({"kind": "invoice_settled", "label": la["label"], "amount": la["amount"], "account_id": None})
+-
+-    cash_left = round(float(cash_received or 0), 2)
+-    offset_left = round(float(rent_offset or 0), 2)
+-    for seg in _dues_segments(preview, final_invoice):
+-        if offset_left <= 0.005:
+-            break
+-        bal = seg["balance"]
+-        cash_part = round(min(cash_left, bal), 2)
+-        cash_left = round(cash_left - cash_part, 2)
+-        offset_part = round(min(offset_left, bal - cash_part), 2)
+-        if offset_part <= 0.005:
+-            continue
+-        if seg["kind"] == "invoice":
+-            split = split_invoice_balance_by_head(
+-                supabase, seg["invoice_id"], lease_id, round(seg["invoice_total"] - bal + cash_part, 2), offset_part
+-            ) or [{"label": INVOICES_SETTLED_FALLBACK, "amount": offset_part}]
+-        else:
+-            split = [{"label": seg["label"], "amount": offset_part}]
+-        take(split)
+-        offset_left = round(offset_left - offset_part, 2)
+-
+-    if offset_left > 0.005:
+-        take([{"label": INVOICES_SETTLED_FALLBACK, "amount": offset_left}])
+-
+     for d in deductions:
+         amt = round(float(d["amount"]), 2)
+         if amt > 0:
+             lines.append({"kind": "charge", "label": d["reason"], "amount": amt, "account_id": d.get("account_id")})
+-
+     if refund_amount > 0.01 and refund_account:
+         lines.append({"kind": "refund_paid", "label": "Refund paid", "amount": round(refund_amount, 2), "account_id": refund_account["id"]})
+     return lines
+@@ -869,9 +850,14 @@ def finalize_settlement(
+         # invoices (no second journal entry -- the bank debit is already in
+         # the entry above), so those invoices show as paid and the receipt
+         # appears in Receipts by Head by income head.
+-        if received > 0.01:
+-            _record_settlement_cash(
+-                supabase, company_id, lease_id, tenant_id, received, received_account, entry_date, preview, final_invoice
++        # Cash received, dues paid out of the deposit, and any discount all
++        # settled invoices -- record them as receipts so the invoices show as
++        # paid and Receipts by Head shows them by income head.
++        if received > 0.01 or rent_offset > 0.01 or discount > 0.01:
++            _record_settlement_receipts(
++                supabase, company_id, lease_id, tenant_id, received, rent_offset, discount,
++                received_account, (refund_account or received_account or {}).get("id"),
++                entry_date, preview, final_invoice,
+             )
+ 
+     # --- Close the lease itself ---
+@@ -913,9 +899,7 @@ def finalize_settlement(
+             "deposit_from_ledger_extra": preview["deposit_from_ledger_extra"],
+         },
+     }
+-    settlement_lines = _build_settlement_lines(
+-        supabase, preview, final_invoice, deductions, rent_offset, refund_amount, refund_account, lease_id, received
+-    )
++    settlement_lines = _build_settlement_lines(deductions, refund_amount, refund_account)
+     try:
+         saved = supabase.table("lease_settlements").insert(settlement_row).execute().data[0]
+     except Exception:
+diff --git a/backend/app/services/ledger.py b/backend/app/services/ledger.py
+index 3090fe9..20a3d80 100644
+--- a/backend/app/services/ledger.py
++++ b/backend/app/services/ledger.py
+@@ -12,6 +12,8 @@ drift out of sync with each other.
+ from typing import Optional, TypedDict
+ from supabase import Client
+ 
++from app.services.charge_heads import norm_label
++
+ 
+ class UnbalancedJournalEntry(Exception):
+     """Raised when a caller tries to post an entry where debits != credits.
+@@ -57,15 +59,13 @@ def get_account_for_charge_label(supabase: Client, company_id: str, label: str)
+     for any label nobody's explicitly mapped yet -- an unmapped label just
+     means it hasn't been configured, not that the invoice should fail.
+     """
+-    mapping = (
+-        supabase.table("charge_type_accounts")
+-        .select("account_id")
+-        .eq("company_id", company_id)
+-        .eq("label", label)
+-        .execute()
+-        .data
+-    )
+-    account_id = mapping[0]["account_id"] if mapping else get_account_id(supabase, company_id, "4100")
++    # Matched ignoring capital letters and extra spaces ("Commission" and
++    # "COMMISSION" are the same charge) -- an exact-match lookup silently sent
++    # near-miss spellings to Other Income.
++    wanted = norm_label(label)
++    mappings = supabase.table("charge_type_accounts").select("label, account_id").eq("company_id", company_id).execute().data or []
++    match = next((m for m in mappings if norm_label(m["label"]) == wanted), None)
++    account_id = match["account_id"] if match else get_account_id(supabase, company_id, "4100")
+ 
+     account = (
+         supabase.table("chart_of_accounts")
+diff --git a/backend/app/services/receipts_report.py b/backend/app/services/receipts_report.py
+index 9fd9245..626a215 100644
+--- a/backend/app/services/receipts_report.py
++++ b/backend/app/services/receipts_report.py
+@@ -1,33 +1,29 @@
+ """
+-Receipts by Head -- the complete report.
+-
+-PART 1 -- cash / bank receipts. Every rupee that actually hit a cash or bank
+-account in the period, tenant by tenant, split into:
+-  * one column per income head (from payment_allocations, as before)
+-  * Security                    -- security deposit payments received
+-  * Advance / opening balance   -- receipts with no invoice (paid against an
+-                                   opening balance, or received in advance)
+-  * Other receipts              -- cash/bank debits that are not tenant
+-                                   receipts at all (e.g. a manual journal
+-                                   entry), on one row of their own
+-Cash received at a final settlement is an ordinary receipt here (it is in
+-the settlement entry's bank debit and in the tenant's payment records).
+-Money paid OUT against a security deposit (a refund, from the settlement or
+-from the deposit screen) is shown beside it as "Paid against security", so
+-the cash report shows both what came in against invoices and what went out
+-against security, and the net.
+-The grand total is checked against the cash/bank accounts in the books
+-(journal) for the same period -- see "reconciliation" in the result. It works
+-the same for a month or for a single day.
+-
+-PART 2 -- settled at final settlement (non-cash). When a lease is closed the
+-invoice dues and the settlement charges are cleared out of the security
+-deposit; no cash moves except the refund. These lines are reported separately
+-so Part 1 can stay an exact match for the cash/bank books, while the invoice
+-receipt, the charges (e.g. 1,000 electricity) and the refund paid are all still
+-visible. Read from settlement_allocations (written when a lease is closed);
+-settlements closed before that table existed are rebuilt from their journal
+-entry, with the invoice portion as a single "Invoices settled" figure.
++Receipts by Head -- the complete cash report, ONE table.
++
++Every rupee that moved through cash or bank in the period, tenant by tenant:
++
++  received (left of Total)
++    * one column per GL account / charge head (Rent, Electricity Recovery
++      Income, ...) -- charge names are matched ignoring capital letters and
++      spacing and shown under the one name of their GL account
++    * Security                    -- security deposit payments received
++    * Advance / opening balance   -- receipts with no invoice
++    * Other receipts              -- cash/bank debits that are not tenant
++                                     receipts at all (e.g. a manual journal)
++  Total received
++  Paid against security            -- the security deposit paid out (a refund,
++                                     or a final settlement)
++  Net cash                         -- Total received minus Paid against security
++
++A final settlement is treated exactly as the money it represents: the dues
++the tenant owed (rent, charges) are RECEIPTS, the deposit is a PAYMENT out, and
++the system nets them into one entry. Example: deposit 20,000, rent 10,000,
++charge 1,000 -> received 11,000, paid against security 20,000, net cash
++(9,000) = the 9,000 actually refunded.
++
++Net cash is checked against the cash/bank accounts in the books for the same
++dates ("reconciliation"). Works the same for a month or a single day.
+ 
+ Read-only. Every query goes through the caller's own RLS-scoped client, so it
+ can only ever see the caller's own company's rows.
+@@ -40,6 +36,8 @@ from typing import Callable, Dict, List, Optional
+ 
+ from supabase import Client
+ 
++from app.services.charge_heads import ChargeHeads
++
+ logger = logging.getLogger("app.receipts_report")
+ 
+ SECURITY_LABEL = "Security"
+@@ -49,7 +47,7 @@ SPECIAL_LABELS = [SECURITY_LABEL, ADVANCE_LABEL, OTHER_LABEL]
+ PAID_KEY = "__paid_against_security__"
+ PAID_LABEL = "Paid against security"
+ 
+-INVOICES_SETTLED_LABEL = "Invoices settled"
++INVOICES_SETTLED_LABEL = "Invoices settled (earlier)"
+ SETTLEMENT_DESCRIPTION_PREFIX = "Security deposit settled at move-out"
+ # A settlement entry (source "security_deposit_refund") can debit a bank/cash
+ # account (money received at settlement) and credit one (the refund paid).
+@@ -174,6 +172,47 @@ def _lookups(supabase: Client, lease_ids: List[str], tenant_ids: List[str]):
+     return leases, rooms, buildings, tenants
+ 
+ 
++def _books_deposit_released(
++    supabase: Client, date_from: date, date_to: date, building_id: Optional[str]
++) -> List[dict]:
++    """
++    Every debit to Security Deposits Held (2100) from a security-deposit
++    refund or final-settlement entry in the period: the deposit paid out.
++    Each: {entry_id, description, entry_date, amount, lease_id, tenant_id}.
++    """
++    dep = supabase.table("chart_of_accounts").select("id").eq("code", "2100").execute().data
++    if not dep:
++        return []
++    entries = fetch_all(
++        lambda: supabase.table("journal_entries")
++        .select("id, description, entry_date")
++        .eq("source_type", REFUND_SOURCE)
++        .eq("status", "posted")
++        .is_("reversal_of", "null")
++        .gte("entry_date", str(date_from))
++        .lte("entry_date", str(date_to))
++        .order("id")
++    )
++    by_id = {e["id"]: e for e in entries}
++
++    def extra(q):
++        q = q.eq("direction", "debit").eq("account_id", dep[0]["id"])
++        if building_id:
++            q = q.eq("building_id", building_id)
++        return q.order("id")
++
++    lines = _in_chunks(supabase, "journal_lines", "id, journal_entry_id, amount, lease_id, tenant_id", "journal_entry_id", list(by_id.keys()), extra)
++    out = []
++    for l in lines:
++        e = by_id.get(l["journal_entry_id"])
++        if e:
++            out.append(
++                {"entry_id": e["id"], "description": e.get("description"), "entry_date": str(e["entry_date"]),
++                 "amount": round(float(l["amount"]), 2), "lease_id": l.get("lease_id"), "tenant_id": l.get("tenant_id")}
++            )
++    return out
++
++
+ def build_receipts_report(
+     supabase: Client,
+     date_from: date,
+@@ -181,7 +220,8 @@ def build_receipts_report(
+     building_id: Optional[str],
+     label_sort_key: Callable[[str], tuple],
+ ) -> dict:
+-    # ------------------------------------------------------------------ Part 1
++    heads = ChargeHeads(supabase)
++
+     payments = fetch_all(
+         lambda: supabase.table("payments")
+         .select("id, invoice_id, tenant_id, amount, discount_amount, payment_date, account_id")
+@@ -228,20 +268,21 @@ def build_receipts_report(
+         if untied_lease[t_id]:
+             lease_ids.add(untied_lease[t_id])
+ 
+-    # Books: every cash/bank debit and credit in the period (needed up front
+-    # because refunds paid against security carry their own lease/tenant).
+     cash_accounts = _cash_bank_accounts(supabase)
+-    books = _books_cash_lines(supabase, date_from, date_to, building_id, list(cash_accounts.keys()), "debit")
+-    books_credits = _books_cash_lines(supabase, date_from, date_to, building_id, list(cash_accounts.keys()), "credit")
+-    refunds = [b for b in books_credits if b["source_type"] == REFUND_SOURCE]
+-    lease_ids |= {r["lease_id"] for r in refunds if r.get("lease_id")}
+-
+-    # Settlement (Part 2) needs the same lookups, so gather its data first.
+-    settlement_data = _load_settlement_data(supabase, date_from, date_to, building_id)
+-    lease_ids |= {k for k in settlement_data["lease_ids"] if k}
+-    tenant_ids_all = [a["tenant_id"] for a in allocations if a.get("tenant_id")] + untied_tenant_ids + [
+-        t for t in settlement_data["tenant_ids"] if t
+-    ] + [r["tenant_id"] for r in refunds if r.get("tenant_id")]
++    cash_ids = list(cash_accounts.keys())
++    books_in = _books_cash_lines(supabase, date_from, date_to, building_id, cash_ids, "debit")
++    books_out = [b for b in _books_cash_lines(supabase, date_from, date_to, building_id, cash_ids, "credit") if b["source_type"] == REFUND_SOURCE]
++    released = _books_deposit_released(supabase, date_from, date_to, building_id)
++    settlement_rows = [r for r in _load_settlement_data(supabase, date_from, date_to)["rows"] if r["kind"] in ("invoice_settled", "charge")]
++
++    lease_ids |= {r["lease_id"] for r in released if r.get("lease_id")}
++    lease_ids |= {r["lease_id"] for r in settlement_rows if r.get("lease_id")}
++    tenant_ids_all = (
++        [a["tenant_id"] for a in allocations if a.get("tenant_id")]
++        + untied_tenant_ids
++        + [r["tenant_id"] for r in released if r.get("tenant_id")]
++        + [r["tenant_id"] for r in settlement_rows if r.get("tenant_id")]
++    )
+     leases, rooms, buildings, tenants = _lookups(supabase, list(lease_ids), tenant_ids_all)
+ 
+     grouped: Dict[str, dict] = {}
+@@ -269,7 +310,7 @@ def build_receipts_report(
+         row["total"] = round(row["total"] + amount, 2)
+ 
+     for a in allocations:
+-        add(a.get("lease_id"), a.get("tenant_id"), a["label"], float(a["amount"]))
++        add(a.get("lease_id"), a.get("tenant_id"), heads.heading_for_label(a["label"]), float(a["amount"]))
+     for p in sd_payments:
+         dep = deposits.get(p["security_deposit_id"])
+         lid = dep["lease_id"] if dep else None
+@@ -277,141 +318,95 @@ def build_receipts_report(
+     for p in untied:
+         lid = untied_lease.get(p.get("tenant_id"))
+         add(lid, p.get("tenant_id"), ADVANCE_LABEL, float(p["amount"]))
+-    for r in refunds:
++    # Settlement charges (income taken from the deposit) and dues paid out of
++    # the deposit by earlier-version settlements: receipts, shown by head.
++    for r in settlement_rows:
++        label = heads.heading_for_account(r["account_id"]) if (r["kind"] == "charge" and r.get("account_id")) else (
++            heads.heading_for_label(r["label"]) if r["label"] != INVOICES_SETTLED_LABEL else INVOICES_SETTLED_LABEL
++        )
++        add(r.get("lease_id"), r.get("tenant_id"), label, float(r["amount"]))
++    for r in released:
+         add(r.get("lease_id"), r.get("tenant_id"), PAID_KEY, r["amount"])
+ 
+     rows = list(grouped.values())
+     if building_id:
+         rows = [r for r in rows if r["building_id"] == building_id]
+ 
+-    # -------- books: every cash/bank debit in the period, by source
+     books_by_source: Dict[str, float] = defaultdict(float)
+-    for b in books:
++    for b in books_in:
+         books_by_source[b["source_type"]] += b["amount"]
+-    books_receipts = round(sum(books_by_source.get(s, 0.0) for s in RECEIPT_SOURCES), 2)
+-    books_security = round(books_by_source.get(SECURITY_SOURCE, 0.0), 2)
+-    other_entries = [b for b in books if b["source_type"] not in RECEIPT_SOURCES and b["source_type"] != SECURITY_SOURCE]
++    other_entries = [b for b in books_in if b["source_type"] not in RECEIPT_SOURCES and b["source_type"] != SECURITY_SOURCE]
+     books_other = round(sum(b["amount"] for b in other_entries), 2)
+ 
+     all_columns_used = {label for r in rows for label in r["heads"].keys()}
+     head_columns = sorted([c for c in all_columns_used if c not in SPECIAL_LABELS], key=label_sort_key)
+ 
+-    other_row = None
+-    if abs(books_other) > 0.004:
+-        other_row = {
+-            "lease_id": None,
+-            "tenant_id": None,
+-            "room_id": None,
+-            "building_id": None,
+-            "heads": {OTHER_LABEL: books_other},
+-            "total": books_other,
+-            "paid": 0.0,
+-            "is_other": True,
+-        }
+-
+     rows_sorted = sorted(
+         rows,
+         key=lambda r: (buildings.get(r["building_id"], "—"), rooms.get(r["room_id"], {}).get("room_number", "")),
+     )
+-    if other_row:
+-        rows_sorted.append(other_row)
+-
++    if abs(books_other) > 0.004:
++        rows_sorted.append(
++            {"lease_id": None, "tenant_id": None, "room_id": None, "building_id": None,
++             "heads": {OTHER_LABEL: books_other}, "total": books_other, "paid": 0.0, "is_other": True}
++        )
+     columns = head_columns + [c for c in SPECIAL_LABELS if c in {l for r in rows_sorted for l in r["heads"]}]
+ 
+     out_rows = []
+     for i, r in enumerate(rows_sorted):
+         if r.get("is_other"):
+             out_rows.append(
+-                {
+-                    "sr": i + 1,
+-                    "lease_id": None,
+-                    "tenant_id": None,
+-                    "tenant_name": "Other receipts (not from a tenant)",
+-                    "room_id": None,
+-                    "room_label": "—",
+-                    "building_id": None,
+-                    "heads": {c: r["heads"].get(c, 0.0) for c in columns},
+-                    "total": r["total"],
+-                    "paid_against_security": 0.0,
+-                    "net": r["total"],
+-                    "is_other": True,
+-                }
++                {"sr": i + 1, "lease_id": None, "tenant_id": None, "tenant_name": "Other receipts (not from a tenant)",
++                 "room_id": None, "room_label": "—", "building_id": None,
++                 "heads": {c: r["heads"].get(c, 0.0) for c in columns}, "total": r["total"],
++                 "paid_against_security": 0.0, "net": r["total"], "is_other": True}
+             )
+             continue
+         room = rooms.get(r["room_id"])
+         out_rows.append(
+-            {
+-                "sr": i + 1,
+-                "lease_id": r["lease_id"],
+-                "tenant_id": r["tenant_id"],
+-                "tenant_name": tenants.get(r["tenant_id"], "—"),
+-                "room_id": r["room_id"],
+-                "room_label": f"{buildings.get(r['building_id'], '—')} — {room['room_number']}" if room else "—",
+-                "building_id": r["building_id"],
+-                "heads": {c: r["heads"].get(c, 0.0) for c in columns},
+-                "total": r["total"],
+-                "paid_against_security": r["paid"],
+-                "net": round(r["total"] - r["paid"], 2),
+-                "is_other": False,
+-            }
++            {"sr": i + 1, "lease_id": r["lease_id"], "tenant_id": r["tenant_id"], "tenant_name": tenants.get(r["tenant_id"], "—"),
++             "room_id": r["room_id"],
++             "room_label": f"{buildings.get(r['building_id'], '—')} — {room['room_number']}" if room else "—",
++             "building_id": r["building_id"], "heads": {c: r["heads"].get(c, 0.0) for c in columns}, "total": r["total"],
++             "paid_against_security": r["paid"], "net": round(r["total"] - r["paid"], 2), "is_other": False}
+         )
+ 
+     totals = {c: round(sum(r["heads"][c] for r in out_rows), 2) for c in columns}
+     grand_total = round(sum(r["total"] for r in out_rows), 2)
+     paid_total = round(sum(r["paid_against_security"] for r in out_rows), 2)
++    net_total = round(grand_total - paid_total, 2)
+ 
+-    report_receipts = round(
+-        sum(float(a["amount"]) for a in allocations if _row_visible(a.get("lease_id"), leases, rooms, building_id))
+-        + sum(float(p["amount"]) for p in untied if _row_visible(untied_lease.get(p.get("tenant_id")), leases, rooms, building_id)),
+-        2,
+-    )
+-    report_security = round(
+-        sum(
+-            float(p["amount"])
+-            for p in sd_payments
+-            if _row_visible((deposits.get(p["security_deposit_id"]) or {}).get("lease_id"), leases, rooms, building_id)
+-        ),
+-        2,
+-    )
+-    books_total = round(books_receipts + books_security + books_other, 2)
+-    gap = round(books_total - grand_total, 2)
+-    books_paid = round(sum(r["amount"] for r in refunds), 2)
+-    paid_gap = round(books_paid - paid_total, 2)
+-
++    # Net cash against the cash/bank books: money in minus the refunds paid out.
++    books_in_total = round(sum(b["amount"] for b in books_in), 2)
++    books_out_total = round(sum(b["amount"] for b in books_out), 2)
++    books_net = round(books_in_total - books_out_total, 2)
++    gap = round(books_net - net_total, 2)
+     unsplit = round(sum(float(p["amount"]) for p in tied) - sum(float(a["amount"]) for a in allocations), 2)
+ 
+     reconciliation = {
+-        "books_total": books_total,
+-        "report_total": grand_total,
++        "books_net": books_net,
++        "report_net": net_total,
+         "gap": gap,
+-        "paid_books": books_paid,
+-        "paid_report": paid_total,
+-        "paid_gap": paid_gap,
+-        "matches": abs(gap) < 0.01 and abs(paid_gap) < 0.01,
++        "matches": abs(gap) < 0.01,
+         "by_source": [
+-            {"source": "Tenant receipts (incl. advance / opening balance)", "books": books_receipts, "report": report_receipts},
+-            {"source": "Security deposits received", "books": books_security, "report": report_security},
+-            {"source": "Other cash/bank receipts (journal)", "books": books_other, "report": books_other},
+-            {"source": "Paid against security (refunds out of cash/bank)", "books": books_paid, "report": paid_total},
++            {"source": "Cash and bank received (books)", "amount": books_in_total},
++            {"source": "Cash and bank paid out as refunds (books)", "amount": books_out_total},
++            {"source": "Net cash (books)", "amount": books_net},
+         ],
+         "unsplit_invoice_receipts": unsplit if abs(unsplit) > 0.01 and not building_id else 0.0,
+         "note": (
+-            "Compared with every debit to a cash or bank account in the books for the same dates. "
+-            "A difference usually means a receipt whose payment date and journal date fall in different periods, "
+-            "or a receipt that has not been split by head yet."
++            "Net cash is compared with every debit and refund credit on the cash and bank accounts in the books for the "
++            "same dates. A difference usually means a receipt whose payment date and journal date fall in different "
++            "periods, or a receipt that has not been split by head yet."
+         ),
+     }
+-
+-    settlement = _build_settlement_part(settlement_data, leases, rooms, buildings, tenants, cash_accounts, building_id, label_sort_key)
+-
+     return {
+         "columns": columns,
+         "rows": out_rows,
+         "totals": totals,
+         "grand_total": grand_total,
+         "paid_total": paid_total,
+-        "net_total": round(grand_total - paid_total, 2),
+-        "settlement": settlement,
++        "net_total": net_total,
+         "reconciliation": reconciliation,
+     }
+ 
+@@ -424,10 +419,14 @@ def _row_visible(lease_id: Optional[str], leases: dict, rooms: dict, building_id
+     return bool(room and room.get("building_id") == building_id)
+ 
+ 
+-# ------------------------------------------------------------------ Part 2
+-def _load_settlement_data(supabase: Client, date_from: date, date_to: date, building_id: Optional[str]) -> dict:
+-    """Settlement lines for the period: from settlement_allocations where they
+-    exist, otherwise rebuilt from the settlement's journal entry."""
++def _load_settlement_data(supabase: Client, date_from: date, date_to: date) -> dict:
++    """
++    Settlement lines for the period that are NOT already ordinary payments:
++    the charges (income taken from the deposit) and, for settlements closed
++    before dues paid out of the deposit were recorded as receipts, the dues
++    cleared from the deposit. Read from settlement_allocations; settlements
++    that pre-date that table are rebuilt from their journal entry.
++    """
+     table_rows: List[dict] = []
+     try:
+         table_rows = fetch_all(
+@@ -438,7 +437,6 @@ def _load_settlement_data(supabase: Client, date_from: date, date_to: date, buil
+             .order("id")
+         )
+     except Exception:
+-        # Migration 022 not run yet -- everything falls back to the journal.
+         logger.exception("settlement_allocations unavailable; rebuilding settlements from the journal")
+         table_rows = []
+ 
+@@ -447,7 +445,7 @@ def _load_settlement_data(supabase: Client, date_from: date, date_to: date, buil
+     entries = fetch_all(
+         lambda: supabase.table("journal_entries")
+         .select("id, entry_date, description")
+-        .eq("source_type", "security_deposit_refund")
++        .eq("source_type", REFUND_SOURCE)
+         .eq("status", "posted")
+         .is_("reversal_of", "null")
+         .ilike("description", f"{SETTLEMENT_DESCRIPTION_PREFIX}%")
+@@ -459,16 +457,12 @@ def _load_settlement_data(supabase: Client, date_from: date, date_to: date, buil
+     if entries:
+         entry_by_id = {e["id"]: e for e in entries}
+         lines = _in_chunks(
+-            supabase,
+-            "journal_lines",
+-            "journal_entry_id, account_id, direction, amount, lease_id, tenant_id",
+-            "journal_entry_id",
+-            list(entry_by_id.keys()),
++            supabase, "journal_lines", "journal_entry_id, account_id, direction, amount, lease_id, tenant_id", "journal_entry_id", list(entry_by_id.keys())
+         )
+         acc_ids = list({l["account_id"] for l in lines})
+         accounts = {a["id"]: a for a in _in_chunks(supabase, "chart_of_accounts", "id, code, name, is_cash_or_bank", "id", acc_ids)}
+         ar_credit: Dict[str, float] = defaultdict(float)
+-        other_debits: Dict[str, float] = defaultdict(float)  # cash received + discount: not cleared from the deposit
++        other_debits: Dict[str, float] = defaultdict(float)
+         bases: Dict[str, dict] = {}
+         for l in lines:
+             e = entry_by_id[l["journal_entry_id"]]
+@@ -477,25 +471,22 @@ def _load_settlement_data(supabase: Client, date_from: date, date_to: date, buil
+             acct = accounts.get(l["account_id"], {})
+             amount = round(float(l["amount"]), 2)
+             eid = e["id"]
+-            bases.setdefault(
+-                eid,
+-                {"lease_id": l["lease_id"], "tenant_id": l.get("tenant_id"), "settled_on": str(e["entry_date"]), "from_journal": True},
+-            )
++            bases.setdefault(eid, {"lease_id": l["lease_id"], "tenant_id": l.get("tenant_id"), "settled_on": str(e["entry_date"]), "from_journal": True})
+             base = {**bases[eid], "account_id": l["account_id"]}
+             if l["direction"] == "debit":
+                 if acct.get("code") != "2100":
+                     other_debits[eid] += amount
+             elif acct.get("is_cash_or_bank"):
+-                fallback_rows.append({**base, "kind": "refund_paid", "label": "Refund paid", "amount": amount})
++                continue
+             elif acct.get("code") == "1100":
+                 ar_credit[eid] += amount
+             else:
+                 fallback_rows.append({**base, "kind": "charge", "label": acct.get("name") or "Charge", "amount": amount})
+         for eid, total in ar_credit.items():
+-            cleared_from_deposit = round(total - other_debits.get(eid, 0.0), 2)
+-            if cleared_from_deposit > 0.005:
++            cleared = round(total - other_debits.get(eid, 0.0), 2)
++            if cleared > 0.005:
+                 fallback_rows.append(
+-                    {**bases[eid], "account_id": None, "kind": "invoice_settled", "label": INVOICES_SETTLED_LABEL, "amount": cleared_from_deposit}
++                    {**bases[eid], "account_id": None, "kind": "invoice_settled", "label": INVOICES_SETTLED_LABEL, "amount": cleared}
+                 )
+ 
+     all_rows = table_rows + fallback_rows
+@@ -506,76 +497,16 @@ def _load_settlement_data(supabase: Client, date_from: date, date_to: date, buil
+     }
+ 
+ 
+-def _build_settlement_part(
+-    data: dict, leases: dict, rooms: dict, buildings: dict, tenants: dict, cash_accounts: dict,
+-    building_id: Optional[str], label_sort_key: Callable[[str], tuple],
+-) -> dict:
+-    grouped: Dict[str, dict] = {}
+-    for r in data["rows"]:
+-        lease_id = r.get("lease_id")
+-        if not _row_visible(lease_id, leases, rooms, building_id):
+-            continue
+-        key = f"{lease_id}|{r['settled_on']}"
+-        lease = leases.get(lease_id)
+-        room = rooms.get(lease["room_id"]) if lease else None
+-        row = grouped.setdefault(
+-            key,
+-            {
+-                "lease_id": lease_id,
+-                "tenant_id": r.get("tenant_id") or (lease["tenant_id"] if lease else None),
+-                "room_id": lease["room_id"] if lease else None,
+-                "building_id": room["building_id"] if room else None,
+-                "settled_on": r["settled_on"],
+-                "heads": {},
+-                "settled_total": 0.0,
+-                "refund_paid": 0.0,
+-                "refund_account": None,
+-            },
+-        )
+-        amount = float(r["amount"])
+-        if r["kind"] == "refund_paid":
+-            row["refund_paid"] = round(row["refund_paid"] + amount, 2)
+-            acc = cash_accounts.get(r.get("account_id"))
+-            if acc:
+-                row["refund_account"] = f"{acc['code']} · {acc['name']}"
+-        else:
+-            row["heads"][r["label"]] = round(row["heads"].get(r["label"], 0.0) + amount, 2)
+-            row["settled_total"] = round(row["settled_total"] + amount, 2)
+-
+-    columns = sorted({l for r in grouped.values() for l in r["heads"]}, key=label_sort_key)
+-    ordered = sorted(
+-        grouped.values(),
+-        key=lambda r: (r["settled_on"], buildings.get(r["building_id"], "—"), rooms.get(r["room_id"], {}).get("room_number", "")),
+-    )
+-    out_rows = []
+-    for i, r in enumerate(ordered):
+-        room = rooms.get(r["room_id"])
+-        out_rows.append(
+-            {
+-                "sr": i + 1,
+-                "lease_id": r["lease_id"],
+-                "tenant_id": r["tenant_id"],
+-                "tenant_name": tenants.get(r["tenant_id"], "—"),
+-                "room_label": f"{buildings.get(r['building_id'], '—')} — {room['room_number']}" if room else "—",
+-                "settled_on": r["settled_on"],
+-                "heads": {c: r["heads"].get(c, 0.0) for c in columns},
+-                "settled_total": r["settled_total"],
+-                "refund_paid": r["refund_paid"],
+-                "refund_account": r["refund_account"],
+-                "deposit_released": round(r["settled_total"] + r["refund_paid"], 2),
+-            }
+-        )
++# ---------------------------------------------------------------- Drill-down
++def _receipt_item(payment_id, date_s, method, account_id, account_name, notes, amount, invoice=None):
++    inv = invoice or {}
+     return {
+-        "columns": columns,
+-        "rows": out_rows,
+-        "totals": {c: round(sum(r["heads"][c] for r in out_rows), 2) for c in columns},
+-        "settled_total": round(sum(r["settled_total"] for r in out_rows), 2),
+-        "refund_total": round(sum(r["refund_paid"] for r in out_rows), 2),
+-        "deposit_released_total": round(sum(r["deposit_released"] for r in out_rows), 2),
++        "payment_id": payment_id, "invoice_id": inv.get("id"), "invoice_number": inv.get("invoice_number"),
++        "invoice_month": inv.get("invoice_month"), "payment_date": str(date_s), "payment_method": method,
++        "account_id": account_id, "account_name": account_name, "notes": notes, "amount": round(float(amount), 2),
+     }
+ 
+ 
+-# ---------------------------------------------------------------- Drill-down
+ def drilldown_special(
+     supabase: Client,
+     label: str,
+@@ -584,8 +515,9 @@ def drilldown_special(
+     lease_id: Optional[str],
+     tenant_id: Optional[str],
+ ) -> dict:
+-    """Receipts behind a Security / Advance / Other cell. Same shape the
+-    head drill-down returns, so the page renders them identically."""
++    """Receipts behind a Security / Advance / Other / Paid-against-security
++    cell. Same shape the head drill-down returns, so the page renders them
++    identically."""
+     cash_accounts = _cash_bank_accounts(supabase)
+ 
+     def account_name(account_id: Optional[str]) -> str:
+@@ -600,14 +532,7 @@ def drilldown_special(
+             lambda q: q.gte("payment_date", str(date_from)).lte("payment_date", str(date_to)),
+         )
+         for p in rows:
+-            receipts.append(
+-                {
+-                    "payment_id": p["id"], "invoice_id": None, "invoice_number": None, "invoice_month": None,
+-                    "payment_date": str(p["payment_date"]), "payment_method": "security deposit",
+-                    "account_id": p.get("account_id"), "account_name": account_name(p.get("account_id")),
+-                    "notes": "Security deposit received", "amount": round(float(p["amount"]), 2),
+-                }
+-            )
++            receipts.append(_receipt_item(p["id"], p["payment_date"], "security deposit", p.get("account_id"), account_name(p.get("account_id")), "Security deposit received", p["amount"]))
+     elif label == ADVANCE_LABEL and (tenant_id or lease_id):
+         t_id = tenant_id
+         if not t_id and lease_id:
+@@ -624,75 +549,39 @@ def drilldown_special(
+                 .order("id")
+             )
+             for p in rows:
+-                if float(p["amount"]) <= 0.004:
+-                    continue
+-                receipts.append(
+-                    {
+-                        "payment_id": p["id"], "invoice_id": None, "invoice_number": None, "invoice_month": None,
+-                        "payment_date": str(p["payment_date"]), "payment_method": p.get("payment_method"),
+-                        "account_id": p.get("account_id"), "account_name": account_name(p.get("account_id")),
+-                        "notes": p.get("notes"), "amount": round(float(p["amount"]), 2),
+-                    }
+-                )
++                if float(p["amount"]) > 0.004:
++                    receipts.append(_receipt_item(p["id"], p["payment_date"], p.get("payment_method"), p.get("account_id"), account_name(p.get("account_id")), p.get("notes"), p["amount"]))
+     elif label == PAID_LABEL and (lease_id or tenant_id):
+-        credits = _books_cash_lines(supabase, date_from, date_to, None, list(cash_accounts.keys()), "credit")
+-        for b in credits:
+-            if b["source_type"] != REFUND_SOURCE:
++        for r in _books_deposit_released(supabase, date_from, date_to, None):
++            if (lease_id and r.get("lease_id") != lease_id) or (not lease_id and r.get("tenant_id") != tenant_id):
+                 continue
+-            if (lease_id and b.get("lease_id") != lease_id) or (not lease_id and tenant_id and b.get("tenant_id") != tenant_id):
+-                continue
+-            receipts.append(
+-                {
+-                    "payment_id": b["entry_id"], "invoice_id": None, "invoice_number": None, "invoice_month": None,
+-                    "payment_date": b["entry_date"], "payment_method": "refund paid",
+-                    "account_id": b["account_id"], "account_name": account_name(b["account_id"]),
+-                    "notes": b.get("description"), "amount": b["amount"],
+-                }
+-            )
++            receipts.append(_receipt_item(r["entry_id"], r["entry_date"], "security deposit paid out", None, "Security Deposits Held", r.get("description"), r["amount"]))
+     elif label == OTHER_LABEL:
+-        books = _books_cash_debits(supabase, date_from, date_to, None, list(cash_accounts.keys()))
+-        for b in books:
++        for b in _books_cash_debits(supabase, date_from, date_to, None, list(cash_accounts.keys())):
+             if b["source_type"] in RECEIPT_SOURCES or b["source_type"] == SECURITY_SOURCE:
+                 continue
+-            receipts.append(
+-                {
+-                    "payment_id": b["entry_id"], "invoice_id": None, "invoice_number": None, "invoice_month": None,
+-                    "payment_date": b["entry_date"], "payment_method": b["source_type"],
+-                    "account_id": b["account_id"], "account_name": account_name(b["account_id"]),
+-                    "notes": b.get("description"), "amount": b["amount"],
+-                }
+-            )
++            receipts.append(_receipt_item(b["entry_id"], b["entry_date"], b["source_type"], b["account_id"], account_name(b["account_id"]), b.get("description"), b["amount"]))
+     receipts.sort(key=lambda r: r["payment_date"])
+     return {"receipts": receipts, "total": round(sum(r["amount"] for r in receipts), 2)}
+ 
+ 
+-def drilldown_settlement(
+-    supabase: Client, label: str, date_from: date, date_to: date, lease_id: str
+-) -> dict:
+-    """The settlement lines behind one Part 2 cell (or 'Refund paid')."""
+-    data = _load_settlement_data(supabase, date_from, date_to, None)
+-    cash_accounts = _cash_bank_accounts(supabase)
++def drilldown_settlement_lines(
++    supabase: Client, heading: str, date_from: date, date_to: date, lease_id: Optional[str], tenant_id: Optional[str], heads: ChargeHeads
++) -> List[dict]:
++    """Settlement charges (and older dues-cleared-from-deposit lines) behind
++    a head cell, shown beside the ordinary receipts for that head."""
+     out: List[dict] = []
+-    for r in data["rows"]:
+-        if r.get("lease_id") != lease_id:
+-            continue
+-        is_refund = r["kind"] == "refund_paid"
+-        if (label == "Refund paid") != is_refund:
++    for r in _load_settlement_data(supabase, date_from, date_to)["rows"]:
++        if r["kind"] not in ("invoice_settled", "charge"):
+             continue
+-        if not is_refund and r["label"] != label:
++        if (lease_id and r.get("lease_id") != lease_id) or (not lease_id and tenant_id and r.get("tenant_id") != tenant_id):
+             continue
+-        acc = cash_accounts.get(r.get("account_id"))
+-        out.append(
+-            {
+-                "payment_id": r.get("id") or f"{r['kind']}-{r['settled_on']}-{r['label']}",
+-                "invoice_id": None, "invoice_number": None, "invoice_month": None,
+-                "payment_date": str(r["settled_on"]),
+-                "payment_method": "refund paid" if is_refund else "settled from security deposit",
+-                "account_id": r.get("account_id"),
+-                "account_name": f"{acc['code']} · {acc['name']}" if acc else "Security deposit (non-cash)",
+-                "notes": "Final settlement",
+-                "amount": round(float(r["amount"]), 2),
+-            }
++        label = heads.heading_for_account(r["account_id"]) if (r["kind"] == "charge" and r.get("account_id")) else (
++            heads.heading_for_label(r["label"]) if r["label"] != INVOICES_SETTLED_LABEL else INVOICES_SETTLED_LABEL
+         )
+-    out.sort(key=lambda r: r["payment_date"])
+-    return {"receipts": out, "total": round(sum(r["amount"] for r in out), 2)}
++        if label != heading:
++            continue
++        out.append(_receipt_item(r.get("id") or f"{r['kind']}-{r['settled_on']}-{r['label']}", r["settled_on"],
++                                 "settled against security deposit", None, "Security deposit (netted in the settlement entry)",
++                                 "Final settlement", r["amount"]))
++    return out
+diff --git a/backend/app/services/utility_upload.py b/backend/app/services/utility_upload.py
+index b2d48ff..220bde8 100644
+--- a/backend/app/services/utility_upload.py
++++ b/backend/app/services/utility_upload.py
+@@ -38,6 +38,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
+ from supabase import Client
+ 
+ from app.crud.generic import write_audit_log
++from app.services.charge_heads import norm_label
+ from app.services.invoice_batch import fetch_all, fetch_in
+ from app.services.invoicing import EDITABLE_INVOICE_STATUSES, merge_current_charges, resync_invoice_for_month
+ from app.services.utility_bills import fetch_bills, is_utility_label, label_key
+@@ -313,7 +314,7 @@ def evaluate_upload(supabase: Client, rows: list[dict], bill_month: date) -> dic
+     }
+     existing_bills = fetch_bills(supabase, lease_ids, bill_month)
+     mapped_labels = {
+-        m["label"] for m in fetch_all(lambda: supabase.table("charge_type_accounts").select("id, label").order("id"))
++        norm_label(m["label"]) for m in fetch_all(lambda: supabase.table("charge_type_accounts").select("id, label").order("id"))
+     }
+     building_name_by_id = {b["id"]: b["name"] for b in buildings}
+     room_by_id = {r["id"]: r for r in rooms}
+@@ -392,7 +393,7 @@ def evaluate_upload(supabase: Client, rows: list[dict], bill_month: date) -> dic
+             entry["lease_amount"] = float(matches[0]["amount"])
+         else:
+             resolved_label = entry["utility"]
+-            if resolved_label not in mapped_labels:
++            if norm_label(resolved_label) not in mapped_labels:
+                 entry["warnings"].append(
+                     f'No income account is set up for "{resolved_label}", so it will post to Other Income (4100).'
+                 )
+diff --git a/frontend/app/(dashboard)/chart-of-accounts/page.tsx b/frontend/app/(dashboard)/chart-of-accounts/page.tsx
+index 6eda068..940678a 100644
+--- a/frontend/app/(dashboard)/chart-of-accounts/page.tsx
++++ b/frontend/app/(dashboard)/chart-of-accounts/page.tsx
+@@ -15,6 +15,7 @@ type Account = {
+   transfers_to_owner: boolean;
+   is_system: boolean;
+   is_cash_or_bank: boolean;
++  report_head_name?: string | null;
+ };
+ 
+ type ChargeMapping = {
+@@ -45,8 +46,25 @@ export default function ChartOfAccountsPage() {
+     account_type: "expense" as Account["account_type"],
+     transfers_to_owner: false,
+     is_cash_or_bank: false,
++    report_head_name: "",
+   });
+   const [togglingId, setTogglingId] = useState<string | null>(null);
++  const [editingHeadId, setEditingHeadId] = useState<string | null>(null);
++  const [headDraft, setHeadDraft] = useState("");
++  const [savingHead, setSavingHead] = useState(false);
++
++  async function saveHeadName(account: Account) {
++    setSavingHead(true);
++    try {
++      await api.patch(`/chart-of-accounts/${account.id}`, { report_head_name: headDraft });
++      setEditingHeadId(null);
++      load();
++    } catch (err: any) {
++      setError(err.message);
++    } finally {
++      setSavingHead(false);
++    }
++  }
+ 
+   const [mappingModalOpen, setMappingModalOpen] = useState(false);
+   const [mappingSaving, setMappingSaving] = useState(false);
+@@ -77,7 +95,7 @@ export default function ChartOfAccountsPage() {
+     try {
+       await api.post("/chart-of-accounts", accountForm);
+       setAccountModalOpen(false);
+-      setAccountForm({ code: "", name: "", account_type: "expense", transfers_to_owner: false, is_cash_or_bank: false });
++      setAccountForm({ code: "", name: "", account_type: "expense", transfers_to_owner: false, is_cash_or_bank: false, report_head_name: "" });
+       load();
+     } catch (err: any) {
+       setAccountError(err.message);
+@@ -146,6 +164,42 @@ export default function ChartOfAccountsPage() {
+           columns={[
+             { header: "Code", accessor: (a) => <span className="figures">{a.code}</span> },
+             { header: "Name", accessor: (a) => a.name },
++            {
++              header: "Name on reports & charges",
++              accessor: (a) =>
++                editingHeadId === a.id ? (
++                  <span className="flex items-center gap-1.5">
++                    <input
++                      autoFocus
++                      value={headDraft}
++                      onChange={(e) => setHeadDraft(e.target.value)}
++                      onKeyDown={(e) => {
++                        if (e.key === "Enter") saveHeadName(a);
++                        if (e.key === "Escape") setEditingHeadId(null);
++                      }}
++                      placeholder={a.name}
++                      className="w-40 rounded border border-border bg-paper-card px-2 py-1 text-xs"
++                    />
++                    <button onClick={() => saveHeadName(a)} disabled={savingHead} className="text-xs font-medium text-stamp-green hover:underline">
++                      {savingHead ? "…" : "Save"}
++                    </button>
++                    <button onClick={() => setEditingHeadId(null)} className="text-xs text-ink/45 hover:underline">
++                      Cancel
++                    </button>
++                  </span>
++                ) : (
++                  <button
++                    onClick={() => {
++                      setEditingHeadId(a.id);
++                      setHeadDraft(a.report_head_name ?? "");
++                    }}
++                    className="text-left text-xs hover:underline"
++                    title="Click to change the name charge lines and reports show for this account"
++                  >
++                    {a.report_head_name ? a.report_head_name : <span className="text-ink/35">same as name</span>}
++                  </button>
++                ),
++            },
+             { header: "Type", accessor: (a) => TYPE_LABELS[a.account_type] },
+             {
+               header: "Transfers to owner",
+@@ -231,6 +285,12 @@ export default function ChartOfAccountsPage() {
+               onChange={(e) => setAccountForm({ ...accountForm, name: e.target.value })}
+             />
+           </Field>
++          <Field label="Name on reports & charges (optional)" hint="Leave empty to use the name above. Charge lines and report columns for this account will show this instead (e.g. Due to Owners shows as Rent).">
++            <Input
++              value={accountForm.report_head_name}
++              onChange={(e) => setAccountForm({ ...accountForm, report_head_name: e.target.value })}
++            />
++          </Field>
+           <Field label="Type">
+             <Select
+               value={accountForm.account_type}
+diff --git a/frontend/app/(dashboard)/leases/new/page.tsx b/frontend/app/(dashboard)/leases/new/page.tsx
+index a1b0f90..8623a1f 100644
+--- a/frontend/app/(dashboard)/leases/new/page.tsx
++++ b/frontend/app/(dashboard)/leases/new/page.tsx
+@@ -2,7 +2,7 @@
+ 
+ import { useEffect, useMemo, useState } from "react";
+ import { useRouter } from "next/navigation";
+-import { api, Tenant, Room, Building, Account } from "@/lib/api";
++import { api, Tenant, Room, Building, Account, accountHeadName } from "@/lib/api";
+ import { Card } from "@/components/ui/Card";
+ import { Field, Input, Select, AmountInput } from "@/components/ui/Field";
+ import { Button } from "@/components/ui/Button";
+@@ -169,15 +169,15 @@ export default function NewLeasePage() {
+     );
+   }
+ 
+-  // Selecting an account fills in the fee name to match it (e.g. picking
+-  // "4400 · Gas Recovery Income" sets the label to "Gas Recovery Income") so
+-  // the two stay in sync by default -- the label field remains a normal
+-  // text input, so it can still be renamed afterward if needed.
++  // The fee name comes from the GL account and cannot be retyped: picking
++  // "4400 · Gas Recovery Income" sets the name to "Gas Recovery Income" (or
++  // the account's own report name, e.g. "Rent" for Due to Owners), so one
++  // account is never spelled several ways.
+   function updateChargeAccount(index: number, accountId: string) {
+     const account = accounts.find((a) => a.id === accountId);
+     setCharges((prev) =>
+       prev.map((c, i) =>
+-        i === index ? { ...c, account_id: accountId, label: account ? account.name : c.label } : c
++        i === index ? { ...c, account_id: accountId, label: account ? accountHeadName(account) : c.label } : c
+       )
+     );
+   }
+@@ -198,11 +198,13 @@ export default function NewLeasePage() {
+     setCharges((prev) =>
+       prev.map((c) => {
+         if (c.account_id || !c.label) return c;
+-        const mapping = chargeMappings.find((m) => m.label.toLowerCase() === c.label.toLowerCase());
+-        return mapping ? { ...c, account_id: mapping.account_id } : c;
++        const mapping = chargeMappings.find((m) => m.label.trim().toLowerCase() === c.label.trim().toLowerCase());
++        if (!mapping) return c;
++        const account = accounts.find((a) => a.id === mapping.account_id);
++        return { ...c, account_id: mapping.account_id, label: account ? accountHeadName(account) : c.label };
+       })
+     );
+-  }, [chargeMappings]);
++  }, [chargeMappings, accounts]);
+ 
+   function removeCharge(index: number) {
+     setCharges((prev) => prev.filter((_, i) => i !== index));
+@@ -408,16 +410,18 @@ export default function NewLeasePage() {
+               losing the history of what was charged before.
+             </p>
+             {charges.map((c, i) => {
+-              const isKnownLabel = c.label && chargeMappings.some((m) => m.label.toLowerCase() === c.label.toLowerCase());
++              const isKnownLabel = c.label && chargeMappings.some((m) => m.label.trim().toLowerCase() === c.label.trim().toLowerCase());
+               return (
+                 <div key={i} className="border border-border rounded-card p-3">
+                   <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-start">
+                     <div className="lg:col-span-3">
+                       <Field label="Fee name">
+                         <Input
+-                          placeholder="e.g. Generator charges"
++                          placeholder="Fills in when you pick the account"
+                           value={c.label}
+-                          onChange={(e) => updateCharge(i, "label", e.target.value)}
++                          readOnly
++                          title="The name comes from the account you pick"
++                          className="bg-ink/[0.04] cursor-default"
+                         />
+                       </Field>
+                     </div>
+diff --git a/frontend/app/(dashboard)/leases/page.tsx b/frontend/app/(dashboard)/leases/page.tsx
+index 233b90f..b888cfa 100644
+--- a/frontend/app/(dashboard)/leases/page.tsx
++++ b/frontend/app/(dashboard)/leases/page.tsx
+@@ -2,7 +2,7 @@
+ 
+ import { useEffect, useRef, useState, Fragment } from "react";
+ import Link from "next/link";
+-import { api, ExpiringLease, Lease, Tenant, Room, Building, SecurityDeposit, SecurityDepositPayment, Account, fetchPdfBlob } from "@/lib/api";
++import { api, ExpiringLease, Lease, Tenant, Room, Building, SecurityDeposit, SecurityDepositPayment, Account, fetchPdfBlob, accountHeadName } from "@/lib/api";
+ import { supabase } from "@/lib/supabaseClient";
+ import { Card } from "@/components/ui/Card";
+ import { StampBadge } from "@/components/ui/StampBadge";
+@@ -976,16 +976,12 @@ export default function LeasesPage() {
+                   <Field label="Label">
+                     <Input
+                       required
+-                      list="known-charge-labels"
+-                      placeholder="e.g. Parking"
++                      readOnly
++                      placeholder="Fills in when you pick the account below"
++                      title="The name comes from the account you pick"
++                      className="bg-ink/[0.04] cursor-default"
+                       value={addChargeForm.label}
+-                      onChange={(e) => handleAddChargeLabelChange(e.target.value)}
+                     />
+-                    <datalist id="known-charge-labels">
+-                      {chargeMappings.map((m) => (
+-                        <option key={m.label} value={m.label} />
+-                      ))}
+-                    </datalist>
+                   </Field>
+                   <Field label="Amount">
+                     <Input
+@@ -1022,7 +1018,7 @@ export default function LeasesPage() {
+                       ? `"${addChargeForm.label}" already posts to this account — pick a different one below if that's wrong (e.g. a spelling mismatch from before). This updates it for every future charge under this label, on any lease.`
+                       : addChargeForm.label.trim()
+                       ? `"${addChargeForm.label}" hasn't been billed before — choose where it should post. Every future charge with this exact label will use the same account.`
+-                      : "Type a label above, or pick one from the list — matching labels reuse the same account automatically."
++                      : "Pick the account this charge posts to — the charge name is taken from it, so it is always spelled the same way."
+                   }
+                 >
+                   <Select
+@@ -1030,7 +1026,9 @@ export default function LeasesPage() {
+                     value={addChargeForm.account_id}
+                     onChange={(e) => {
+                       setAddChargeAccountTouched(true);
+-                      setAddChargeForm({ ...addChargeForm, account_id: e.target.value });
++                      const picked = accounts.find((a) => a.id === e.target.value);
++                      // The charge name always comes from the GL account, never typed.
++                      setAddChargeForm({ ...addChargeForm, account_id: e.target.value, label: picked ? accountHeadName(picked) : "" });
+                     }}
+                   >
+                     <option value="">Select an account…</option>
+diff --git a/frontend/app/(dashboard)/reports/page.tsx b/frontend/app/(dashboard)/reports/page.tsx
+index 6b573de..2fafdb1 100644
+--- a/frontend/app/(dashboard)/reports/page.tsx
++++ b/frontend/app/(dashboard)/reports/page.tsx
+@@ -470,7 +470,7 @@ export default function ReportsPage() {
+           <Button variant="secondary" onClick={() => window.print()} className="no-print">
+             <Printer size={15} /> Print this report
+           </Button>
+-          <span className="text-xs italic text-ink/55">Amounts in Rupees</span>
++          {tab !== "Receipts by Head" && <span className="text-xs italic text-ink/55">Amounts in Rupees</span>}
+         </div>
+       </div>
+ 
+@@ -552,7 +552,7 @@ export default function ReportsPage() {
+             <p className="text-xs text-ink/40 mt-3">
+               Invoices are counted in the month they were billed for. Receipts are counted in the month the money was
+               received (taken from the ledger, same as the dashboard&apos;s Collected figure), whichever month they paid
+-              for. Amounts in Rs.
++              for. Amounts in Rupees.
+             </p>
+           </Card>
+         </div>
+diff --git a/frontend/components/reports/ReceiptsByHeadReport.tsx b/frontend/components/reports/ReceiptsByHeadReport.tsx
+index ada2571..4270da8 100644
+--- a/frontend/components/reports/ReceiptsByHeadReport.tsx
++++ b/frontend/components/reports/ReceiptsByHeadReport.tsx
+@@ -2,7 +2,7 @@
+ 
+ import { useEffect, useState } from "react";
+ import { Printer } from "lucide-react";
+-import { Card, DataTable } from "@/components/ui/Card";
++import { Card } from "@/components/ui/Card";
+ import { Field, Input, Select } from "@/components/ui/Field";
+ import { Button } from "@/components/ui/Button";
+ import { Modal } from "@/components/ui/Modal";
+@@ -11,7 +11,7 @@ import { api, Building, Company, downloadFile } from "@/lib/api";
+ import { useLabels } from "@/lib/labels";
+ import { firstOfMonthYmd, todayYmd } from "@/lib/dates";
+ 
+-type IncomeByHeadRow = {
++type ReportRow = {
+   sr: number;
+   lease_id: string | null;
+   tenant_id: string | null;
+@@ -26,44 +26,19 @@ type IncomeByHeadRow = {
+   is_other?: boolean;
+ };
+ 
+-type SettlementRow = {
+-  sr: number;
+-  lease_id: string | null;
+-  tenant_id: string | null;
+-  tenant_name: string;
+-  room_label: string;
+-  settled_on: string;
+-  heads: Record<string, number>;
+-  settled_total: number;
+-  refund_paid: number;
+-  refund_account: string | null;
+-  deposit_released: number;
+-};
+-
+-type IncomeByHeadResponse = {
++type ReportResponse = {
+   columns: string[];
+-  rows: IncomeByHeadRow[];
++  rows: ReportRow[];
+   totals: Record<string, number>;
+   grand_total: number;
+   paid_total: number;
+   net_total: number;
+-  settlement: {
+-    columns: string[];
+-    rows: SettlementRow[];
+-    totals: Record<string, number>;
+-    settled_total: number;
+-    refund_total: number;
+-    deposit_released_total: number;
+-  };
+   reconciliation: {
+-    books_total: number;
+-    report_total: number;
++    books_net: number;
++    report_net: number;
+     gap: number;
+-    paid_books: number;
+-    paid_report: number;
+-    paid_gap: number;
+     matches: boolean;
+-    by_source: { source: string; books: number; report: number }[];
++    by_source: { source: string; amount: number }[];
+     unsplit_invoice_receipts: number;
+     note: string;
+   };
+@@ -71,7 +46,7 @@ type IncomeByHeadResponse = {
+ 
+ type Receipt = {
+   payment_id: string;
+-  invoice_id: string;
++  invoice_id: string | null;
+   invoice_number: string | null;
+   invoice_month: string | null;
+   payment_date: string;
+@@ -84,12 +59,14 @@ type Receipt = {
+ 
+ type DrilldownResponse = { receipts: Receipt[]; total: number };
+ 
+-// Plain number: the page says "Amounts in Rs" once, top right, instead of
+-// repeating "Rs" on every figure.
+-function formatPkr(n: number) {
+-  return Number(n || 0).toLocaleString("en-PK");
+-}
++const PAID = "Paid against security";
+ 
++// Whole rupees, no "Rs" on any figure (the card says "Amounts in Rupees"
++// once, on its top border); negatives in brackets, as in a ledger.
++function num(n: number) {
++  const r = Math.round(Number(n || 0));
++  return r < 0 ? `(${Math.abs(r).toLocaleString("en-PK")})` : r.toLocaleString("en-PK");
++}
+ 
+ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?: boolean }) {
+   const { L } = useLabels();
+@@ -99,12 +76,13 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?:
+   const [buildings, setBuildings] = useState<Building[]>([]);
+   const [company, setCompany] = useState<Company | null>(null);
+ 
+-  const [data, setData] = useState<IncomeByHeadResponse | null>(null);
++  const [data, setData] = useState<ReportResponse | null>(null);
+   const [loading, setLoading] = useState(false);
+   const [error, setError] = useState<string | null>(null);
+   const [backfilling, setBackfilling] = useState(false);
+   const [backfillMessage, setBackfillMessage] = useState<string | null>(null);
+   const [downloadingPdf, setDownloadingPdf] = useState(false);
++  const [expanded, setExpanded] = useState<string | null>(null);
+ 
+   const [drilldown, setDrilldown] = useState<{
+     row: { tenant_name: string; room_label: string };
+@@ -118,13 +96,21 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?:
+     api.get<Company>("/company/me").then(setCompany);
+   }, []);
+ 
++  // A long name is shown on one line ending in "…"; clicking it opens the
++  // full text (still on one line). Any other click closes it.
++  useEffect(() => {
++    const close = () => setExpanded(null);
++    document.addEventListener("click", close);
++    return () => document.removeEventListener("click", close);
++  }, []);
++
+   function load() {
+     setLoading(true);
+     setError(null);
+     const params = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
+     if (buildingFilter) params.set("building_id", buildingFilter);
+     api
+-      .get<IncomeByHeadResponse>(`/reports/income-by-head?${params.toString()}`)
++      .get<ReportResponse>(`/reports/income-by-head?${params.toString()}`)
+       .then(setData)
+       .catch((err: any) => setError(err.message))
+       .finally(() => setLoading(false));
+@@ -132,8 +118,8 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?:
+ 
+   useEffect(load, []); // eslint-disable-line react-hooks/exhaustive-deps
+ 
+-  async function openCell(row: IncomeByHeadRow, label: string) {
+-    if (label === "Paid against security" ? !row.paid_against_security : !row.heads[label]) return;
++  async function openCell(row: ReportRow, label: string) {
++    if (label === PAID ? !row.paid_against_security : !row.heads[label]) return;
+     setDrilldown({ row, label, data: null, loading: true });
+     const params = new URLSearchParams({ label, date_from: dateFrom, date_to: dateTo });
+     if (row.lease_id) params.set("lease_id", row.lease_id);
+@@ -147,19 +133,6 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?:
+     }
+   }
+ 
+-  async function openSettlementCell(row: SettlementRow, label: string) {
+-    if (!row.lease_id) return;
+-    setDrilldown({ row, label, data: null, loading: true });
+-    const params = new URLSearchParams({ label, date_from: row.settled_on, date_to: row.settled_on, part: "settlement", lease_id: row.lease_id });
+-    try {
+-      const result = await api.get<DrilldownResponse>(`/reports/income-by-head/drilldown?${params.toString()}`);
+-      setDrilldown({ row, label, data: result, loading: false });
+-    } catch (err: any) {
+-      setDrilldown(null);
+-      setError(err.message);
+-    }
+-  }
+-
+   async function downloadPdf() {
+     setDownloadingPdf(true);
+     try {
+@@ -196,8 +169,52 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?:
+   const columns = data?.columns ?? [];
+   const rows = data?.rows ?? [];
+ 
++  // Tenant / apartment text: one line, "…" when it is longer, full text on click.
++  function textCell(key: string, text: string, strong = false) {
++    return (
++      <td className="relative px-2.5 py-2.5 text-left align-middle max-w-[160px]">
++        <button
++          type="button"
++          title="Click to see all"
++          onClick={(e) => {
++            e.stopPropagation();
++            setExpanded(expanded === key ? null : key);
++          }}
++          className={`block w-full truncate text-left ${strong ? "font-medium" : ""}`}
++        >
++          {text}
++        </button>
++        {expanded === key && (
++          <div className="no-print absolute left-2 top-full z-30 -mt-1 whitespace-nowrap rounded-card bg-ink px-3 py-1.5 text-xs text-paper shadow-shell">
++            {text}
++          </div>
++        )}
++      </td>
++    );
++  }
++
++  function amountCell(row: ReportRow, label: string, value: number) {
++    return (
++      <td key={label} className="px-2.5 py-2.5 text-right align-middle figures whitespace-nowrap">
++        {value ? (
++          <button
++            onClick={() => openCell(row, label)}
++            className="underline decoration-dotted decoration-ink/30 hover:decoration-ink hover:text-brass-dark no-print-underline"
++          >
++            {num(value)}
++          </button>
++        ) : (
++          <span className="text-ink/25">—</span>
++        )}
++      </td>
++    );
++  }
++
++  const th = "px-2.5 py-2.5 text-right align-bottom text-[10.5px] font-semibold uppercase tracking-wider text-ink/60 leading-tight";
++  const group = "px-2 pb-1 text-center text-[10px] font-semibold uppercase tracking-[0.12em] text-ledger border-b border-border";
++
+   return (
+-    <div className="space-y-6">
++    <div className="space-y-5">
+       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+         {embedded ? (
+           <div />
+@@ -205,19 +222,15 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?:
+           <div>
+             <h1 className="text-2xl font-display font-semibold">Receipts by Head</h1>
+             <p className="text-sm text-ink/55 mt-1">
+-              Cash and bank received against invoices (by income head), security deposits and advance / opening balance,
+-              the amount paid out against security, and what was settled from deposits at final settlement. Click any
++              Cash and bank received by income head, security deposits and advances, and the security paid out. Click any
+               amount to see what is behind it.
+             </p>
+           </div>
+         )}
+         {!embedded && (
+-          <div className="flex flex-col items-end gap-1">
+-            <Button variant="ghost" onClick={() => window.print()} className="no-print">
+-              <Printer size={16} className="mr-1.5 inline" /> Print
+-            </Button>
+-            <span className="text-xs italic text-ink/55">Amounts in Rupees</span>
+-          </div>
++          <Button variant="ghost" onClick={() => window.print()} className="no-print">
++            <Printer size={16} className="mr-1.5 inline" /> Print
++          </Button>
+         )}
+       </div>
+ 
+@@ -249,7 +262,7 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?:
+             <Button variant="secondary" onClick={load} disabled={loading} className="w-full">
+               {loading ? "Loading…" : "Apply"}
+             </Button>
+-            <Button variant="ghost" onClick={downloadPdf} disabled={downloadingPdf || !data?.rows.length} className="w-full">
++            <Button variant="ghost" onClick={downloadPdf} disabled={downloadingPdf || !rows.length} className="w-full">
+               {downloadingPdf ? "Preparing…" : "PDF (landscape)"}
+             </Button>
+           </div>
+@@ -265,16 +278,14 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?:
+       {data && !data.reconciliation.matches && (
+         <Card className="border-brass/40 no-print">
+           <p className="text-sm text-ink/70">
+-            <span className="font-medium text-brass-dark">Heads up:</span> this report does not match the cash and bank books
+-            for the same dates. Received: report {formatPkr(data.reconciliation.report_total)} vs books{" "}
+-            {formatPkr(data.reconciliation.books_total)} (difference {formatPkr(data.reconciliation.gap)}). Paid against
+-            security: report {formatPkr(data.reconciliation.paid_report)} vs books {formatPkr(data.reconciliation.paid_books)}{" "}
+-            (difference {formatPkr(data.reconciliation.paid_gap)}).
++            <span className="font-medium text-brass-dark">Heads up:</span> net cash in this report ({num(data.reconciliation.report_net)})
++            does not match the cash and bank books for the same dates ({num(data.reconciliation.books_net)}) — difference{" "}
++            {num(data.reconciliation.gap)}.
+           </p>
+           <ul className="mt-2 text-xs text-ink/60 space-y-0.5">
+             {data.reconciliation.by_source.map((b) => (
+               <li key={b.source}>
+-                {b.source}: books {formatPkr(b.books)} · report {formatPkr(b.report)}
++                {b.source}: {num(b.amount)}
+               </li>
+             ))}
+           </ul>
+@@ -292,155 +303,88 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?:
+ 
+       {data && data.reconciliation.matches && (
+         <p className="text-xs text-stamp-green no-print">
+-          Matches the cash and bank books for these dates: received {formatPkr(data.reconciliation.books_total)}, paid
+-          against security {formatPkr(data.reconciliation.paid_books)}.
++          Net cash matches the cash and bank books for these dates: {num(data.reconciliation.books_net)}.
+         </p>
+       )}
+ 
+-      <Card>
+-        <h2 className="text-sm font-semibold mb-1">Part 1 — Cash and bank receipts</h2>
+-        <p className="text-xs text-ink/45 mb-3 no-print">
+-          Click any amount below to see exactly which receipt(s) — and which bank/cash account(s) — made it up.
+-        </p>
+-        <DataTable
+-          keyField="sr"
+-          rows={rows}
+-          emptyMessage="No cash or bank receipts in this period."
+-          columns={[
+-            { header: "Sr", accessor: (r) => r.sr },
+-            { header: "Tenant", accessor: (r) => <span className="font-medium">{r.tenant_name}</span> },
+-            { header: L("Apartment"), accessor: (r) => r.room_label },
+-            ...columns.map((c) => ({
+-              header: c,
+-              accessor: (r: IncomeByHeadRow) =>
+-                r.heads[c] ? (
+-                  <button
+-                    onClick={() => openCell(r, c)}
+-                    className="figures underline decoration-dotted decoration-ink/30 hover:decoration-ink hover:text-brass-dark no-print-underline"
+-                  >
+-                    {formatPkr(r.heads[c])}
+-                  </button>
+-                ) : (
+-                  <span className="text-ink/30">—</span>
+-                ),
+-              align: "right" as const,
+-            })),
+-            {
+-              header: "Total received",
+-              accessor: (r) => <span className="figures font-semibold">{formatPkr(r.total)}</span>,
+-              align: "right",
+-            },
+-            {
+-              header: "Paid against security",
+-              accessor: (r) =>
+-                r.paid_against_security ? (
+-                  <button
+-                    onClick={() => openCell(r, "Paid against security")}
+-                    className="figures underline decoration-dotted decoration-ink/30 hover:decoration-ink hover:text-brass-dark no-print-underline"
+-                  >
+-                    {formatPkr(r.paid_against_security)}
+-                  </button>
+-                ) : (
+-                  <span className="text-ink/30">—</span>
+-                ),
+-              align: "right",
+-            },
+-            {
+-              header: "Net",
+-              accessor: (r) => <span className="figures font-semibold">{formatPkr(r.net)}</span>,
+-              align: "right",
+-            },
+-          ]}
+-        />
+-        {rows.length > 0 && (
+-          <div className="flex flex-wrap justify-end gap-6 pt-3 mt-3 border-t border-border text-sm font-medium">
+-            {columns.map((c) => (
+-              <span key={c}>
+-                {c}: <span className="figures">{formatPkr(data?.totals[c] ?? 0)}</span>
+-              </span>
+-            ))}
+-            <span>
+-              Total received: <span className="figures">{formatPkr(data?.grand_total ?? 0)}</span>
+-            </span>
+-            <span>
+-              Paid against security: <span className="figures">{formatPkr(data?.paid_total ?? 0)}</span>
+-            </span>
+-            <span>
+-              Net: <span className="figures">{formatPkr(data?.net_total ?? 0)}</span>
+-            </span>
+-          </div>
+-        )}
+-      </Card>
+-
+-      {data && data.settlement.rows.length > 0 && (
++      <div className="relative">
++        <span className="absolute -top-2.5 right-5 z-10 bg-paper px-2 text-xs italic text-ink/60">Amounts in Rupees</span>
+         <Card>
+-          <h2 className="text-sm font-semibold mb-1">Part 2 — Settled at final settlement (from security deposit, not cash)</h2>
+-          <p className="text-xs text-ink/45 mb-3">
+-            Dues and charges cleared out of the tenant&apos;s security deposit when the lease was closed. No cash or bank
+-            money moved for these except the refund paid. Deposit released = settled + refund paid.
++          <p className="text-xs text-ink/45 mb-3 no-print">
++            Click any amount to see the receipts behind it. Click a long name to see all of it.
+           </p>
+-          <DataTable
+-            keyField="sr"
+-            rows={data.settlement.rows}
+-            emptyMessage="No final settlements in this period."
+-            columns={[
+-              { header: "Sr", accessor: (r) => r.sr },
+-              { header: "Tenant", accessor: (r) => <span className="font-medium">{r.tenant_name}</span> },
+-              { header: L("Apartment"), accessor: (r) => r.room_label },
+-              { header: "Date", accessor: (r) => r.settled_on },
+-              ...data.settlement.columns.map((c) => ({
+-                header: c,
+-                accessor: (r: SettlementRow) =>
+-                  r.heads[c] ? (
+-                    <button
+-                      onClick={() => openSettlementCell(r, c)}
+-                      className="figures underline decoration-dotted decoration-ink/30 hover:decoration-ink hover:text-brass-dark no-print-underline"
++          <div className="overflow-x-auto">
++            <table className="w-full text-[12.5px] border-collapse">
++              <thead>
++                <tr>
++                  <th colSpan={3} />
++                  <th colSpan={columns.length + 1} className={group}>
++                    Received (cash &amp; bank)
++                  </th>
++                  <th className={group}>Paid out</th>
++                  <th className={group}>Cash</th>
++                </tr>
++                <tr className="border-b-2 border-ledger">
++                  <th className={`${th} text-left w-9`}>Sr</th>
++                  <th className={`${th} text-left`}>Tenant</th>
++                  <th className={`${th} text-left`}>{L("Apartment")}</th>
++                  {columns.map((c) => (
++                    <th key={c} className={th}>
++                      {c}
++                    </th>
++                  ))}
++                  <th className={th}>Total received</th>
++                  <th className={th}>{PAID}</th>
++                  <th className={th}>Net cash</th>
++                </tr>
++              </thead>
++              <tbody>
++                {rows.length === 0 && (
++                  <tr>
++                    <td colSpan={columns.length + 6} className="py-10 text-center text-sm text-ink/45">
++                      {loading ? "Loading…" : "No cash or bank receipts in this period."}
++                    </td>
++                  </tr>
++                )}
++                {rows.map((r, i) => (
++                  <tr key={r.sr} className={`border-b border-border/70 ${i % 2 === 1 ? "bg-ink/[0.025]" : ""}`}>
++                    <td className="px-2.5 py-2.5 text-left text-ink/55 align-middle">{r.sr}</td>
++                    {textCell(`${r.sr}-t`, r.tenant_name, true)}
++                    {textCell(`${r.sr}-r`, r.room_label)}
++                    {columns.map((c) => amountCell(r, c, r.heads[c]))}
++                    <td className="px-2.5 py-2.5 text-right align-middle figures font-semibold whitespace-nowrap">{num(r.total)}</td>
++                    {amountCell(r, PAID, r.paid_against_security)}
++                    <td
++                      className={`px-2.5 py-2.5 text-right align-middle figures font-semibold whitespace-nowrap ${
++                        r.net < 0 ? "text-stamp-red" : ""
++                      }`}
+                     >
+-                      {formatPkr(r.heads[c])}
+-                    </button>
+-                  ) : (
+-                    <span className="text-ink/30">—</span>
+-                  ),
+-                align: "right" as const,
+-              })),
+-              { header: "Settled", accessor: (r) => <span className="figures font-semibold">{formatPkr(r.settled_total)}</span>, align: "right" },
+-              {
+-                header: "Refund paid",
+-                accessor: (r) =>
+-                  r.refund_paid ? (
+-                    <button
+-                      onClick={() => openSettlementCell(r, "Refund paid")}
+-                      className="figures underline decoration-dotted decoration-ink/30 hover:decoration-ink hover:text-brass-dark no-print-underline"
+-                      title={r.refund_account ?? undefined}
+-                    >
+-                      {formatPkr(r.refund_paid)}
+-                    </button>
+-                  ) : (
+-                    <span className="text-ink/30">—</span>
+-                  ),
+-                align: "right",
+-              },
+-              { header: "Deposit released", accessor: (r) => <span className="figures font-semibold">{formatPkr(r.deposit_released)}</span>, align: "right" },
+-            ]}
+-          />
+-          <div className="flex flex-wrap justify-end gap-6 pt-3 mt-3 border-t border-border text-sm font-medium">
+-            {data.settlement.columns.map((c) => (
+-              <span key={c}>
+-                {c}: <span className="figures">{formatPkr(data.settlement.totals[c] ?? 0)}</span>
+-              </span>
+-            ))}
+-            <span>
+-              Settled: <span className="figures">{formatPkr(data.settlement.settled_total)}</span>
+-            </span>
+-            <span>
+-              Refund paid: <span className="figures">{formatPkr(data.settlement.refund_total)}</span>
+-            </span>
+-            <span>
+-              Deposit released: <span className="figures">{formatPkr(data.settlement.deposit_released_total)}</span>
+-            </span>
++                      {num(r.net)}
++                    </td>
++                  </tr>
++                ))}
++              </tbody>
++              {rows.length > 0 && (
++                <tfoot>
++                  <tr className="border-t-2 border-brass bg-ink/[0.045] font-bold">
++                    <td />
++                    <td className="px-2.5 py-3 text-left">Total</td>
++                    <td />
++                    {columns.map((c) => (
++                      <td key={c} className="px-2.5 py-3 text-right figures whitespace-nowrap">
++                        {num(data?.totals[c] ?? 0)}
++                      </td>
++                    ))}
++                    <td className="px-2.5 py-3 text-right figures whitespace-nowrap">{num(data?.grand_total ?? 0)}</td>
++                    <td className="px-2.5 py-3 text-right figures whitespace-nowrap">{num(data?.paid_total ?? 0)}</td>
++                    <td className="px-2.5 py-3 text-right figures whitespace-nowrap">{num(data?.net_total ?? 0)}</td>
++                  </tr>
++                </tfoot>
++              )}
++            </table>
+           </div>
+         </Card>
+-      )}
++      </div>
+ 
+       <Modal
+         open={!!drilldown}
+@@ -448,9 +392,7 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?:
+         title={drilldown ? `${drilldown.label} — ${drilldown.row.tenant_name}` : "Receipts"}
+       >
+         <div className="space-y-3">
+-          <p className="text-xs text-ink/50">
+-            {drilldown?.row.room_label} — everything that makes up this amount.
+-          </p>
++          <p className="text-xs text-ink/50">{drilldown?.row.room_label} — everything that makes up this amount.</p>
+           {drilldown?.loading && <p className="text-sm text-ink/45">Loading…</p>}
+           {drilldown?.data && (
+             <>
+@@ -468,13 +410,13 @@ export default function ReceiptsByHeadReport({ embedded = false }: { embedded?:
+                         {r.invoice_number ? ` · Invoice ${r.invoice_number}` : ""}
+                       </p>
+                     </div>
+-                    <span className="figures font-medium">{formatPkr(r.amount)}</span>
++                    <span className="figures font-medium">{num(r.amount)}</span>
+                   </div>
+                 ))}
+               </div>
+               <div className="flex justify-between text-sm font-semibold pt-2 border-t border-border">
+                 <span>Total</span>
+-                <span className="figures">{formatPkr(drilldown.data.total)}</span>
++                <span className="figures">{num(drilldown.data.total)}</span>
+               </div>
+             </>
+           )}
+diff --git a/frontend/lib/api.ts b/frontend/lib/api.ts
+index fbf8c4c..1ea92c7 100644
+--- a/frontend/lib/api.ts
++++ b/frontend/lib/api.ts
+@@ -243,8 +243,16 @@ export type Account = {
+   account_type: string;
+   transfers_to_owner: boolean;
+   is_cash_or_bank?: boolean;
++  // The name charge lines and report columns show for this account when it
++  // should differ from the account's own name (e.g. "Due to Owners" -> "Rent").
++  report_head_name?: string | null;
+ };
+ 
++// The one name a charge line / report column shows for a GL account.
++export function accountHeadName(account: { name: string; report_head_name?: string | null }): string {
++  return (account.report_head_name ?? "").trim() || account.name;
++}
++
+ export type SecurityDeposit = {
+   id: string;
+   lease_id: string;

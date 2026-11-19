@@ -1,0 +1,280 @@
+diff --git a/backend/app/services/lease_settlement.py b/backend/app/services/lease_settlement.py
+index cc67b13..09e68d5 100644
+--- a/backend/app/services/lease_settlement.py
++++ b/backend/app/services/lease_settlement.py
+@@ -362,7 +362,14 @@ def _apply_final_period_invoice(
+         # its original; reversing it again would put the cancelled amount back
+         # into the ledger) -- the same rule invoicing.py follows.
+         for entry in live_entries:
+-            reverse_journal_entry(supabase, company_id, entry["id"], reason="Lease closed — final period recalculated")
++            # Dated the move-out date -- the same date the corrected invoice is
++            # reposted on -- so the reversal and the repost always fall in the
++            # same period (a reversal dated "today" left the original invoice
++            # in its month and the cancellation in a later one).
++            reverse_journal_entry(
++                supabase, company_id, entry["id"],
++                reason="Lease closed — final period recalculated", entry_date=str(move_out_date),
++            )
+ 
+         supabase.table("invoice_line_items").delete().eq("invoice_id", move_out_month_invoice["id"]).execute()
+         if not final_period_charges:
+@@ -465,7 +472,7 @@ def _record_settlement_receipts(
+     cash: float, offset: float, discount: float,
+     cash_account: Optional[dict], offset_account_id: Optional[str],
+     payment_date: str, preview: dict, final_invoice: Optional[dict],
+-) -> None:
++) -> list[str]:
+     """
+     Records what settled the tenant's dues as ordinary receipts against the
+     invoices, oldest dues first -- the same order Receive Payment uses:
+@@ -478,10 +485,12 @@ def _record_settlement_receipts(
+     simply pays them), so the invoices show as paid, the receipt appears in
+     Receipts by Head by income head, and the tenant's ledger and invoice
+     balances agree. No journal entry is posted here: the single settlement
+-    entry already contains them. Best-effort after the books are posted: a
+-    failure is logged and shows up as a difference in the report's cash-book
+-    check.
++    entry already contains them. Runs after the books are posted, so a failure
++    here cannot undo the closing -- but it is NEVER silent: the problems are
++    returned and shown to the user, who is told to review the invoices.
+     """
++    problems: list[str] = []
++    created = 0
+     group_id = str(uuid.uuid4())
+     cash_method = "cash" if "cash" in ((cash_account or {}).get("name") or "").lower() else "bank_transfer"
+     left = {"cash": round(cash, 2), "offset": round(offset, 2), "discount": round(discount, 2)}
+@@ -508,6 +517,7 @@ def _record_settlement_receipts(
+                 row.update({"company_id": company_id, "invoice_id": seg["invoice_id"], "tenant_id": tenant_id,
+                             "payment_date": payment_date, "receipt_group_id": group_id})
+                 payment = supabase.table("payments").insert(row).execute().data[0]
++                created += 1
+                 left[kind] = round(left[kind] - take, 2)
+                 seg_left = round(seg_left - take, 2)
+                 if seg["invoice_id"]:
+@@ -516,8 +526,9 @@ def _record_settlement_receipts(
+                             supabase, company_id, payment["id"], seg["invoice_id"], tenant_id, lease_id,
+                             row["amount"], row["discount_amount"],
+                         )
+-                    except Exception:
++                    except Exception as exc:
+                         logger.exception("allocation failed for settlement payment %s", payment["id"])
++                        problems.append(f"Splitting a receipt by income head failed ({exc}).")
+                     if seg["invoice_id"] not in touched_invoices:
+                         touched_invoices.append(seg["invoice_id"])
+         for invoice_id in touched_invoices:
+@@ -536,8 +547,12 @@ def _record_settlement_receipts(
+                     "payment_method": cash_method, "notes": "Received at final settlement (advance)", "receipt_group_id": group_id,
+                 }
+             ).execute()
+-    except Exception:
++    except Exception as exc:
+         logger.exception("could not record settlement receipts for lease %s", lease_id)
++        problems.append(f"Recording the receipts against the invoices failed ({exc}).")
++    if (cash + offset + discount) > 0.01 and created == 0 and not problems:
++        problems.append("No receipt was recorded against the invoices (nothing was found to settle).")
++    return problems
+ 
+ 
+ def _build_settlement_lines(
+@@ -776,6 +791,7 @@ def finalize_settlement(
+     net_amount = round(deposit_paid - deductions_total - total_owed_by_tenant + received, 2)
+ 
+     entry_date = str(refund_date or move_out_date)
++    warnings: list[str] = []
+ 
+     # ONE journal entry for the whole settlement:
+     #   Dr [cash/bank]            money received now (deposit short of dues)
+@@ -854,7 +870,7 @@ def finalize_settlement(
+         # settled invoices -- record them as receipts so the invoices show as
+         # paid and Receipts by Head shows them by income head.
+         if received > 0.01 or rent_offset > 0.01 or discount > 0.01:
+-            _record_settlement_receipts(
++            warnings = _record_settlement_receipts(
+                 supabase, company_id, lease_id, tenant_id, received, rent_offset, discount,
+                 received_account, (refund_account or received_account or {}).get("id"),
+                 entry_date, preview, final_invoice,
+@@ -893,6 +909,13 @@ def finalize_settlement(
+         "reason": reason,
+         "created_by": created_by,
+         "ledger_adjustments": {
++            # What was actually received / refunded, and into / out of which
++            # account -- printed on the statement.
++            "received_amount": received,
++            "received_account": f"{received_account['code']} · {received_account['name']}" if received_account else None,
++            "refund_amount": refund_amount,
++            "refund_account": f"{refund_account['code']} · {refund_account['name']}" if refund_account else None,
++            "still_owed": round(max(shortfall - received, 0.0), 2),
+             "applied": preview["ledger_applied"],
+             "other_receivable": preview["ledger_other_receivable"],
+             "deposit_paid_in_records": preview["deposit_paid_in_records"],
+@@ -914,4 +937,5 @@ def finalize_settlement(
+     _save_settlement_lines(
+         supabase, company_id, saved["id"], lease_id, tenant_id, entry_date, settlement_lines
+     )
++    saved["warnings"] = warnings
+     return saved
+diff --git a/backend/app/services/settlement_pdf.py b/backend/app/services/settlement_pdf.py
+index 9887910..59b5eab 100644
+--- a/backend/app/services/settlement_pdf.py
++++ b/backend/app/services/settlement_pdf.py
+@@ -219,12 +219,35 @@ def render_settlement_pdf(ctx: dict) -> bytes:
+         c.setStrokeColorRGB(*INK)
+         c.line(20 * mm, y, width - 20 * mm, y)
+ 
++    # What was actually received from / paid to the tenant at settlement, and
++    # through which cash or bank account.
++    adj = settlement.get("ledger_adjustments") or {}
++    received_now = float(adj.get("received_amount") or 0)
++    refund_paid = float(adj.get("refund_amount") or 0)
++    if received_now > 0.005 or refund_paid > 0.005:
++        c.setFillColorRGB(*INK)
++        if received_now > 0.005:
++            y -= 9 * mm
++            c.setFont("Helvetica", 10)
++            c.drawString(20 * mm, y, f"Received from tenant at settlement ({adj.get('received_account') or 'cash / bank'})")
++            c.drawRightString(width - 20 * mm, y, f"Rs {received_now:,.0f}")
++        if refund_paid > 0.005:
++            y -= 9 * mm
++            c.setFont("Helvetica", 10)
++            c.drawString(20 * mm, y, f"Refund paid to tenant ({adj.get('refund_account') or 'cash / bank'})")
++            c.drawRightString(width - 20 * mm, y, f"Rs {refund_paid:,.0f}")
++
+     y -= 16 * mm
+-    c.setFillColorRGB(*(LEDGER if is_refund else RED))
++    settled_in_full = abs(net_amount) < 0.5
++    c.setFillColorRGB(*(LEDGER if (is_refund or settled_in_full) else RED))
+     c.rect(20 * mm, y - 4 * mm, width - 40 * mm, 14 * mm, fill=1, stroke=0)
+     c.setFillColorRGB(1, 1, 1)
+     c.setFont("Helvetica-Bold", 13)
+-    label = "Net refund to tenant" if is_refund else "Net amount still owed by tenant"
++    label = (
++        "Settled in full — nothing owed, nothing to refund"
++        if settled_in_full
++        else "Net refund to tenant" if is_refund else "Net amount still owed by tenant"
++    )
+     c.drawString(24 * mm, y, label)
+     c.drawRightString(width - 24 * mm, y, f"Rs {abs(net_amount):,.0f}")
+ 
+diff --git a/frontend/app/(dashboard)/leases/[id]/settlement/page.tsx b/frontend/app/(dashboard)/leases/[id]/settlement/page.tsx
+index 2748d30..f4e3c58 100644
+--- a/frontend/app/(dashboard)/leases/[id]/settlement/page.tsx
++++ b/frontend/app/(dashboard)/leases/[id]/settlement/page.tsx
+@@ -54,6 +54,7 @@ export default function LeaseSettlementPage() {
+   const [discountAmount, setDiscountAmount] = useState("");
+   const [discountAccountId, setDiscountAccountId] = useState("");
+   const [refundAccountId, setRefundAccountId] = useState("");
++  const [closeWarnings, setCloseWarnings] = useState<string[]>([]);
+   const [receivedAmount, setReceivedAmount] = useState("");
+   const [receivedTouched, setReceivedTouched] = useState(false);
+   const [receivedAccountId, setReceivedAccountId] = useState("");
+@@ -143,7 +144,7 @@ export default function LeaseSettlementPage() {
+     setSubmitting(true);
+     setSubmitError(null);
+     try {
+-      const result = await api.post<{ id: string }>(`/leases/${leaseId}/settlement`, {
++      const result = await api.post<{ id: string; warnings?: string[] }>(`/leases/${leaseId}/settlement`, {
+         move_out_date: moveOutDate,
+         discount_amount: discountNum,
+         discount_account_id: discountAccountId || undefined,
+@@ -157,6 +158,7 @@ export default function LeaseSettlementPage() {
+         received_account_id: receivedNum > 0.005 ? receivedAccountId : undefined,
+         reason: closeReason || undefined,
+       });
++      setCloseWarnings(result.warnings ?? []);
+       setDoneSettlementId(result.id);
+     } catch (err: any) {
+       setSubmitError(err.message);
+@@ -188,12 +190,38 @@ export default function LeaseSettlementPage() {
+             </h1>
+             <div
+               className={`inline-block px-6 py-4 rounded-card text-lg font-display font-semibold ${
+-                isRefund ? "bg-accent/10 text-accent" : "bg-stamp-red/10 text-stamp-red"
++                isRefund || (shortfall > 0 && stillOwedAfter <= 0.005)
++                  ? "bg-accent/10 text-accent"
++                  : "bg-stamp-red/10 text-stamp-red"
+               }`}
+             >
+-              {isRefund ? "Net refund to tenant" : "Net amount still owed by tenant"}
+-              <div className="text-2xl mt-1 figures">{formatPkr(Math.abs(projectedNet))}</div>
++              {isRefund
++                ? "Net refund to tenant"
++                : shortfall > 0 && stillOwedAfter <= 0.005
++                ? "Settled in full — nothing owed"
++                : "Still owed by tenant after closing"}
++              <div className="text-2xl mt-1 figures">
++                {isRefund ? formatPkr(Math.abs(projectedNet)) : formatPkr(stillOwedAfter)}
++              </div>
+             </div>
++            {receivedNum > 0.005 && (
++              <p className="text-sm text-ink/60">
++                Received from tenant now: <span className="figures font-medium">{formatPkr(receivedNum)}</span>
++                {accounts.find((a) => a.id === receivedAccountId)
++                  ? ` into ${accounts.find((a) => a.id === receivedAccountId)!.code} · ${accounts.find((a) => a.id === receivedAccountId)!.name}`
++                  : ""}
++              </p>
++            )}
++            {closeWarnings.length > 0 && (
++              <div className="mx-auto max-w-xl rounded-card border border-stamp-red/40 bg-stamp-red/5 px-4 py-3 text-left text-sm text-stamp-red">
++                <p className="font-medium">The lease is closed and the books are posted, but please review:</p>
++                <ul className="mt-1 list-disc pl-5 space-y-0.5">
++                  {closeWarnings.map((w, i) => (
++                    <li key={i}>{w}</li>
++                  ))}
++                </ul>
++              </div>
++            )}
+             <div className="flex justify-center gap-2 pt-4">
+               <Button variant="secondary" onClick={() => router.push("/leases")}>
+                 Back to leases
+@@ -407,7 +435,7 @@ export default function LeaseSettlementPage() {
+               </Card>
+ 
+               <Card className="bg-accent/5 border-accent/20">
+-                <p className="text-sm font-medium">{projectedNet >= 0 ? "Net refund to tenant" : "Net amount still owed by tenant"}</p>
++                <p className="text-sm font-medium">{projectedNet >= 0 ? "Net refund to tenant" : "Owed by tenant after the deposit"}</p>
+                 <p className={`text-2xl font-display font-semibold figures mt-1 ${projectedNet >= 0 ? "text-accent" : "text-stamp-red"}`}>
+                   {formatPkr(Math.abs(projectedNet))}
+                 </p>
+@@ -439,10 +467,16 @@ export default function LeaseSettlementPage() {
+                         No cash or bank accounts are marked in your Chart of Accounts. Mark them there first.
+                       </p>
+                     )}
+-                    {stillOwedAfter > 0.005 && (
++                    {stillOwedAfter > 0.005 ? (
+                       <p className="text-xs text-stamp-red">
+                         {formatPkr(stillOwedAfter)} will remain owed by the tenant after closing.
+                       </p>
++                    ) : (
++                      receivedNum > 0.005 && (
++                        <p className="text-xs text-stamp-green">
++                          After receiving {formatPkr(receivedNum)} the tenant is settled in full — nothing owed.
++                        </p>
++                      )
+                     )}
+                   </div>
+                 )}
+diff --git a/frontend/app/(dashboard)/leases/page.tsx b/frontend/app/(dashboard)/leases/page.tsx
+index b888cfa..40c9e36 100644
+--- a/frontend/app/(dashboard)/leases/page.tsx
++++ b/frontend/app/(dashboard)/leases/page.tsx
+@@ -717,7 +717,7 @@ export default function LeasesPage() {
+                           <td className="py-3 pr-4 whitespace-nowrap figures">{l.end_date}</td>
+                         )}
+                         <td className="py-3 pr-4 whitespace-nowrap">
+-                          <StampBadge status={l.status} />
++                          <StampBadge status={l.status === "terminated" ? "settled" : l.status} />
+                         </td>
+                         {showDepositCol && (
+                           <td className="py-3 pr-4 whitespace-nowrap">
+diff --git a/frontend/components/ui/StampBadge.tsx b/frontend/components/ui/StampBadge.tsx
+index e9527d9..0c27274 100644
+--- a/frontend/components/ui/StampBadge.tsx
++++ b/frontend/components/ui/StampBadge.tsx
+@@ -7,6 +7,7 @@ const STATUS_MAP: Record<string, { label: string; className: string }> = {
+   cancelled: { label: "Cancelled", className: "stamp-terminated" },
+   active: { label: "Active", className: "stamp-active" },
+   terminated: { label: "Terminated", className: "stamp-terminated" },
++  settled: { label: "Settled", className: "stamp-terminated" },
+   expired: { label: "Expired", className: "stamp-terminated" },
+   vacant: { label: "Vacant", className: "stamp-pending" },
+   occupied: { label: "Occupied", className: "stamp-active" },
