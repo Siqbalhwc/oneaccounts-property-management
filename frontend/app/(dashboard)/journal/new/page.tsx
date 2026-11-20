@@ -122,8 +122,10 @@ export default function NewJournalEntryPage() {
     const room = rooms.find((r) => r.id === roomId);
     const building = room ? buildings.find((b) => b.id === room.building_id) : null;
     const resolvedOwner = room?.owner_id || building?.owner_id || "";
+    // Owner living in this room: his own tenant record is the one for THIS room.
+    const ownerTenant = roomId ? tenants.find((t) => t.owner_room_id === roomId) : undefined;
     setLines((prev) =>
-      prev.map((l, i) => (i === index ? { ...l, room_id: roomId, owner_id: resolvedOwner || l.owner_id, tenant_id: l.tenant_id || (tenants.find((t) => t.owner_room_id === roomId)?.id ?? "") } : l))
+      prev.map((l, i) => (i === index ? { ...l, room_id: roomId, owner_id: ownerTenant?.owner_id || resolvedOwner || l.owner_id, tenant_id: ownerTenant ? ownerTenant.id : l.tenant_id } : l))
     );
   }
 

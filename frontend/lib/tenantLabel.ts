@@ -11,5 +11,7 @@ export function tenantLabel(t: TenantLike, rooms: RoomLike[], buildings: Buildin
   const room = t.owner_room_id ? rooms.find((r) => r.id === t.owner_room_id) : undefined;
   if (!room) return `${t.full_name} (owner)`;
   const building = buildings.find((b) => b.id === room.building_id);
-  return `${t.full_name} (owner) — ${building ? building.name + " / " : ""}${room.room_number}`;
+  // Building and room FIRST: dropdown boxes cut long text off at the right,
+  // and the room is the part that tells look-alike owner records apart.
+  return `${building ? building.name + " / " : ""}${room.room_number} · ${t.full_name} (owner)`;
 }
