@@ -259,36 +259,32 @@ def list_expiring_leases(
     cutoff = through or _month_end(
         date(today.year + 1, 1, 1) if today.month == 12 else date(today.year, today.month + 1, 1)
     )
-    q = supabase.table("leases").select("*").eq("status", "active").lte("end_date", str(cutoff))
-    if lease_id:
-        q = q.eq("id", lease_id)  # single-lease lookup used by the Renew button
-    leases = q.order("end_date").execute().data
+    def leases_query():
+        q = supabase.table("leases").select("*").eq("status", "active").lte("end_date", str(cutoff))
+        if lease_id:
+            q = q.eq("id", lease_id)  # single-lease lookup used by the Renew button
+        return q.order("end_date").order("id")
+
+    leases = fetch_all(leases_query)
     if not leases:
         return []
 
     lease_ids = [l["id"] for l in leases]
     tenants = {
         t["id"]: t
-        for t in supabase.table("tenants").select("id, full_name, phone")
-        .in_("id", list({l["tenant_id"] for l in leases})).execute().data
+        for t in fetch_in(supabase, "tenants", "id, full_name, phone", "id", list({l["tenant_id"] for l in leases}))
     }
     rooms = {
         r["id"]: r
-        for r in supabase.table("rooms").select("id, room_number, building_id")
-        .in_("id", list({l["room_id"] for l in leases})).execute().data
+        for r in fetch_in(supabase, "rooms", "id, room_number, building_id", "id", list({l["room_id"] for l in leases}))
     }
     buildings = {
         b["id"]: b
-        for b in supabase.table("buildings").select("id, name")
-        .in_("id", list({r["building_id"] for r in rooms.values()})).execute().data
+        for b in fetch_in(supabase, "buildings", "id, name", "id", list({r["building_id"] for r in rooms.values()}))
     } if rooms else {}
-    charges = (
-        supabase.table("lease_charges")
-        .select("id, lease_id, label, amount, recurrence, show_on_invoice")
-        .in_("lease_id", lease_ids)
-        .is_("effective_to", "null")
-        .execute()
-        .data
+    charges = fetch_in(
+        supabase, "lease_charges", "id, lease_id, label, amount, recurrence, show_on_invoice", "lease_id", lease_ids,
+        lambda q: q.is_("effective_to", "null"),
     )
     charges_by_lease: Dict[str, list] = {}
     for c in charges:
@@ -1010,21 +1006,22 @@ def reverse_leases_bulk(
     if payload.lease_ids:
         if len(payload.lease_ids) > MAX_LEASES_PER_REVERSAL_CALL and not payload.dry_run:
             raise HTTPException(status_code=400, detail=f"Send at most {MAX_LEASES_PER_REVERSAL_CALL} leases per call.")
-        leases = (
-            supabase.table("leases").select("id, room_id, start_date, status, termination_reason")
-            .eq("company_id", company_id).in_("id", payload.lease_ids).execute().data
+        leases = fetch_in(
+            supabase, "leases", "id, room_id, start_date, status, termination_reason", "id", payload.lease_ids,
+            lambda q: q.eq("company_id", company_id),
         )
     elif payload.building_id:
         room_ids = [
             r["id"] for r in
-            supabase.table("rooms").select("id").eq("company_id", company_id).eq("building_id", payload.building_id).execute().data
-        ]
-        leases = []
-        for i in range(0, len(room_ids), 80):
-            leases.extend(
-                supabase.table("leases").select("id, room_id, start_date, status, termination_reason")
-                .eq("company_id", company_id).in_("room_id", room_ids[i:i + 80]).execute().data
+            fetch_all(
+                lambda: supabase.table("rooms").select("id").eq("company_id", company_id)
+                .eq("building_id", payload.building_id).order("id")
             )
+        ]
+        leases = fetch_in(
+            supabase, "leases", "id, room_id, start_date, status, termination_reason", "room_id", room_ids,
+            lambda q: q.eq("company_id", company_id),
+        )
     else:
         raise HTTPException(status_code=400, detail="Send either building_id (preview) or lease_ids.")
 

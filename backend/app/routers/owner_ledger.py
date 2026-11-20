@@ -1,3 +1,4 @@
+import logging
 from datetime import date
 from typing import List, Optional
 
@@ -6,6 +7,7 @@ from pydantic import BaseModel
 from supabase import Client
 
 from app.core.deps import get_current_company_id, get_supabase
+from app.core.paging import fetch_all, fetch_in
 from app.services.ledger import get_account_id, post_journal_entry, reverse_journal_entry
 from app.services.owner_settlement import EPS, load_owner_settlement
 
@@ -24,7 +26,7 @@ class PayRequest(BaseModel):
 
 @router.get("")
 def list_ledger(supabase: Client = Depends(get_supabase)):
-    return supabase.table("owner_ledger").select("*").order("ledger_month", desc=True).execute().data
+    return fetch_all(lambda: supabase.table("owner_ledger").select("*").order("ledger_month", desc=True).order("id"))
 
 
 @router.get("/balances")
@@ -61,13 +63,24 @@ def owner_balances(
     if not account_ids:
         return []
 
-    lines = (
-        supabase.table("journal_lines")
+    # The totals are added up inside the database (one row per owner), so the
+    # answer stays exact and fast however many years of lines there are.
+    try:
+        summary = supabase.rpc("owner_balances_summary", {}).execute().data or []
+        return [
+            {"owner_id": r["owner_id"], "balance": round(float(r["balance"]), 2)}
+            for r in summary
+            if round(float(r["balance"] or 0), 2) != 0
+        ]
+    except Exception:
+        logging.getLogger("app.owner_ledger").exception("owner_balances_summary unavailable; adding up line by line")
+
+    lines = fetch_all(
+        lambda: supabase.table("journal_lines")
         .select("owner_id, direction, amount")
         .in_("account_id", account_ids)
         .not_.is_("owner_id", "null")
-        .execute()
-        .data
+        .order("id")
     )
     balances: dict[str, float] = {}
     for l in lines:
@@ -110,39 +123,26 @@ def owner_balance_breakdown(
     if not account_ids:
         return {"lines": [], "balance": 0.0}
 
-    lines = (
-        supabase.table("journal_lines")
+    lines = fetch_all(
+        lambda: supabase.table("journal_lines")
         .select("journal_entry_id, account_id, direction, amount, building_id, room_id")
         .in_("account_id", account_ids)
         .eq("owner_id", owner_id)
-        .execute()
-        .data
+        .order("id")
     )
     if not lines:
         return {"lines": [], "balance": 0.0}
 
     entry_ids = list({l["journal_entry_id"] for l in lines})
-    entries = (
-        supabase.table("journal_entries")
-        .select("id, entry_date, description, source_type")
-        .in_("id", entry_ids)
-        .execute()
-        .data
-    )
+    entries = fetch_in(supabase, "journal_entries", "id, entry_date, description, source_type", "id", entry_ids)
     entry_by_id = {e["id"]: e for e in entries}
 
     building_ids = list({l["building_id"] for l in lines if l.get("building_id")})
-    buildings = (
-        supabase.table("buildings").select("id, name").in_("id", building_ids).execute().data
-        if building_ids else []
-    )
+    buildings = fetch_in(supabase, "buildings", "id, name", "id", building_ids) if building_ids else []
     building_name_by_id = {b["id"]: b["name"] for b in buildings}
 
     room_ids = list({l["room_id"] for l in lines if l.get("room_id")})
-    rooms = (
-        supabase.table("rooms").select("id, room_number").in_("id", room_ids).execute().data
-        if room_ids else []
-    )
+    rooms = fetch_in(supabase, "rooms", "id, room_number", "id", room_ids) if room_ids else []
     room_number_by_id = {r["id"]: r["room_number"] for r in rooms}
 
     rows = []
@@ -467,33 +467,18 @@ def compute_ledger(
 
     room_ids = [
         r["id"]
-        for r in supabase.table("rooms")
-        .select("id")
-        .eq("building_id", payload.building_id)
-        .execute()
-        .data
+        for r in fetch_all(lambda: supabase.table("rooms").select("id").eq("building_id", payload.building_id).order("id"))
     ]
-    lease_ids = [
-        l["id"]
-        for l in supabase.table("leases")
-        .select("id")
-        .in_("room_id", room_ids)
-        .execute()
-        .data
-    ] if room_ids else []
+    lease_ids = [l["id"] for l in fetch_in(supabase, "leases", "id", "room_id", room_ids)] if room_ids else []
 
     # --- Rent collected, split by owner, via the actual ledger -------------
     collected_by_owner: dict[str, float] = {}
     if lease_ids:
-        paid_invoices = (
-            supabase.table("invoices")
-            .select("id")
-            .in_("lease_id", lease_ids)
-            .gte("invoice_month", str(ledger_month))
+        paid_invoices = fetch_in(
+            supabase, "invoices", "id", "lease_id", lease_ids,
+            lambda q: q.gte("invoice_month", str(ledger_month))
             .lt("invoice_month", str(next_month))
-            .in_("status", ["paid", "partial"])
-            .execute()
-            .data
+            .in_("status", ["paid", "partial"]),
         )
         invoice_ids = [i["id"] for i in paid_invoices]
 
@@ -504,23 +489,15 @@ def compute_ledger(
             # ARE the owner's payable ledger now, so this query just reads
             # straight off it rather than an income account.
             owner_liability_account_id = get_account_id(supabase, company_id, "2200")
-            entries = (
-                supabase.table("journal_entries")
-                .select("id")
-                .eq("source_type", "invoice")
-                .in_("source_id", invoice_ids)
-                .execute()
-                .data
+            entries = fetch_in(
+                supabase, "journal_entries", "id", "source_id", invoice_ids,
+                lambda q: q.eq("source_type", "invoice"),
             )
             entry_ids = [e["id"] for e in entries]
             if entry_ids:
-                rent_lines = (
-                    supabase.table("journal_lines")
-                    .select("amount, owner_id")
-                    .in_("journal_entry_id", entry_ids)
-                    .eq("account_id", owner_liability_account_id)
-                    .execute()
-                    .data
+                rent_lines = fetch_in(
+                    supabase, "journal_lines", "amount, owner_id", "journal_entry_id", entry_ids,
+                    lambda q: q.eq("account_id", owner_liability_account_id),
                 )
                 for line in rent_lines:
                     if line.get("owner_id"):

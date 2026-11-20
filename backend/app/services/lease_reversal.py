@@ -47,12 +47,21 @@ def _chunks(items: List[str], n: int = _CHUNK) -> Iterable[List[str]]:
 def _fetch_in(supabase: Client, table: str, columns: str, column: str, ids: List[str], company_id: Optional[str] = None, extra=None) -> List[dict]:
     rows: List[dict] = []
     for part in _chunks(ids):
-        q = supabase.table(table).select(columns).in_(column, part)
-        if company_id:
-            q = q.eq("company_id", company_id)
-        if extra:
-            q = extra(q)
-        rows.extend(q.execute().data or [])
+        # Read each group page by page: 80 leases can own well over 1,000
+        # invoices once a few years of history exist, and one response stops
+        # silently at 1,000 rows.
+        start = 0
+        while True:
+            q = supabase.table(table).select(columns).in_(column, part)
+            if company_id:
+                q = q.eq("company_id", company_id)
+            if extra:
+                q = extra(q)
+            page = q.order("id").range(start, start + 999).execute().data or []
+            rows.extend(page)
+            if len(page) < 1000:
+                break
+            start += 1000
     return rows
 
 
