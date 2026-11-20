@@ -8,6 +8,7 @@ from supabase import Client
 from app.core.labels import unit_from_company
 from app.core.config import settings
 from app.core.deps import get_current_company_id, get_service_client, get_supabase
+from app.core.paging import fetch_all, fetch_in
 from app.services.invoice_batch import count_invoice_numbers, generate_batch, plan_generation
 from app.services.invoicing import compute_prorated_charges, current_charges_with_earliest_start, post_invoice_journal
 from app.services.phone import normalize_to_whatsapp
@@ -47,16 +48,19 @@ def list_invoices(
     company's entire invoice history every load. lease_id was added for the
     Receive Payment page, which needs one lease's invoices only.
     """
-    query = supabase.table("invoices").select("*")
-    if date_from:
-        query = query.gte("invoice_month", str(date_from))
-    if date_to:
-        query = query.lte("invoice_month", str(date_to))
-    if exclude_paid:
-        query = query.not_.in_("status", ["paid", "cancelled"])
-    if lease_id:
-        query = query.eq("lease_id", lease_id)
-    return query.order("created_at", desc=True).execute().data
+    def build():
+        query = supabase.table("invoices").select("*")
+        if date_from:
+            query = query.gte("invoice_month", str(date_from))
+        if date_to:
+            query = query.lte("invoice_month", str(date_to))
+        if exclude_paid:
+            query = query.not_.in_("status", ["paid", "cancelled"])
+        if lease_id:
+            query = query.eq("lease_id", lease_id)
+        return query.order("created_at", desc=True).order("id")
+
+    return fetch_all(build)
 
 
 @router.get("/{invoice_id}")

@@ -7,6 +7,7 @@ from supabase import Client
 
 from app.core.labels import get_unit
 from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
+from app.core.paging import fetch_all, fetch_in
 from app.crud.generic import write_audit_log
 from app.services.ledger import get_account_id, get_tenant_account_balance_as_of, post_journal_entry, resolve_room_owner
 from app.services.invoicing import resync_current_month_invoice
@@ -158,8 +159,7 @@ def list_leases(
     multi-table pattern that couldn't be verified without a live query.
     """
     if limit is None and status is None and tenant_id is None and ids is None and recent is None and not search:
-        res = supabase.table("leases").select("*").order("created_at", desc=True).execute()
-        return res.data
+        return fetch_all(lambda: supabase.table("leases").select("*").order("created_at", desc=True).order("id"))
 
     def apply_simple_filters(q):
         if status:

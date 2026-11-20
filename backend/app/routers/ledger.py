@@ -6,6 +6,7 @@ from pydantic import BaseModel, field_validator
 from supabase import Client
 
 from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
+from app.core.paging import fetch_all, fetch_in
 from app.crud.generic import write_audit_log
 from app.services.ledger import JournalLine, UnbalancedJournalEntry, post_journal_entry
 from app.services.room_search import resolve_property_term
@@ -36,13 +37,7 @@ def get_ledger_entries(
     entry_ids = [e["id"] for e in entries]
     lines = []
     if entry_ids:
-        lines = (
-            supabase.table("journal_lines")
-            .select("*")
-            .in_("journal_entry_id", entry_ids)
-            .execute()
-            .data
-        )
+        lines = fetch_in(supabase, "journal_lines", "*", "journal_entry_id", entry_ids)
     return {"entries": entries, "lines": lines}
 
 
@@ -160,26 +155,22 @@ def list_manual_journal_entries(
     deliberately its own small list rather than reusing /financials/journal,
     which is one row per LINE across every source type.
     """
-    entries = (
-        supabase.table("journal_entries")
+    entries = fetch_all(
+        lambda: supabase.table("journal_entries")
         .select("*")
         .eq("company_id", company_id)
         .eq("source_type", "manual_adjustment")
         .order("entry_date", desc=True)
         .order("created_at", desc=True)
-        .execute()
-        .data
+        .order("id")
     )
     if not entries:
         return []
 
     entry_ids = [e["id"] for e in entries]
-    lines = (
-        supabase.table("journal_lines")
-        .select("journal_entry_id, direction, amount, account_id, room_id, building_id")
-        .in_("journal_entry_id", entry_ids)
-        .execute()
-        .data
+    lines = fetch_in(
+        supabase, "journal_lines", "journal_entry_id, direction, amount, account_id, room_id, building_id",
+        "journal_entry_id", entry_ids,
     )
     if property_search and property_search.strip():
         # Room / building search (additive): keep only entries having at least

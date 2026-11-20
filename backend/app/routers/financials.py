@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase import Client
 
 from app.core.deps import get_current_company_id, get_supabase
+from app.core.paging import fetch_all, fetch_in
 from app.services.invoice_batch import IN_CHUNK, chunked
 from app.services.ledger import get_account_id
 from app.services.ledger_summary import build_summary
@@ -312,19 +313,20 @@ def get_general_ledger(
     closing balance is the account's true balance rather than just the
     period's movement. If the opening-balance function isn't available yet,
     the ledger is returned exactly as before."""
-    result = supabase.rpc(
-        "general_ledger",
-        {
-            "p_account_id": account_id,
-            "p_date_from": str(date_from) if date_from else None,
-            "p_date_to": str(date_to) if date_to else None,
-            "p_owner_id": owner_id,
-            "p_tenant_id": tenant_id,
-            "p_building_id": building_id,
-            "p_room_id": room_id,
-        },
-    ).execute()
-    rows = result.data or []
+    rows = fetch_all(
+        lambda: supabase.rpc(
+            "general_ledger",
+            {
+                "p_account_id": account_id,
+                "p_date_from": str(date_from) if date_from else None,
+                "p_date_to": str(date_to) if date_to else None,
+                "p_owner_id": owner_id,
+                "p_tenant_id": tenant_id,
+                "p_building_id": building_id,
+                "p_room_id": room_id,
+            },
+        )
+    )
 
     if date_from:
         try:

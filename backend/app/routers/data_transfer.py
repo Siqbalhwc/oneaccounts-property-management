@@ -522,17 +522,17 @@ def export_workbook(
             else []
         )
         rooms = (
-            supabase.table("rooms").select("*").eq("company_id", company_id).eq("is_archived", False).execute().data
+            fetch_all(lambda: supabase.table("rooms").select("*").eq("company_id", company_id).eq("is_archived", False).order("id"))
             if ("rooms" in requested or "leases" in requested)
             else []
         )
         tenants = (
-            supabase.table("tenants").select("*").eq("company_id", company_id).eq("is_archived", False).execute().data
+            fetch_all(lambda: supabase.table("tenants").select("*").eq("company_id", company_id).eq("is_archived", False).order("id"))
             if ("tenants" in requested or "leases" in requested)
             else []
         )
         leases = (
-            supabase.table("leases").select("*").eq("company_id", company_id).execute().data
+            fetch_all(lambda: supabase.table("leases").select("*").eq("company_id", company_id).order("id"))
             if "leases" in requested
             else []
         )

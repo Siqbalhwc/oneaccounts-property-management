@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from supabase import Client
 
 from app.core.deps import get_current_company_id, get_current_user, get_service_client, get_supabase
+from app.core.paging import fetch_all, fetch_in
 from app.services.income_allocation import allocate_payment_to_line_items
 from app.services.ledger import (
     UnbalancedJournalEntry,
@@ -34,12 +35,15 @@ def list_payments(
     unaffected. Added so the Dashboard can request a recent window instead
     of the company's entire payment history every time it loads.
     """
-    query = supabase.table("payments").select("*")
-    if date_from:
-        query = query.gte("payment_date", str(date_from))
-    if date_to:
-        query = query.lte("payment_date", str(date_to))
-    return query.order("payment_date", desc=True).execute().data
+    def build():
+        query = supabase.table("payments").select("*")
+        if date_from:
+            query = query.gte("payment_date", str(date_from))
+        if date_to:
+            query = query.lte("payment_date", str(date_to))
+        return query.order("payment_date", desc=True).order("id")
+
+    return fetch_all(build)
 
 
 @router.post("", status_code=201)

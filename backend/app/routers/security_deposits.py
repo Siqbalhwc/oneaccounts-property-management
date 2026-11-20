@@ -7,6 +7,7 @@ from supabase import Client
 
 from app.core.labels import get_unit
 from app.core.deps import get_current_company_id, get_supabase
+from app.core.paging import fetch_all, fetch_in
 from app.services.ledger import get_account_id, post_journal_entry, resolve_room_owner
 
 router = APIRouter(prefix="/security-deposits", tags=["Security Deposits"])
@@ -46,13 +47,7 @@ def _with_paid_totals(supabase: Client, deposits: list) -> list:
     if not deposits:
         return deposits
     deposit_ids = [d["id"] for d in deposits]
-    payments = (
-        supabase.table("security_deposit_payments")
-        .select("security_deposit_id, amount")
-        .in_("security_deposit_id", deposit_ids)
-        .execute()
-        .data
-    )
+    payments = fetch_in(supabase, "security_deposit_payments", "security_deposit_id, amount", "security_deposit_id", deposit_ids)
     paid_by_deposit: dict = {}
     for p in payments:
         paid_by_deposit[p["security_deposit_id"]] = paid_by_deposit.get(p["security_deposit_id"], 0.0) + float(p["amount"])
@@ -65,7 +60,7 @@ def _with_paid_totals(supabase: Client, deposits: list) -> list:
 
 @router.get("")
 def list_deposits(supabase: Client = Depends(get_supabase)):
-    deposits = supabase.table("security_deposits").select("*").execute().data
+    deposits = fetch_all(lambda: supabase.table("security_deposits").select("*").order("id"))
     return _with_paid_totals(supabase, deposits)
 
 

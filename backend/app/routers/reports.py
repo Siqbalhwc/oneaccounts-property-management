@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase import Client
 
 from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
+from app.core.paging import chunked, fetch_in
 from app.services.income_allocation import allocate_payment_to_line_items, allocated_payment_ids
 from app.services.invoice_receipt_comparison import build_comparison
 from app.services.ledger import get_account_id, get_tenant_account_balance_as_of
@@ -22,6 +23,10 @@ from app.services.receipts_report import (
     drilldown_settlement_lines,
     drilldown_special,
 )
+
+# Each of these database functions returns one row per tenant, and one response
+# is capped at 1,000 rows -- so tenants are sent in groups well under that.
+RPC_TENANT_CHUNK = 400
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
@@ -104,20 +109,22 @@ def _batch_tenant_balances(
     if not tenant_ids:
         return {}
     try:
-        data = (
-            supabase.rpc(
-                "tenant_balances_as_of",
-                {
-                    "p_company_id": company_id,
-                    "p_account_id": account_id,
-                    "p_tenant_ids": tenant_ids,
-                    "p_as_of_date": as_of,
-                },
+        data = []
+        for group in chunked(list(tenant_ids), RPC_TENANT_CHUNK):
+            data.extend(
+                supabase.rpc(
+                    "tenant_balances_as_of",
+                    {
+                        "p_company_id": company_id,
+                        "p_account_id": account_id,
+                        "p_tenant_ids": group,
+                        "p_as_of_date": as_of,
+                    },
+                )
+                .execute()
+                .data
+                or []
             )
-            .execute()
-            .data
-            or []
-        )
         out = {tid: 0.0 for tid in tenant_ids}
         for r in data:
             out[r["tenant_id"]] = float(r["balance"] or 0)
@@ -144,21 +151,23 @@ def _batch_manual_entries(
     if not tenant_ids:
         return {}
     try:
-        data = (
-            supabase.rpc(
-                "tenant_manual_entries_in_period",
-                {
-                    "p_company_id": company_id,
-                    "p_account_id": account_id,
-                    "p_tenant_ids": tenant_ids,
-                    "p_date_from": str(date_from),
-                    "p_date_to": str(date_to),
-                },
+        data = []
+        for group in chunked(list(tenant_ids), RPC_TENANT_CHUNK):
+            data.extend(
+                supabase.rpc(
+                    "tenant_manual_entries_in_period",
+                    {
+                        "p_company_id": company_id,
+                        "p_account_id": account_id,
+                        "p_tenant_ids": group,
+                        "p_date_from": str(date_from),
+                        "p_date_to": str(date_to),
+                    },
+                )
+                .execute()
+                .data
+                or []
             )
-            .execute()
-            .data
-            or []
-        )
         return {r["tenant_id"]: float(r["net_amount"] or 0) for r in data}
     except Exception:
         logging.getLogger("app.reports").exception("tenant_manual_entries_in_period failed")
@@ -216,23 +225,20 @@ def room_wise_receivables(
     Performance: balances for every tenant come from one batched database
     call per figure (tenant_balances_as_of) instead of one call per room.
     """
-    rooms_query = supabase.table("rooms").select("id, room_number, building_id, status")
-    if building_id:
-        rooms_query = rooms_query.eq("building_id", building_id)
-    rooms = rooms_query.execute().data
+    def rooms_query():
+        q = supabase.table("rooms").select("id, room_number, building_id, status")
+        if building_id:
+            q = q.eq("building_id", building_id)
+        return q.order("id")
+
+    rooms = fetch_all(rooms_query)
     if not rooms:
         return []
 
     room_ids = [r["id"] for r in rooms]
-    buildings = {b["id"]: b["name"] for b in supabase.table("buildings").select("id, name").execute().data}
+    buildings = {b["id"]: b["name"] for b in fetch_all(lambda: supabase.table("buildings").select("id, name").order("id"))}
 
-    leases = (
-        supabase.table("leases")
-        .select("id, room_id, tenant_id, status, start_date")
-        .in_("room_id", room_ids)
-        .execute()
-        .data
-    )
+    leases = fetch_in(supabase, "leases", "id, room_id, tenant_id, status, start_date", "room_id", room_ids)
     leases_by_room: Dict[str, List[dict]] = {}
     for l in leases:
         leases_by_room.setdefault(l["room_id"], []).append(l)
@@ -241,7 +247,7 @@ def room_wise_receivables(
     tenants = (
         {
             t["id"]: t["full_name"]
-            for t in supabase.table("tenants").select("id, full_name").in_("id", tenant_ids).execute().data
+            for t in fetch_in(supabase, "tenants", "id, full_name", "id", tenant_ids)
         }
         if tenant_ids
         else {}
@@ -249,12 +255,10 @@ def room_wise_receivables(
 
     lease_ids = [l["id"] for l in leases]
     invoices = (
-        supabase.table("invoices")
-        .select("id, lease_id, invoice_month, due_date, total_amount, status")
-        .in_("lease_id", lease_ids)
-        .neq("status", "cancelled")
-        .execute()
-        .data
+        fetch_in(
+            supabase, "invoices", "id, lease_id, invoice_month, due_date, total_amount, status", "lease_id", lease_ids,
+            lambda q: q.neq("status", "cancelled"),
+        )
         if lease_ids
         else []
     )
@@ -264,11 +268,7 @@ def room_wise_receivables(
     invoice_ids = [i["id"] for i in invoices]
 
     payments = (
-        supabase.table("payments")
-        .select("id, invoice_id, amount, discount_amount, payment_date, payment_method")
-        .in_("invoice_id", invoice_ids)
-        .execute()
-        .data
+        fetch_in(supabase, "payments", "id, invoice_id, amount, discount_amount, payment_date, payment_method", "invoice_id", invoice_ids)
         if invoice_ids
         else []
     )
@@ -281,11 +281,7 @@ def room_wise_receivables(
     # been paid (amount_received on the deposit row is the AGREED amount,
     # not what's been collected -- see security_deposit_payments).
     security_deposits = (
-        supabase.table("security_deposits")
-        .select("id, lease_id, amount_received, status")
-        .in_("lease_id", lease_ids)
-        .execute()
-        .data
+        fetch_in(supabase, "security_deposits", "id, lease_id, amount_received, status", "lease_id", lease_ids)
         if lease_ids
         else []
     )
@@ -293,11 +289,7 @@ def room_wise_receivables(
     deposit_row_by_lease = {d["lease_id"]: d for d in security_deposits}
     deposit_ids = list(deposit_by_lease.values())
     deposit_payments = (
-        supabase.table("security_deposit_payments")
-        .select("security_deposit_id, amount")
-        .in_("security_deposit_id", deposit_ids)
-        .execute()
-        .data
+        fetch_in(supabase, "security_deposit_payments", "security_deposit_id, amount", "security_deposit_id", deposit_ids)
         if deposit_ids
         else []
     )
