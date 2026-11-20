@@ -9,6 +9,7 @@ import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { HistoryPanel } from "@/components/ui/HistoryPanel";
 import { api, Building, Tenant, Account } from "@/lib/api";
 import { useLabels } from "@/lib/labels";
+import { tenantLabel } from "@/lib/tenantLabel";
 
 // Same local-extension pattern as journal/new/page.tsx and owners/page.tsx.
 type BuildingWithOwner = Building & { owner_id?: string | null };
@@ -113,8 +114,8 @@ export default function EditJournalEntryPage() {
     [accounts]
   );
   const tenantOptions = useMemo(
-    () => [{ value: "", label: "—" }, ...tenants.map((t) => ({ value: t.id, label: t.full_name }))],
-    [tenants]
+    () => [{ value: "", label: "—" }, ...tenants.map((t) => ({ value: t.id, label: tenantLabel(t, rooms, buildings) }))],
+    [tenants, rooms, buildings]
   );
   const ownerOptions = useMemo(
     () => [{ value: "", label: "—" }, ...owners.map((o) => ({ value: o.id, label: o.name }))],
@@ -148,7 +149,7 @@ export default function EditJournalEntryPage() {
     const building = room ? buildings.find((b) => b.id === room.building_id) : null;
     const resolvedOwner = room?.owner_id || building?.owner_id || "";
     setLines((prev) =>
-      prev.map((l, i) => (i === index ? { ...l, room_id: roomId, owner_id: resolvedOwner || l.owner_id } : l))
+      prev.map((l, i) => (i === index ? { ...l, room_id: roomId, owner_id: resolvedOwner || l.owner_id, tenant_id: l.tenant_id || (tenants.find((t) => t.owner_room_id === roomId)?.id ?? "") } : l))
     );
   }
   function addLine() {

@@ -9,6 +9,7 @@ import { Field, Input, Select } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { PrintHeader } from "@/components/ui/PrintHeader";
 import { api, fetchPdfBlob, Building, Company } from "@/lib/api";
+import { tenantLabel } from "@/lib/tenantLabel";
 import { useLabels } from "@/lib/labels";
 import { firstOfMonthYmd, todayYmd } from "@/lib/dates";
 
@@ -253,7 +254,7 @@ function LedgerPageInner() {
               <option value="">All tenants</option>
               {tenants.map((t) => (
                 <option key={t.id} value={t.id}>
-                  {t.full_name}
+                  {tenantLabel(t, rooms ?? [], buildings ?? [])}
                 </option>
               ))}
             </Select>

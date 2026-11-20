@@ -196,7 +196,12 @@ export default function TenantsPage() {
               header: "Name",
               accessor: (t) => (
                 <span className={`font-medium ${t.is_archived ? "opacity-50" : ""}`}>
-                  {t.full_name} {t.owner_id && <span className="text-xs font-normal text-ink/50">(owner)</span>}{" "}
+                  {t.full_name}{" "}
+                  {t.owner_id && (
+                    <span className="text-xs font-normal text-ink/50">
+                      (owner{(() => { const r = rooms.find((x) => x.id === t.owner_room_id); const b = r ? buildings.find((x) => x.id === r.building_id) : null; return r ? ` — ${b ? b.name + " / " : ""}${r.room_number}` : ""; })()})
+                    </span>
+                  )}{" "}
                   {t.is_archived && <span className="text-xs font-normal">(archived)</span>}
                 </span>
               ),

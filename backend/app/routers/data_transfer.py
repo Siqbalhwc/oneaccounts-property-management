@@ -1304,7 +1304,7 @@ def import_journal(
     accounts = fetch_all(lambda: supabase.table("chart_of_accounts").select("id, code, name").eq("company_id", company_id).order("id"))
     buildings = fetch_all(lambda: supabase.table("buildings").select("id, name").eq("company_id", company_id).order("id"))
     rooms = fetch_all(lambda: supabase.table("rooms").select("id, room_number, building_id").eq("company_id", company_id).order("id"))
-    tenants = fetch_all(lambda: supabase.table("tenants").select("id, cnic, full_name, owner_id").eq("company_id", company_id).order("id"))
+    tenants = fetch_all(lambda: supabase.table("tenants").select("id, cnic, full_name, owner_id, owner_room_id").eq("company_id", company_id).order("id"))
     leases = fetch_all(lambda: supabase.table("leases").select("id, room_id, tenant_id").eq("company_id", company_id).eq("status", "active").order("id"))
     manual_entries = fetch_all(
         lambda: supabase.table("journal_entries").select("id, entry_date, description, status")
@@ -1317,6 +1317,9 @@ def import_journal(
     room_by_id = {r["id"]: r for r in rooms}
     tenant_by_cnic = {re.sub(r"\D", "", str(t.get("cnic") or "")): t for t in tenants if not t.get("owner_id")}
     tenant_by_id = {t["id"]: t for t in tenants}
+    # Owner-occupied rooms: each room has its own owner-linked tenant record
+    # (see services/owner_tenants.py). Looked up only, never created here.
+    owner_tenant_by_room = {t["owner_room_id"]: t for t in tenants if t.get("owner_room_id")}
     tenant_by_room: Dict[str, List[str]] = {}
     for l in leases:
         tenant_by_room.setdefault(l["room_id"], []).append(l["tenant_id"])
@@ -1405,8 +1408,18 @@ def import_journal(
                         raise ValueError(f'no room "{room_number}" in "{building_name}".')
                 if cnic_digits:
                     t = tenant_by_cnic.get(cnic_digits)
+                    if not t and room:
+                        # An owner living in his own room: his CNIC belongs to
+                        # that room's owner-tenant record.
+                        ot = owner_tenant_by_room.get(room["id"])
+                        if ot and re.sub(r"\D", "", str(ot.get("cnic") or "")) == cnic_digits:
+                            t = ot
                     if not t:
-                        raise ValueError(f"no tenant with CNIC {row.get('tenant_cnic')}.")
+                        raise ValueError(
+                            f"no tenant with CNIC {row.get('tenant_cnic')}"
+                            + ("" if room else " (if this is an owner living in his own room, give building_name and room_number too)")
+                            + "."
+                        )
                     tenant_id = t["id"]
                 elif room:
                     holders = tenant_by_room.get(room["id"], [])
@@ -1414,6 +1427,8 @@ def import_journal(
                         tenant_id = holders[0]
                     elif len(holders) > 1:
                         raise ValueError(f"room {room_number} has more than one active lease - give tenant_cnic.")
+                    elif owner_tenant_by_room.get(room["id"]):
+                        tenant_id = owner_tenant_by_room[room["id"]]["id"]
                 if code in ("1100", "2100"):
                     if not room:
                         raise ValueError(f"lines on {code} must name a building and room so the balance lands on the right tenant.")

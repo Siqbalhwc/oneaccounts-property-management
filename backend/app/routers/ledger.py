@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from supabase import Client
 
+from app.services.owner_tenants import apply_owner_tenant_rules
 from app.core.deps import get_current_company_id, get_current_user, get_supabase, require_owner_or_admin
 from app.core.paging import fetch_all, fetch_in
 from app.crud.generic import write_audit_log
@@ -110,6 +111,8 @@ def create_manual_journal_entry(
     missing = account_ids - found_ids
     if missing:
         raise HTTPException(status_code=400, detail="One or more selected accounts were not found.")
+
+    apply_owner_tenant_rules(supabase, company_id, payload.lines)
 
     journal_lines: list[JournalLine] = [
         {
@@ -305,6 +308,8 @@ def update_manual_journal_entry(
     missing = account_ids - found_ids
     if missing:
         raise HTTPException(status_code=400, detail="One or more selected accounts were not found.")
+
+    apply_owner_tenant_rules(supabase, company_id, payload.lines)
 
     total_debits = round(sum(l.amount for l in payload.lines if l.direction == "debit"), 2)
     total_credits = round(sum(l.amount for l in payload.lines if l.direction == "credit"), 2)
